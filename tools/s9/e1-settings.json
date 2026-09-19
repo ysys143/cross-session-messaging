@@ -1,0 +1,4 @@
+{"hooks":{
+ "PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"HOME=/tmp/xsm-spike/s9/home /bin/bash /tmp/xsm-spike/s9/pkg/node_modules/agent-comms/hooks/drain.sh","timeout":5}]}],
+ "Stop":[{"matcher":"*","hooks":[{"type":"command","command":"HOME=/tmp/xsm-spike/s9/home /bin/bash /tmp/xsm-spike/s9/pkg/node_modules/agent-comms/hooks/drain.sh","timeout":5}]}],
+ "UserPromptSubmit":[{"matcher":"*","hooks":[{"type":"command","command":"HOME=/tmp/xsm-spike/s9/home /bin/bash /tmp/xsm-spike/s9/pkg/node_modules/agent-comms/hooks/drain.sh","timeout":5,"asyncRewake":true}]}]}}

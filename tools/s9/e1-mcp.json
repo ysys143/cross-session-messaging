@@ -1,0 +1,1 @@
+{"mcpServers":{"agent-comms":{"command":"/Users/jaesolshin/.nvm/versions/node/v20.20.1/bin/node","args":["/tmp/xsm-spike/s9/pkg/node_modules/agent-comms/dist/cli.js","bridge","claude-code"],"env":{"HOME":"/tmp/xsm-spike/s9/home"}}}}
