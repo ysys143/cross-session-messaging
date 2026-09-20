@@ -200,5 +200,25 @@ class ForecastTest(TempState):
         self.assertEqual(send.native_forecast({"runtime": "claude"}, {"runtime": "codex"})[0], "n/a")
 
 
+class InterpreterPinTest(TempState):
+    """Hooks run under a pinned absolute interpreter, never a launcher."""
+
+    def test_absolute_path_is_taken_as_is(self):
+        from xsm import install
+        self.assertEqual(install.resolve_python(sys.executable), os.path.realpath(sys.executable))
+
+    def test_unknown_spec_is_refused(self):
+        from xsm import install
+        with self.assertRaises(ValueError):
+            install.resolve_python("definitely-not-a-python-9.9")
+
+    def test_pin_is_recorded_and_used_in_the_hook_command(self):
+        from xsm import install
+        install.pin_python(sys.executable)
+        self.assertEqual(install.pinned_python(), sys.executable)
+        self.assertIn(sys.executable, install.hook_command("claude", "SessionStart"))
+        self.assertTrue(install.hook_command("claude", "SessionStart").endswith(install.MARKER))
+
+
 if __name__ == "__main__":
     unittest.main()
