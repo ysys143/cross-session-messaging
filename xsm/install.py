@@ -42,6 +42,22 @@ def _settings_file(home: str, runtime: str) -> str:
     return os.path.join(home, "settings.json" if runtime == "claude" else "hooks.json")
 
 
+def _backup(target: str) -> str:
+    """Copy the file aside under a name nothing else will take.
+
+    Second resolution is not enough: an install followed by an uninstall in the
+    same second would overwrite the first copy, losing the pre-install state.
+    """
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = "%s.xsm-backup-%s" % (target, stamp)
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = "%s.xsm-backup-%s-%d" % (target, stamp, suffix)
+        suffix += 1
+    shutil.copy2(target, candidate)
+    return candidate
+
+
 def plan(home: str, runtime: str) -> dict:
     """What install would change. Used by --dry-run and by doctor."""
     home = os.path.realpath(os.path.expanduser(home))
@@ -71,10 +87,7 @@ def apply(home: str, runtime: str) -> dict:
         return result
     target, data = result["file"], (paths.read_json(result["file"]) or {})
     if os.path.exists(target):
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = "%s.xsm-backup-%s" % (target, stamp)
-        shutil.copy2(target, backup)
-        result["backup"] = backup
+        result["backup"] = _backup(target)
     hooks = data.setdefault("hooks", {})
     for action in result["actions"]:
         event = action["event"]
@@ -98,9 +111,7 @@ def remove(home: str, runtime: str) -> dict:
     data = paths.read_json(target)
     if data is None:
         return {"home": home, "file": target, "error": "nothing to remove or unreadable file"}
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = "%s.xsm-backup-%s" % (target, stamp)
-    shutil.copy2(target, backup)
+    backup = _backup(target)
     removed = 0
     hooks = data.get("hooks", {}) if isinstance(data.get("hooks"), dict) else {}
     for event in list(hooks):
