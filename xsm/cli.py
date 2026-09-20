@@ -34,6 +34,10 @@ def cmd_list(args) -> int:
     me = registry.me()
     rows = _rows(args)
     for row in rows:
+        row["inbound"] = registry.inbound_setting(row.get("home", "")) if \
+            row.get("runtime") == "claude" else None
+        row["native"] = send.native_forecast(me, row)[0] if me and row.get("ref") != me.get("ref") \
+            else "n/a"
         scope, reason = (None, "self") if me and row.get("ref") == me.get("ref") \
             else config.scope_for(me, row) if me else (None, "no registered session here")
         row["scope"] = scope
@@ -54,6 +58,8 @@ def cmd_list(args) -> int:
             flags.append("out-of-scope")
         if me and r.get("ref") == me.get("ref"):
             flags.append("you")
+        if row.get("native") == "hold":
+            flags.append("would be held")
         print("%-*s  [%s]  %-6s %-7s %-9s %s%s" % (
             width, addr, r.get("ref"), r.get("runtime"), r.get("state"),
             r.get("permission_mode") or "mode?", r.get("cwd") or "",

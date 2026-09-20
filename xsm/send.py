@@ -55,6 +55,10 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
     if not scope:
         return SendResult("refused", "out of scope: %s" % reason, target=target)
 
+    forecast, why = native_forecast(sender, target)
+    if forecast in ("refuse",):
+        return SendResult("refused", "the receiver would drop this: %s" % why, target=target)
+
     msg_id = envelope.new_id()
     content = envelope.build(body, msg_id=msg_id, sender=sender, scope=scope, kind=kind,
                              reply_to=reply_to)
@@ -86,4 +90,32 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
     if target.get("runtime") == "codex":
         note = ("queued; a Codex session picks the queue up within about 10 seconds when the "
                 "thread is loaded and idle, otherwise at the user's next input")
+    elif forecast == "hold":
+        note = "queued, but Claude will hold it for its user: %s" % why
+    elif forecast == "unknown":
+        note = "queued; %s, so the receiver's own gate may hold it" % why
     return SendResult("sent-unconfirmed", note, msg_id, target)
+
+
+def native_forecast(sender: dict, target: dict) -> tuple:
+    """What Claude's own gate will most likely do with this message.
+
+    Returns (verdict, explanation). Only meaningful for a Claude target: Codex
+    has no such gate. The order mirrors the receive decision measured in S1 —
+    an explicit setting wins, then permission-mode parity.
+    """
+    if target.get("runtime") != "claude":
+        return "n/a", ""
+    setting = registry.inbound_setting(target.get("home", ""))
+    if setting == "accept":
+        return "accept", "receiver's user settings say crossSessionInbound=accept"
+    if setting in ("hold", "refuse"):
+        return setting, "receiver's user settings say crossSessionInbound=%s" % setting
+    mine, theirs = registry.mode_class(sender), registry.mode_class(target)
+    if mine is None or theirs is None:
+        return "unknown", "one of the two permission modes is not known yet"
+    if mine == theirs:
+        return "accept", "both sessions run in %s mode" % theirs
+    return "hold", ("sender is %s and receiver is %s, so Claude holds the message for its "
+                    "user; set crossSessionInbound to \"accept\" on the receiver, or match "
+                    "the permission modes" % (mine, theirs))

@@ -171,3 +171,25 @@ def me(session_id: str | None = None, cwd: str | None = None):
     cwd = os.path.realpath(cwd or os.getcwd())
     live = [r for r in rows if r.get("cwd") == cwd and r.get("state") == "live"]
     return live[0] if len(live) == 1 else None
+
+
+def inbound_setting(home: str) -> str | None:
+    """The receiver's own crossSessionInbound, read from its user settings.
+
+    Claude decides an explicit setting before it compares permission modes, so
+    "accept" is what makes a cross-mode message arrive at all (S1). We can only
+    see the user-level file here: a session launched with --settings or with
+    project settings may differ, which is why callers treat this as a
+    prediction, not a verdict.
+    """
+    data = paths.read_json(os.path.join(home, "settings.json"), {}) or {}
+    value = data.get("crossSessionInbound")
+    return value if isinstance(value, str) else None
+
+
+def mode_class(record: dict) -> str | None:
+    """bypass | prompting | None(unknown). Claude compares classes, not modes."""
+    mode = record.get("permission_mode")
+    if not mode:
+        return None
+    return "bypass" if mode in ("bypassPermissions", "bypass") else "prompting"

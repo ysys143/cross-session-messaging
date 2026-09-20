@@ -162,5 +162,43 @@ class InstallTest(TempState):
         self.assertEqual(paths.read_json(target), original)
 
 
+
+class ForecastTest(TempState):
+    """The native gate Claude applies before our hook (S1): an explicit
+    setting wins, then permission-mode parity."""
+
+    def _home_with(self, value):
+        from xsm import paths
+        home = os.path.join(self.tmp, "home-%s" % (value or "none"))
+        os.makedirs(home, exist_ok=True)
+        if value:
+            paths.write_json(os.path.join(home, "settings.json"), {"crossSessionInbound": value})
+        return home
+
+    def test_accept_setting_beats_mode_mismatch(self):
+        from xsm import send
+        a = {"runtime": "claude", "permission_mode": "bypassPermissions"}
+        b = {"runtime": "claude", "permission_mode": "auto", "home": self._home_with("accept")}
+        self.assertEqual(send.native_forecast(a, b)[0], "accept")
+
+    def test_mode_mismatch_without_a_setting_is_held(self):
+        from xsm import send
+        a = {"runtime": "claude", "permission_mode": "bypassPermissions"}
+        b = {"runtime": "claude", "permission_mode": "auto", "home": self._home_with(None)}
+        verdict, why = send.native_forecast(a, b)
+        self.assertEqual(verdict, "hold")
+        self.assertIn("crossSessionInbound", why)
+
+    def test_matching_modes_pass(self):
+        from xsm import send
+        a = {"runtime": "claude", "permission_mode": "auto"}
+        b = {"runtime": "claude", "permission_mode": "auto", "home": self._home_with(None)}
+        self.assertEqual(send.native_forecast(a, b)[0], "accept")
+
+    def test_codex_target_has_no_such_gate(self):
+        from xsm import send
+        self.assertEqual(send.native_forecast({"runtime": "claude"}, {"runtime": "codex"})[0], "n/a")
+
+
 if __name__ == "__main__":
     unittest.main()
