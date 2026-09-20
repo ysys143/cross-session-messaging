@@ -1,0 +1,90 @@
+# xsm v0.1 — 세션 간 메시징
+
+서로 다른 프로필(`~/.claude`, `~/.claude-3`, …)과 런타임(Claude Code, Codex)의 세션이 서로를 찾고 메시지를 주고받게 한다. 상주 프로세스도, 서버도, 외부 연결도 없다. 훅이 포인터를 남기고, 일회성 CLI가 각 런타임의 네이티브 경로로 전달하며, 모든 상태는 `~/.xsm`의 파일이다.
+
+설계 근거는 `docs/adr/`의 결정 초안과 `docs/spikes/`의 실측이다. 이 문서는 쓰는 방법만 다룬다.
+
+## 설치
+
+```bash
+python3 -m xsm install --claude-home ~/.claude-3 --claude-home ~/.claude-4 --codex-home ~/.codex --dry-run
+python3 -m xsm install --claude-home ~/.claude-3 --claude-home ~/.claude-4 --codex-home ~/.codex
+python3 -m xsm doctor
+```
+
+- 설치는 **병합**이다. 우리가 넣는 훅 명령 끝에는 `#xsm-hook` 표식이 붙고, 설치·제거는 그 표식이 붙은 항목만 건드린다. Orca, cctrace, 사용자 훅은 그대로 남는다.
+- 매번 `<파일>.xsm-backup-<시각>` 백업을 남기고, 쓴 뒤 다시 파싱해 깨졌으면 백업으로 되돌린다.
+- 훅 명령에는 **설치 시점의 파이썬 절대 경로**가 박힌다. 훅이 뜨지 못하면 검문이 통째로 열리기 때문이다(S8-g2).
+- Codex는 첫 세션에서 훅 신뢰를 한 번 승인해야 한다. 승인 전에는 훅이 실행되지 않는다. 설치기는 안내만 하고 우회 옵션을 쓰지 않는다.
+
+제거:
+
+```bash
+python3 -m xsm uninstall --claude-home ~/.claude-3
+```
+
+## 쓰기
+
+```bash
+xsm list                          # 주소를 지정할 수 있는 세션
+xsm who                           # 지금 세션의 신원
+xsm send "reviewer@claude-4" --text "..." --wait 20
+xsm status <msg-id>
+xsm ledger
+xsm held list | xsm held show <id>
+xsm doctor | xsm selftest
+```
+
+주소는 `이름`, `이름@홈별칭`, `이름 [ref]`, `ref:xxxxxx`, `claude:<세션id>`, `codex:<스레드id>`다. 이름이 여러 세션과 맞으면 **거부하고 후보를 보여 준다**. 이름은 고유하지 않고, 조용한 오배송보다 오류가 낫기 때문이다(ADR-0008, S7).
+
+## 범위
+
+기본값은 **같은 저장소 자동 허용**이다. 두 세션의 작업 폴더가 같은 git 저장소 아래면 설정 없이 통신한다. git 저장소가 아니면 같은 폴더일 때만 허용한다.
+
+저장소를 넘어 통신하려면 `~/.xsm/config.json`에 적는다.
+
+```json
+{
+  "strict_peers": true,
+  "same_repo_scope": true,
+  "scopes": [
+    {"id": "review", "members": [
+      {"runtime": "claude", "home": "claude-4", "cwd": "~/work/app/**"},
+      {"runtime": "codex",  "home": "codex",    "cwd": "~/work/app/**"}
+    ]}
+  ]
+}
+```
+
+범위는 **보낼 때와 받을 때 두 번** 검사한다. 보낼 때 걸리면 메시지는 아예 나가지 않고, 받을 때 걸리면 본문을 보류 저장소에 남기고 차단한다.
+
+## 전달 판정
+
+- `xsm send`의 성공은 전달이 아니다. 발신은 원장에 `queued`로 남고, **수신 세션의 훅이 영수증을 쓸 때만** `delivered`가 된다.
+- 수신자가 꺼져 있으면 `sent-unconfirmed`로 끝난다. 이 상태를 전달로 읽지 않는다.
+- Codex는 진행 중인 턴에 끼어들지 않는다. 전달 시점은 현재 턴이 끝난 뒤이거나, 스레드가 유휴 상태면 약 10초 안이다.
+
+## 알려진 한계
+
+| 한계 | 내용 |
+|---|---|
+| 봉투 없는 입력 | xsm 봉투 없이 들어온 피어 메시지는 훅 입력에서 사람 입력과 구분되지 않아 검문을 통과한다(S8-g2). 모든 피어 메시지를 멈추려면 Claude 설정의 `crossSessionInbound`를 `"hold"`로 두어야 하는데, 그러면 정상적인 xsm 메시지도 함께 보류된다. |
+| 보안이 아니라 동의 기록 | 같은 사용자 권한으로 도는 에이전트는 `~/.xsm`과 설정 파일을 직접 고칠 수 있다(S8-c). 검문은 범위와 동의를 기록하는 장치다. |
+| 샌드박스 Codex | 샌드박스가 켜진 Codex는 셸에서 소켓과 큐 양쪽에 접근하지 못한다(S4). 발신은 샌드박스 밖 실행이나 신뢰된 훅 경로에서만 된다. |
+| 권한 모드가 다른 상대 | Claude는 발신자와 수신자의 권한 모드 부류가 다르면 **우리 훅보다 먼저** 네이티브로 보류한다(S1, S8-g). 예를 들어 bypass로 도는 Codex가 auto로 도는 Claude에 보내면 수신 화면에 보류 창이 뜨고, 발신 측 결과는 `sent-unconfirmed`로 남는다. 사람이 승인하거나, 수신 세션의 `crossSessionInbound`를 `"accept"`로 두어야 전달된다. |
+| 원격 | 이 버전은 로컬 전용이다. SSH 너머 전달은 ADR-0007을 결정한 뒤에 다룬다. |
+| 기록 채널 | 대화 기록·스레드 저장소는 아직 없다(ADR-0005, 0006). |
+
+## 상태 파일
+
+```
+~/.xsm/
+  config.json          범위와 표시 설정 (사용자가 편집)
+  homes.json           선언된 홈 목록. 훅 레코드의 홈과 합집합으로 쓴다
+  sessions/*.json      훅이 남긴 세션 포인터
+  ledger/*.json        보낸 기록과 수신 영수증
+  held/*.json          검문이 막은 메시지 본문
+  decisions.jsonl      훅 판정 감사 기록
+```
+
+`XSM_HOME`으로 위치를 옮길 수 있다. 홈 목록을 glob으로 추측하지 않으므로, 비표준 경로의 프로필은 `xsm homes add`로 선언하거나 그 홈에서 훅이 한 번 돌면 자동으로 등록된다.

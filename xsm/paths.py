@@ -1,0 +1,81 @@
+"""State locations and small file helpers.
+
+Everything xsm knows lives under XSM_HOME (default ~/.xsm), never inside a
+CONFIG_DIR: one registry has to be visible from every profile and repo
+(S1, S9 E3). Writes are atomic so a hook that dies mid-write cannot leave a
+half-written record behind.
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import time
+
+HOME = os.path.expanduser(os.environ.get("XSM_HOME", "~/.xsm"))
+
+SESSIONS = "sessions"
+HELD = "held"
+LEDGER = "ledger"
+
+
+def path(*parts: str) -> str:
+    return os.path.join(HOME, *parts)
+
+
+def ensure_home() -> None:
+    for sub in ("", SESSIONS, HELD, LEDGER):
+        os.makedirs(path(sub), mode=0o700, exist_ok=True)
+
+
+def read_json(p: str, default=None):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(p: str, data, mode: int = 0o600) -> None:
+    os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".xsm-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=1)
+        os.chmod(tmp, mode)
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def append_jsonl(name: str, entry: dict) -> None:
+    """Append one audit line. Never raises: audit must not break a hook."""
+    entry = dict(entry)
+    entry.setdefault("t", time.time())
+    try:
+        ensure_home()
+        with open(path(name), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def read_jsonl(name: str, limit: int | None = None) -> list:
+    try:
+        with open(path(name), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    if limit is not None:
+        lines = lines[-limit:]
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Thin launcher. `xsm install` pins an absolute interpreter into the hooks;
+# this script only needs to find the package next to itself.
+here=$(cd "$(dirname "$0")/.." && pwd)
+exec "${XSM_PYTHON:-python3}" -c "import sys; sys.path.insert(0, '$here'); from xsm.cli import main; sys.exit(main())" "$@"
