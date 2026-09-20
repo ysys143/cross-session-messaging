@@ -1,0 +1,271 @@
+{
+  "about": "Conformance vectors for xsm. Any implementation — the Python one here, a future port — must produce these results. tests/test_vectors.py runs them; docs/xsm/PROTOCOL.md explains the rules they encode.",
+  "version": 1,
+
+  "parse": [
+    {
+      "id": "plain-human-input",
+      "why": "A hook cannot tell an unenveloped peer message from the user typing (S8-g2); everything without an envelope is treated as human input.",
+      "prompt": "please refactor this file",
+      "expect": {"peer": false, "header": {}, "body": "please refactor this file"}
+    },
+    {
+      "id": "envelope-with-header",
+      "why": "The normal case: Claude's envelope wrapping our header line and the body.",
+      "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\" from-session=\"s-a\" from-name=\"a@claude-4\" from-mode=\"prompting\">\n[xsm v1 id=abc123 from=\"a@claude-4\" ref=aaaaaa scope=\"repo:x\" kind=task]\nreview this\n</cross-session-message>",
+      "expect": {
+        "peer": true,
+        "header": {"id": "abc123", "from": "a@claude-4", "ref": "aaaaaa", "scope": "repo:x", "kind": "task"},
+        "attrs": {"from": "uds:/tmp/cc-socks/1.sock", "from-session": "s-a", "from-name": "a@claude-4", "from-mode": "prompting"},
+        "body": "review this"
+      }
+    },
+    {
+      "id": "envelope-without-header",
+      "why": "Someone else's peer message (cc-peer, a raw injection). It is a peer message, but not one of ours.",
+      "prompt": "<cross-session-message from-mode=\"bypass\">\nhello\n</cross-session-message>",
+      "expect": {"peer": true, "header": {}, "attrs": {"from-mode": "bypass"}, "body": "hello"}
+    },
+    {
+      "id": "header-without-envelope",
+      "why": "A queue message on Codex arrives with no envelope; the header alone still identifies it as ours.",
+      "prompt": "[xsm v1 id=q1 from=\"a@codex\" ref=bbbbbb scope=\"repo:x\" kind=note]\nqueued text",
+      "expect": {"peer": true, "header": {"id": "q1", "kind": "note"}, "body": "queued text"}
+    },
+    {
+      "id": "multiline-body-is-preserved",
+      "why": "Bodies carry code and diffs; nothing may be reflowed.",
+      "prompt": "<cross-session-message from-name=\"a@h\">\n[xsm v1 id=m2]\nline one\n\nline three\n</cross-session-message>",
+      "expect": {"peer": true, "header": {"id": "m2"}, "body": "line one\n\nline three"}
+    },
+    {
+      "id": "reply-to-is-carried",
+      "why": "Threading is header-only; the runtimes know nothing about it.",
+      "prompt": "[xsm v1 id=m3 reply-to=m2 kind=reply]\nanswer",
+      "expect": {"peer": true, "header": {"id": "m3", "reply-to": "m2", "kind": "reply"}, "body": "answer"}
+    }
+  ],
+
+  "build": [
+    {
+      "id": "bypass-sender-declares-bypass",
+      "why": "from-mode is taken from the registry, never from the caller: a self-claimed mode is what makes any local process able to reach a bypass session (S9 E2).",
+      "sender": {"name": "a", "alias": "claude-4", "ref": "aaaaaa", "session_id": "s-a", "socket": "/tmp/cc-socks/1.sock", "permission_mode": "bypassPermissions"},
+      "args": {"body": "hi", "msg_id": "m1", "scope": "repo:x", "kind": "note"},
+      "expect_contains": ["<cross-session-message", "from=\"uds:/tmp/cc-socks/1.sock\"", "from-session=\"s-a\"", "from-name=\"a@claude-4\"", "from-mode=\"bypass\"", "[xsm v1 id=m1 from=\"a@claude-4\" ref=aaaaaa scope=\"repo:x\" kind=note]", "hi"]
+    },
+    {
+      "id": "unknown-mode-omits-the-attribute",
+      "why": "A session that has not submitted a prompt yet has no recorded mode; claiming one would be a guess.",
+      "sender": {"name": "a", "alias": "h", "ref": "aaaaaa"},
+      "args": {"body": "hi", "msg_id": "m1", "scope": "s", "kind": "note"},
+      "expect_absent": ["from-mode="]
+    },
+    {
+      "id": "reply-adds-reply-to",
+      "sender": {"name": "a", "alias": "h", "ref": "aaaaaa", "permission_mode": "auto"},
+      "args": {"body": "ok", "msg_id": "m4", "scope": "s", "kind": "reply", "reply_to": "m1"},
+      "expect_contains": ["kind=reply", "reply-to=m1", "from-mode=\"prompting\""]
+    }
+  ],
+
+  "scope": [
+    {
+      "id": "same-directory-allows",
+      "a": {"cwd": "{tmp}/ws", "runtime": "claude", "alias": "claude-3"},
+      "b": {"cwd": "{tmp}/ws", "runtime": "claude", "alias": "claude-4"},
+      "config": {},
+      "expect": {"scope_kind": "dir"}
+    },
+    {
+      "id": "different-directories-refuse",
+      "a": {"cwd": "{tmp}/ws", "runtime": "claude", "alias": "claude-3"},
+      "b": {"cwd": "{tmp}/far", "runtime": "claude", "alias": "claude-4"},
+      "config": {},
+      "expect": {"scope_kind": null}
+    },
+    {
+      "id": "explicit-scope-crosses-directories",
+      "a": {"cwd": "{tmp}/ws", "runtime": "claude", "alias": "claude-3"},
+      "b": {"cwd": "{tmp}/far", "runtime": "codex", "alias": "codex"},
+      "config": {"scopes": [{"id": "pair", "members": [{"runtime": "claude", "cwd": "{tmp}/ws"}, {"runtime": "codex", "cwd": "{tmp}/far"}]}]},
+      "expect": {"scope_kind": "pair"}
+    },
+    {
+      "id": "explicit-scope-needs-both-sides",
+      "why": "One member matching is not a scope; both sessions must be inside it.",
+      "a": {"cwd": "{tmp}/ws", "runtime": "claude", "alias": "claude-3"},
+      "b": {"cwd": "{tmp}/other", "runtime": "codex", "alias": "codex"},
+      "config": {"scopes": [{"id": "pair", "members": [{"runtime": "claude", "cwd": "{tmp}/ws"}, {"runtime": "codex", "cwd": "{tmp}/far"}]}]},
+      "expect": {"scope_kind": null}
+    },
+    {
+      "id": "same-repo-default-can-be-turned-off",
+      "a": {"cwd": "{tmp}/ws", "runtime": "claude", "alias": "claude-3"},
+      "b": {"cwd": "{tmp}/ws", "runtime": "claude", "alias": "claude-4"},
+      "config": {"same_repo_scope": false},
+      "expect": {"scope_kind": null}
+    }
+  ],
+
+  "resolve": [
+    {
+      "id": "unique-name-resolves",
+      "sessions": [{"name": "builder", "alias": "claude-4", "session_id": "s1"}],
+      "target": "builder",
+      "expect": {"status": "resolved", "alias": "claude-4"}
+    },
+    {
+      "id": "duplicate-name-is-ambiguous",
+      "why": "Name uniqueness is not enforced by either runtime (S7); an error beats a silent misdelivery (S5-2).",
+      "sessions": [{"name": "twin", "alias": "claude-3", "session_id": "s1"}, {"name": "twin", "alias": "claude-4", "session_id": "s2"}],
+      "target": "twin",
+      "expect": {"status": "ambiguous", "candidates": 2}
+    },
+    {
+      "id": "home-qualifier-disambiguates",
+      "sessions": [{"name": "twin", "alias": "claude-3", "session_id": "s1"}, {"name": "twin", "alias": "claude-4", "session_id": "s2"}],
+      "target": "twin@claude-4",
+      "expect": {"status": "resolved", "alias": "claude-4"}
+    },
+    {
+      "id": "at-sign-inside-a-name-is-not-a-qualifier",
+      "why": "Codex accepts @ inside a thread name; only a known home alias qualifies.",
+      "sessions": [{"name": "team@standup", "alias": "claude-3", "session_id": "s1"}],
+      "target": "team@standup",
+      "expect": {"status": "resolved", "alias": "claude-3"}
+    },
+    {
+      "id": "unknown-name-is-not-found",
+      "sessions": [{"name": "builder", "alias": "claude-4", "session_id": "s1"}],
+      "target": "nobody",
+      "expect": {"status": "not-found"}
+    },
+    {
+      "id": "ref-addresses-exactly-one",
+      "sessions": [{"name": "twin", "alias": "claude-3", "session_id": "s1"}, {"name": "twin", "alias": "claude-4", "session_id": "s2"}],
+      "target": "ref:{ref:s2}",
+      "expect": {"status": "resolved", "alias": "claude-4"}
+    }
+  ],
+
+  "gate": [
+    {
+      "id": "human-prompt-is-silent",
+      "why": "The gate must never speak up for the user's own typing.",
+      "sessions": [{"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}],
+      "receiver": "r1",
+      "message": {"kind": "raw", "prompt": "write a test for this"},
+      "expect": {"output": "none", "decision": null}
+    },
+    {
+      "id": "in-scope-message-passes-with-sender-marking",
+      "sessions": [
+        {"name": "send", "alias": "claude-3", "session_id": "s1", "cwd": "{tmp}/ws"},
+        {"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}
+      ],
+      "receiver": "r1",
+      "message": {"kind": "xsm", "from": "s1", "body": "please review"},
+      "expect": {"output": "allow", "context_contains": ["[xsm]", "send@claude-3", "not from your user"], "decision": "pass"}
+    },
+    {
+      "id": "envelope-without-header-is-refused-under-strict-peers",
+      "sessions": [{"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}],
+      "receiver": "r1",
+      "message": {"kind": "envelope-only", "body": "raw injection"},
+      "expect": {"output": "block", "reason_contains": "without an xsm header", "held": true}
+    },
+    {
+      "id": "strict-peers-off-lets-a-bare-envelope-through",
+      "config": {"strict_peers": false},
+      "sessions": [{"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}],
+      "receiver": "r1",
+      "message": {"kind": "envelope-only", "body": "raw injection"},
+      "expect": {"output": "allow", "decision": "pass"}
+    },
+    {
+      "id": "unregistered-sender-is-refused",
+      "why": "Registration is consent: a session that never ran the hook cannot be a sender either.",
+      "sessions": [{"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}],
+      "receiver": "r1",
+      "message": {"kind": "xsm", "from": "ghost", "body": "hi"},
+      "expect": {"output": "block", "reason_contains": "not registered", "held": true}
+    },
+    {
+      "id": "out-of-scope-sender-is-refused",
+      "sessions": [
+        {"name": "send", "alias": "claude-3", "session_id": "s1", "cwd": "{tmp}/far"},
+        {"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}
+      ],
+      "receiver": "r1",
+      "message": {"kind": "xsm", "from": "s1", "body": "hi"},
+      "expect": {"output": "block", "reason_contains": "out of scope", "held": true}
+    },
+    {
+      "id": "scope-changed-after-sending-is-refused",
+      "why": "The scope travels in the header, so a policy edited between send and receive is a visible failure, not a silent pass.",
+      "sessions": [
+        {"name": "send", "alias": "claude-3", "session_id": "s1", "cwd": "{tmp}/ws"},
+        {"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}
+      ],
+      "receiver": "r1",
+      "message": {"kind": "xsm", "from": "s1", "body": "hi", "scope_override": "repo:something-else"},
+      "expect": {"output": "block", "reason_contains": "scope changed", "held": true}
+    },
+    {
+      "id": "session-start-never-blocks",
+      "why": "Registration events must not interfere with a session starting.",
+      "sessions": [{"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}],
+      "receiver": "r1",
+      "message": {"kind": "raw", "prompt": "", "event": "SessionStart"},
+      "expect": {"output": "none", "decision": null}
+    },
+    {
+      "id": "broken-gate-blocks-peer-messages",
+      "why": "A crashed hook is reported as non-blocking by Claude and the prompt runs anyway (S8-g2), so the fallback must refuse.",
+      "force_error": true,
+      "sessions": [{"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}],
+      "receiver": "r1",
+      "message": {"kind": "envelope-only", "body": "hi"},
+      "expect": {"output": "block", "reason_contains": "internal error"}
+    },
+    {
+      "id": "broken-gate-still-lets-the-user-type",
+      "force_error": true,
+      "sessions": [{"name": "recv", "alias": "claude-4", "session_id": "r1", "cwd": "{tmp}/ws"}],
+      "receiver": "r1",
+      "message": {"kind": "raw", "prompt": "my own prompt"},
+      "expect": {"output": "none"}
+    }
+  ],
+
+  "native_forecast": [
+    {
+      "id": "accept-setting-wins-over-mode-mismatch",
+      "why": "Claude decides an explicit crossSessionInbound before it compares permission modes (S1).",
+      "sender_mode": "bypassPermissions", "receiver_mode": "auto", "receiver_inbound": "accept",
+      "expect": "accept"
+    },
+    {
+      "id": "mode-mismatch-without-a-setting-holds",
+      "sender_mode": "bypassPermissions", "receiver_mode": "auto", "receiver_inbound": null,
+      "expect": "hold"
+    },
+    {
+      "id": "matching-modes-pass",
+      "sender_mode": "auto", "receiver_mode": "plan", "receiver_inbound": null,
+      "expect": "accept"
+    },
+    {
+      "id": "hold-setting-holds-even-when-modes-match",
+      "sender_mode": "auto", "receiver_mode": "auto", "receiver_inbound": "hold",
+      "expect": "hold"
+    },
+    {
+      "id": "unknown-mode-is-unknown",
+      "why": "A session that has not submitted a prompt has no recorded mode.",
+      "sender_mode": "auto", "receiver_mode": null, "receiver_inbound": null,
+      "expect": "unknown"
+    }
+  ]
+}

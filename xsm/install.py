@@ -16,7 +16,6 @@ import datetime
 import json
 import os
 import shutil
-import subprocess
 import sys
 
 from . import config, paths
@@ -26,56 +25,10 @@ CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit")
 CODEX_EVENTS = ("SessionStart", "UserPromptSubmit")
 
 
-INTERPRETER = "interpreter"
-
-
-def resolve_python(spec: str | None) -> str:
-    """The absolute interpreter the hooks will run under.
-
-    A path is taken as given. A version like "3.12" is resolved through
-    `uv python find`, which prints a path — we store that path rather than
-    calling `uv run` from the hook. Pinning the interpreter keeps the version
-    deterministic without putting a launcher, a PATH lookup or a possible
-    download in front of the one code path that must never fail to start
-    (a hook that cannot start stops gating, S8-g2).
-    """
-    if not spec:
-        return sys.executable
-    if os.path.isabs(spec) or os.sep in spec:
-        return os.path.realpath(os.path.expanduser(spec))
-    uv = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
-    if os.path.exists(uv):
-        out = subprocess.run([uv, "python", "find", spec], capture_output=True, text=True,
-                             timeout=60)
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
-    found = shutil.which(spec) or shutil.which("python%s" % spec)
-    if found:
-        return os.path.realpath(found)
-    raise ValueError("cannot resolve %r to an interpreter; pass an absolute path" % spec)
-
-
-def pinned_python() -> str:
-    return (paths.read_json(paths.path(INTERPRETER), {}) or {}).get("path") or sys.executable
-
-
-def pin_python(path: str) -> dict:
-    version = ""
-    try:
-        out = subprocess.run([path, "-c", "import sys;print('%d.%d.%d' % sys.version_info[:3])"],
-                             capture_output=True, text=True, timeout=30)
-        version = out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    record = {"path": path, "version": version}
-    paths.write_json(paths.path(INTERPRETER), record, mode=0o644)
-    return record
-
-
 def hook_command(runtime: str, event: str) -> str:
     entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "hooks", "xsm-hook.py")
-    parts = [pinned_python(), entry]
+    parts = [sys.executable, entry]
     if os.environ.get("XSM_HOME"):
         parts.insert(0, "XSM_HOME=%s" % os.environ["XSM_HOME"])
     return "%s %s" % (" ".join(parts), MARKER)
@@ -194,8 +147,7 @@ def doctor() -> dict:
     errors = [d for d in decisions if "internal error" in (d.get("reason") or "")]
     report = {
         "xsm_home": paths.HOME,
-        "interpreter": pinned_python(),
-        "interpreter_pinned": paths.read_json(paths.path(INTERPRETER)) is not None,
+        "interpreter": sys.executable,
         "interpreter_ok": version >= (3, 9),
         "codex_binary": adapters.codex_bin(),
         "homes": config.homes(),

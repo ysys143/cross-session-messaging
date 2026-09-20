@@ -165,14 +165,6 @@ def cmd_install(args) -> int:
         print("name at least one home: --claude-home ~/.claude-3 --codex-home ~/.codex",
               file=sys.stderr)
         return USAGE
-    try:
-        chosen = install.resolve_python(args.python)
-    except ValueError as err:
-        print(str(err), file=sys.stderr)
-        return USAGE
-    record = install.pin_python(chosen)
-    print("hooks will run under %s%s" % (record["path"],
-                                        " (%s)" % record["version"] if record["version"] else ""))
     failed = False
     for home, runtime in targets:
         if args.dry_run:
@@ -309,8 +301,6 @@ def build_parser() -> argparse.ArgumentParser:
     ins = sub.add_parser("install", help="add the xsm hooks to a home (merges, never overwrites)")
     ins.add_argument("--claude-home", action="append")
     ins.add_argument("--codex-home", action="append")
-    ins.add_argument("--python", help="interpreter for the hooks: an absolute path, or a version "
-                                     "like 3.12 resolved via `uv python find`")
     ins.add_argument("--dry-run", action="store_true")
     ins.set_defaults(func=cmd_install)
 

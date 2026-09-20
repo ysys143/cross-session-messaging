@@ -55,12 +55,6 @@ xsm install --claude-home ~/.claude-4 --claude-home ~/.claude-5
 xsm doctor
 ```
 
-훅이 돌 파이썬 버전을 고정하려면 `--python`을 준다. 경로를 그대로 쓰거나, 버전을 주면 `uv python find`로 해석한다.
-
-```bash
-xsm install --claude-home ~/.claude-4 --python 3.13
-```
-
 `doctor`의 `install` 줄이 두 홈 모두 `SessionStart:keep, UserPromptSubmit:keep`이면 설치된 것이다.
 
 설치 전후 비교(기존 훅 보존 확인):
