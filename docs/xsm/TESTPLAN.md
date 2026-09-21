@@ -41,9 +41,46 @@ done
 
 ### 1.1 `crossSessionInbound`를 `accept`로 두는 방법
 
-세 가지가 있고, **먹히는 곳이 정해져 있다.**
+**(a) 손으로 고치기 — 기본 방법.** 홈마다 설정 파일 하나를 편집한다.
 
-**(a) 홈의 사용자 설정 파일** — 권장. 홈 전체에 적용되고 계속 유지된다.
+1. 파일을 연다. `~/.claude-4/settings.json`, `~/.claude-5/settings.json`처럼 **홈 안의 `settings.json`**이다. 프로젝트의 `.claude/`가 아니다.
+2. 먼저 사본을 만든다.
+
+   ```bash
+   cp ~/.claude-4/settings.json ~/.claude-4/settings.json.bak
+   ```
+
+3. 파일에서 `crossSessionInbound`를 찾는다.
+   - **이미 있고 값이 `"accept"`이면** 할 일이 없다.
+   - **있고 값이 `"hold"`나 `"refuse"`이면** 그 값만 `"accept"`로 바꾼다.
+
+     ```json
+     "crossSessionInbound": "accept",
+     ```
+
+   - **없으면** 맨 바깥 중괄호 안에 한 줄 추가한다. 위치는 아무 곳이나 되지만, 첫 줄 바로 아래가 찾기 쉽다.
+
+     ```json
+     {
+       "crossSessionInbound": "accept",
+       "model": "opus",
+       "hooks": { … }
+     }
+     ```
+
+4. **쉼표를 확인한다.** JSON은 마지막 항목 뒤에 쉼표가 있으면 안 되고, 중간 항목 뒤에는 있어야 한다. 주석도 쓸 수 없다.
+5. 문법이 맞는지 확인한다. 아무 출력이 없으면 정상이다.
+
+   ```bash
+   python3 -m json.tool ~/.claude-4/settings.json > /dev/null && echo ok
+   ```
+
+   `ok`가 안 나오면 사본으로 되돌린다: `cp ~/.claude-4/settings.json.bak ~/.claude-4/settings.json`
+6. 이미 열려 있는 세션에는 다음 실행부터 적용된다고 보는 것이 안전하다.
+
+되돌릴 때는 사본으로 덮거나, 추가한 그 한 줄만 지운다.
+
+**(b) 여러 홈을 한꺼번에** — (a)를 여러 번 하는 대신 쓰는 방법이다. 기존 키를 보존하고 백업을 남긴다.
 
 ```bash
 python3 - <<'EOF'
@@ -61,9 +98,7 @@ for home in ("~/.claude-4", "~/.claude-5"):
 EOF
 ```
 
-되돌리려면 백업으로 덮거나 그 키만 지운다. 열려 있는 세션에는 다음 실행부터 적용된다고 보는 것이 안전하다.
-
-**(b) 세션 하나만** — 시험용. 그 실행에만 적용된다.
+**(c) 세션 하나만** — 설정 파일을 건드리지 않고 그 실행에만 적용한다.
 
 ```bash
 CLAUDE_CONFIG_DIR=~/.claude-5 claude --name reviewer --settings '{"crossSessionInbound":"accept"}'
@@ -71,12 +106,12 @@ CLAUDE_CONFIG_DIR=~/.claude-5 claude --name reviewer --settings '{"crossSessionI
 
 `--settings`로 훅까지 함께 주고 싶으면 JSON 파일에 `hooks`와 `crossSessionInbound`를 같이 적어 그 파일 경로를 넘긴다.
 
-**(c) 프로젝트 설정(`.claude/settings.json`, `.claude/settings.local.json`)** — **이 키는 적용되지 않는다.** 2026-09-21에 확인했다. 같은 파일의 `hooks`는 실행됐는데(세션이 등록됐다) `crossSessionInbound: "accept"`는 무시되고 권한 모드가 다른 메시지가 보류됐다. 저장소 단위로 켜려는 시도는 하지 않는다.
+**(d) 프로젝트 설정(`.claude/settings.json`, `.claude/settings.local.json`)** — **이 키는 적용되지 않는다.** 2026-09-21에 확인했다. 같은 파일의 `hooks`는 실행됐는데(세션이 등록됐다) `crossSessionInbound: "accept"`는 무시되고 권한 모드가 다른 메시지가 보류됐다. 저장소 단위로 켜려는 시도는 하지 않는다.
 
-확인:
+지금 값 확인:
 
 ```bash
-python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude-5/settings.json'))).get('crossSessionInbound'))"
+grep crossSessionInbound ~/.claude-4/settings.json ~/.claude-5/settings.json
 ```
 
 ## 2. 설치
@@ -105,20 +140,16 @@ xsm doctor
 xsm install --claude-home ~/.claude-4 --python 3.13
 ```
 
-설치 전후 비교(기존 훅 보존 확인):
+설치 전후 비교(기존 훅 보존 확인). 설치기는 원래 들여쓰기를 유지하므로 평범한 `diff`로 바뀐 부분만 보인다.
 
 ```bash
-python3 - <<'EOF'
-import glob, json
-for home in ("claude-4", "claude-5"):
-    target = f"{__import__('os').path.expanduser('~')}/.{home}/settings.json"
-    backup = sorted(glob.glob(target + ".xsm-backup-*"))[-1]
-    before, after = json.load(open(backup)), json.load(open(target))
-    for event in ("SessionStart", "UserPromptSubmit"):
-        b = before.get("hooks", {}).get(event, [])
-        a = after.get("hooks", {}).get(event, [])
-        print(home, event, "before", len(b), "after", len(a), "kept all:", all(g in a for g in b))
-EOF
+diff ~/.claude-4/settings.json.xsm-backup-* ~/.claude-4/settings.json
+```
+
+`#xsm-hook`이 붙은 훅 그룹이 추가된 줄만 나와야 한다. 기존 훅이 지워졌거나 바뀐 줄이 있으면 백업으로 되돌린다. 눈으로 확인하려면 파일에서 `#xsm-hook`을 찾아 본다.
+
+```bash
+grep -n '#xsm-hook' ~/.claude-4/settings.json
 ```
 
 ### 2.2 스킬
@@ -288,16 +319,17 @@ rm -rf ~/.xsm                      # 레지스트리·원장·보류 기록까�
 rm -rf /tmp/xsm-trial
 ```
 
-확인:
+확인. 제거 후 파일은 설치 전과 **바이트 단위로 같아야** 한다. 설치 시 백업(가장 이른 것)과 비교한다.
 
 ```bash
-python3 - <<'EOF'
-import glob, json, os
-for home in ("claude-4", "claude-5"):
-    target = os.path.expanduser(f"~/.{home}/settings.json")
-    backups = sorted(glob.glob(target + ".xsm-backup-*"))
-    print(home, "restored:", json.load(open(target)) == json.load(open(backups[0])) if backups else "no backup")
-EOF
+ls -t ~/.claude-4/settings.json.xsm-backup-*        # 목록. 가장 아래가 설치 시 백업
+diff ~/.claude-4/settings.json.xsm-backup-<설치시각> ~/.claude-4/settings.json && echo same
+```
+
+`same`이 나오면 원래대로다. `#xsm-hook`이 남아 있지 않은지도 본다.
+
+```bash
+grep -c '#xsm-hook' ~/.claude-4/settings.json     # 0이어야 한다
 ```
 
 `restored: True`면 설치 전 상태와 같다. 백업은 설치와 제거에서 각각 하나씩, 홈마다 두 개가 남는다(`sorted(...)[0]`이 설치 전 것이다). 필요 없으면 지운다.
