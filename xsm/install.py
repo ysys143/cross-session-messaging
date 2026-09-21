@@ -85,9 +85,28 @@ def hook_command(runtime: str, event: str) -> str:
     entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "hooks", "xsm-hook.py")
     parts = [pinned_python(), entry]
-    if os.environ.get("XSM_HOME"):
+    # Only a non-default state directory is written into the command. Writing
+    # the default too made the command depend on whether the installing shell
+    # happened to export XSM_HOME, so a reinstall rewrote every hook.
+    if os.environ.get("XSM_HOME") and not _is_default_home(os.environ["XSM_HOME"]):
         parts.insert(0, "XSM_HOME=%s" % os.environ["XSM_HOME"])
     return "%s %s" % (" ".join(parts), MARKER)
+
+
+def _is_default_home(value: str) -> bool:
+    return os.path.realpath(os.path.expanduser(value)) == \
+        os.path.realpath(os.path.expanduser("~/.xsm"))
+
+
+def _same_command(have: str, want: str) -> bool:
+    """Equal, or equal once a prefix naming the default state directory is
+    dropped — installs made before that prefix stopped being written."""
+    def norm(cmd: str) -> str:
+        first, _, rest = (cmd or "").partition(" ")
+        if first.startswith("XSM_HOME=") and _is_default_home(first[len("XSM_HOME="):]):
+            return rest
+        return cmd or ""
+    return norm(have) == norm(want)
 
 
 def _is_ours(group: dict) -> bool:
@@ -291,7 +310,7 @@ def plan(home: str, runtime: str) -> dict:
         want = hook_command(runtime, event)
         # "keep" means exactly one marked group with exactly the right command:
         # a duplicate or a stale path still needs replacing.
-        have = len(ours) == 1 and ours[0]["hooks"][0].get("command") == want and \
+        have = len(ours) == 1 and _same_command(ours[0]["hooks"][0].get("command"), want) and \
             ours[0]["hooks"][0].get("timeout", 10) == TIMEOUTS.get(event, 10)
         actions.append({"event": event, "others": len(groups) - len(ours),
                         "action": "keep" if have else ("replace" if ours else "add"),

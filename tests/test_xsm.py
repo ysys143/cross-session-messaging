@@ -501,6 +501,21 @@ class ProjectJoinTest(TempState):
             config.join("manual", a)
 
 
+class DefaultHomePrefixTest(TempState):
+    """Whether the installing shell exports XSM_HOME=~/.xsm must not change the
+    hook command, and an older install carrying that prefix is kept as is."""
+
+    def test_default_home_is_not_written_and_old_prefix_is_kept(self):
+        from unittest import mock
+        from xsm import install
+        with mock.patch.dict(os.environ, {"XSM_HOME": os.path.expanduser("~/.xsm")}):
+            plain = install.hook_command("claude", "SessionStart")
+        self.assertFalse(plain.startswith("XSM_HOME="))
+        old = "XSM_HOME=%s %s" % (os.path.expanduser("~/.xsm"), plain)
+        self.assertTrue(install._same_command(old, plain))
+        self.assertFalse(install._same_command("XSM_HOME=/elsewhere " + plain, plain))
+
+
 class CommandInstallTest(TempState):
     """Slash commands and the skill go in with the hooks, carry an absolute
     launcher path so they never depend on PATH, and come out again without
