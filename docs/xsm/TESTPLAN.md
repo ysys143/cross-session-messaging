@@ -11,7 +11,7 @@
 
 ```bash
 cd ~/Documents/GitHub/cross-session-messaging
-python3 -m unittest discover -s tests          # 16 tests, OK
+python3 -m unittest discover -s tests          # 53 tests, OK
 python3 -V                                      # 3.9 이상
 ```
 
@@ -35,9 +35,49 @@ done
 
 확인할 것:
 
-1. **`crossSessionInbound`가 `accept`인가.** `hold`이거나 없으면, 권한 모드가 다른 세션끼리 보낸 메시지는 수신 화면에서 사람이 승인해야 전달된다(S1). 두 세션을 같은 모드로 띄우면 `accept`가 아니어도 된다.
+1. **`crossSessionInbound`가 `accept`인가.** `hold`이거나 없으면, 권한 모드가 다른 세션끼리 보낸 메시지는 수신 화면에서 사람이 승인해야 전달된다(S1). 두 세션을 같은 모드로 띄우면 `accept`가 아니어도 된다. 켜는 방법은 1.1절에 있다.
 2. **로그인돼 있는가.** 처음 쓰는 홈이면 `CLAUDE_CONFIG_DIR=~/.claude-5 claude` 를 한 번 실행해 로그인한다.
 3. 기존 훅 목록을 적어 둔다. 설치 뒤 그대로 남아 있어야 한다.
+
+### 1.1 `crossSessionInbound`를 `accept`로 두는 방법
+
+세 가지가 있고, **먹히는 곳이 정해져 있다.**
+
+**(a) 홈의 사용자 설정 파일** — 권장. 홈 전체에 적용되고 계속 유지된다.
+
+```bash
+python3 - <<'EOF'
+import json, os, shutil, datetime
+for home in ("~/.claude-4", "~/.claude-5"):
+    p = os.path.expanduser(home + "/settings.json")
+    data = json.load(open(p)) if os.path.exists(p) else {}
+    if data.get("crossSessionInbound") == "accept":
+        print(home, "already accept"); continue
+    if os.path.exists(p):
+        shutil.copy2(p, p + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    data["crossSessionInbound"] = "accept"
+    json.dump(data, open(p, "w"), ensure_ascii=False, indent=2)
+    print(home, "set to accept (backup made)")
+EOF
+```
+
+되돌리려면 백업으로 덮거나 그 키만 지운다. 열려 있는 세션에는 다음 실행부터 적용된다고 보는 것이 안전하다.
+
+**(b) 세션 하나만** — 시험용. 그 실행에만 적용된다.
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-5 claude --name reviewer --settings '{"crossSessionInbound":"accept"}'
+```
+
+`--settings`로 훅까지 함께 주고 싶으면 JSON 파일에 `hooks`와 `crossSessionInbound`를 같이 적어 그 파일 경로를 넘긴다.
+
+**(c) 프로젝트 설정(`.claude/settings.json`, `.claude/settings.local.json`)** — **이 키는 적용되지 않는다.** 2026-09-21에 확인했다. 같은 파일의 `hooks`는 실행됐는데(세션이 등록됐다) `crossSessionInbound: "accept"`는 무시되고 권한 모드가 다른 메시지가 보류됐다. 저장소 단위로 켜려는 시도는 하지 않는다.
+
+확인:
+
+```bash
+python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude-5/settings.json'))).get('crossSessionInbound'))"
+```
 
 ## 2. 설치
 
@@ -224,7 +264,7 @@ builder가 메시지를 보내면 그 스크립트를 읽고 직접 실행해서
 |---|---|---|
 | `xsm list`가 비어 있다 | 훅이 설치되지 않았거나, 세션이 설치 전에 떠 있었다 | `xsm doctor`로 설치 확인. 세션을 다시 띄운다 |
 | `this session is not registered` | CLI를 세션 밖에서 실행했다 | 세션 안의 셸에서 실행하거나 `xsm list`로 대상 ref를 확인한다 |
-| 수신 화면에 보류 창 | 권한 모드 부류가 다르고 `crossSessionInbound`가 `accept`가 아니다 | 수신 홈을 `accept`로 두거나 두 세션의 모드를 맞춘다 |
+| 수신 화면에 보류 창 | 권한 모드 부류가 다르고 `crossSessionInbound`가 `accept`가 아니다 | 1.1절 (a) 또는 (b)로 켠다. 프로젝트 설정으로는 안 된다 |
 | `refused: out of scope` | 두 세션이 다른 저장소에 있다 | 같은 저장소에서 띄우거나 `~/.xsm/config.json`에 scope를 적는다 |
 | `sent-unconfirmed`가 계속된다 | 수신 세션이 꺼졌거나 훅이 없다 | `xsm list`로 상태 확인. Codex면 턴이 끝날 때까지 기다린다 |
 | 훅 오류가 `doctor`에 보인다 | 인터프리터나 경로 문제 | `xsm install`을 다시 실행해 인터프리터를 다시 고정한다 |
