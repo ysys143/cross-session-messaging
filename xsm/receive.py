@@ -140,6 +140,11 @@ def handle(data: dict) -> dict | None:
             registry.mark_ended(runtime, data["session_id"], data.get("reason"))
         return None
     me = register(data, runtime)
+    if me:
+        # The pointer as written lacks what the runtime keeps elsewhere — a Codex
+        # thread's name lives in its state DB — so read it back the way every
+        # other lookup does, or receipts and decisions record no receiver name.
+        me = registry.by_session(runtime, me["session_id"]) or me
     if data.get("hook_event_name") == "SessionStart":
         housekeeping.maybe_prune()
         return None

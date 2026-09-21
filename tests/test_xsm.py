@@ -411,6 +411,32 @@ class HeldRecordTest(TempState):
         self.assertEqual(record["body"], "raw")
 
 
+class CodexReceiverNameTest(TempState):
+    """A Codex thread's name lives in its state DB, not in the hook input, so
+    the hook must read it back before recording who received a message.
+    Observed: decisions for a named Codex receiver said `receiver: null`."""
+
+    def test_held_record_names_the_codex_receiver(self):
+        import sqlite3
+        from xsm import envelope, paths, receive, registry
+        home = os.path.join(self.tmp, "codex-named")
+        os.makedirs(home)
+        con = sqlite3.connect(os.path.join(home, "state_5.sqlite"))
+        con.execute("create table threads (id text, name text)")
+        con.execute("insert into threads values ('t1', 'reviewer')")
+        con.commit()
+        con.close()
+        receive.register = lambda data, runtime: registry.upsert(
+            "codex", home, "t1", os.getpid(), self.tmp)
+        prompt = "<%s>\nraw\n</%s>" % (envelope.TAG, envelope.TAG)
+        receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "t1",
+                        "cwd": self.tmp, "prompt": prompt,
+                        "transcript_path": home + "/sessions/2026/t1.jsonl"})
+        held = os.listdir(paths.path(paths.HELD))
+        record = paths.read_json(paths.path(paths.HELD, held[0]))
+        self.assertEqual(record["receiver"], "reviewer")
+
+
 class CommandInstallTest(TempState):
     """Slash commands and the skill go in with the hooks, carry an absolute
     launcher path so they never depend on PATH, and come out again without
