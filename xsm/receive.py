@@ -202,7 +202,8 @@ def handle(data: dict) -> dict | None:
         workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
     worker = workers.load(os.environ.get("XSM_WORKER") or "") if os.environ.get("XSM_WORKER") else None
     return allow_with_context(runtime, envelope.sender_context(
-        parsed, runtime, auto_reply=workers.is_headless_codex(worker)))
+        parsed, runtime, auto_reply=workers.is_headless_codex(worker), worker=bool(worker),
+        cwd=(me or {}).get("cwd")))
 
 
 def _sender_record(parsed) -> dict | None:

@@ -123,6 +123,12 @@ xsm stop <worker>           # stop it and remove its records
 - `--task` sends the task as `--kind task` once the worker is up; the answer
   comes back to you as a reply. `--once` stops the worker when that answer
   arrives. Put everything the worker needs in the task.
+- **A worker must never sit idle on a permission.** When you are told a
+  worker is waiting, call the `xsm_approve` MCP tool right away: it shows the
+  request to your user, who allows or denies it in a form. When a worker
+  reports a step it could not do for lack of permission, get the permission
+  (`xsm_approve` when it asks again, `xsm_grant` for full access) and send the
+  step back; do not accept "no permission" as the end of the task.
 - A headless worker's permission prompts (Claude or Codex) go to your user:
   it runs sandboxed to its folder, and anything more waits for approval. You get a note
   saying what it is waiting for. **Never try to approve it yourself** —
@@ -131,8 +137,14 @@ xsm stop <worker>           # stop it and remove its records
 - `--full-access` and `--trust-hooks` remove your user's protections. Use them
   only when the work needs it, and only with their explicit permission: call
   the `xsm_grant` MCP tool with the reason, and pass the id it returns as
-  `--grant <id>`. If the grant is refused or blocked, stop and tell your user;
-  never look for another way to start the worker with those options.
+  `--grant <id>`.
+- If the `xsm_grant` call itself is blocked (Claude Code's auto mode can deny
+  it), do not stop there and do not work around it: ask your user with your
+  question tool whether to request the permission, saying what the worker
+  needs and why. If they agree, call `xsm_grant` again; their answer in the
+  form it shows is the permission. Never ask them to type shell commands.
+- If your user answers the grant form with deny, do not start that worker with
+  those options; carry on without them or ask what they prefer.
 - Workers cannot start workers unless the depth limit allows it (`max_depth`,
   default 1), and one session runs at most `max_workers` (default 4) at once.
   If spawn refuses for either, report it; do not raise the limit. Workers stop

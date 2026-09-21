@@ -569,3 +569,74 @@ class DangerousFlagsTest(TempState):
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "bypassPermissions")
         settings = json.load(open(os.path.join(self.tmp, "workers", "c", "settings.json")))
         self.assertNotIn("hooks", settings)
+
+
+class NoIdleWorkerTest(TempState):
+    """A worker blocked on a permission gets someone asked at once, and a
+    worker's task tells it not to end on a permission excuse."""
+
+    def test_parent_is_tasked_and_told_the_outcome(self):
+        from xsm import registry, workers
+        rec = registry.upsert("claude", self.tmp, "s-w", os.getpid(), self.tmp)
+        w = {"name": "w1", "runtime": "claude", "mode": "headless", "session_id": "s-w",
+             "parent_ref": "pppppp", "approval_timeout": 1}
+        workers.save(w)
+        sent = []
+        from xsm import send
+        send.send = lambda target, text, **kw: sent.append((target, kw["kind"], text))
+        os.environ["XSM_WORKER"] = "w1"
+        try:
+            workers.permission_request({"tool_name": "Bash", "tool_input": {"command": "rm x"}},
+                                       "claude")
+        finally:
+            del os.environ["XSM_WORKER"]
+        self.assertEqual([(t, k) for t, k, _ in sent], [("ref:pppppp", "task"),
+                                                         ("ref:pppppp", "note")])
+        self.assertIn("xsm_approve", sent[0][2])
+        self.assertIn("nobody answered", sent[1][2])
+
+    def test_only_the_parent_can_relay_an_answer(self):
+        from xsm import paths, workers
+        workers.save({"name": "w1", "parent_ref": "pppppp", "created": 0})
+        os.makedirs(paths.path(workers.APPROVALS), exist_ok=True)
+        paths.write_json(paths.path(workers.APPROVALS, "r1.json"),
+                         {"id": "r1", "worker": "w1", "status": "pending", "summary": "x"})
+        with self.assertRaises(workers.WorkerError):
+            workers.answer_asked("r1", True, "other1")
+        self.assertEqual(workers.answer_asked("r1", True, "pppppp")["status"], "approved")
+
+    def test_mcp_approve_shows_the_request_and_passes_the_answer(self):
+        import io
+        from xsm import mcp, paths, workers
+        me = {"ref": "pppppp", "name": "boss", "alias": "claude-4", "runtime": "claude",
+              "cwd": self.tmp}
+        workers.save({"name": "w1", "parent_ref": "pppppp", "created": 0})
+        os.makedirs(paths.path(workers.APPROVALS), exist_ok=True)
+        paths.write_json(paths.path(workers.APPROVALS, "r1.json"),
+                         {"id": "r1", "worker": "w1", "status": "pending", "t": 1,
+                          "summary": "Bash: npm test"})
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"capabilities": {"elicitation": {}}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "xsm_approve", "arguments": {}}},
+                {"jsonrpc": "2.0", "id": "xsm-1",
+                 "result": {"action": "accept", "content": {"answer": "allow"}}}]
+        out = io.StringIO()
+        server = mcp.Server(io.StringIO("".join(json.dumps(m) + "\n" for m in msgs)), out)
+        server.session = lambda: me
+        server.serve()
+        ask = next(json.loads(l) for l in out.getvalue().splitlines() if "elicitation" in l)
+        self.assertIn("Bash: npm test", ask["params"]["message"])
+        self.assertEqual(paths.read_json(paths.path(workers.APPROVALS, "r1.json"))["status"],
+                         "approved")
+
+    def test_a_workers_task_carries_the_no_excuse_rule(self):
+        from xsm import envelope
+        sender = {"name": "boss", "alias": "claude-4", "ref": "pppppp", "session_id": "s"}
+        parsed = envelope.parse(envelope.build("do it", msg_id="m1", sender=sender,
+                                               scope="dir:x", kind="task"))
+        ctx = envelope.sender_context(parsed, worker=True, cwd="/w/proj")
+        self.assertIn("do not end with", ctx)
+        self.assertIn("Report only what you actually did", ctx)
+        self.assertIn("Your working folder is /w/proj", ctx)
+        self.assertNotIn("do not end with", envelope.sender_context(parsed, worker=False))

@@ -612,7 +612,8 @@ A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은
 | 10-10 | 부모 종료 | 워커가 있는 상태에서 A에 `/exit` | 몇 초 안에 `xsm workers`가 `no workers`, 패널이 닫힌다 |
 | 10-11 | 부모 강제 종료 | 워커를 하나 띄우고 A를 `kill -9` | 다음 `xsm workers`가 `stopped …: its starting session is over`를 출력하고 비어 있다 |
 | 10-12 | 전체 권한은 허가가 있어야 | 기본 권한 모드로 띄운 A에게: `xsm spawn codex --headless --full-access --once --task '$HOME/xsm-probe.txt에 hi를 써'`, 거부되면 안내대로 허가를 받아 다시 | 처음에는 `refused: --full-access needs your user's explicit permission …`. A가 `xsm_grant`를 부르면 "FULL ACCESS" 양식이 뜬다. "allow once"를 고르면 허가 id가 나오고, 그 id로 띄운 워커는 승인 없이 폴더 밖에 쓰고 답한다. 허가는 한 번 쓰면 없어진다 |
-| 10-13 | 정리 | `xsm workers`, `xsm approvals` | 둘 다 비어 있다 |
+| 10-13 | 놀지 않는 워커 | auto 모드의 A에게: 헤드리스 haiku 워커를 `--once`로 띄워 "Write 도구로 작업 폴더에 result.txt를 만들고 42를 넣어" 과제를 주고, 필요한 건 처리해서 끝내라고 시킨다 | 워커가 승인을 기다리면 A가 바로 `xsm_approve`를 부른다(막히면 질문 도구로 묻고 다시 부른다). A 화면에 "Worker … is waiting for your permission" 양식이 뜬다. 허용하면 파일이 생기고 답장이 오고 워커가 정리된다 |
+| 10-14 | 정리 | `xsm workers`, `xsm approvals` | 둘 다 비어 있다 |
 
 `--once` 없이 띄운 워커는 `xsm stop <이름>`으로 끝낸다. 대기 중인 승인은 거부로 닫히고 워커의 기록이 지워진다. 헤드리스 워커의 진행은 `xsm attach <이름>`으로 본다. 입력한 줄은 사람의 메시지로 워커에 들어가고, Ctrl-C로 빠져나와도 워커는 계속 돈다.
 
@@ -632,6 +633,7 @@ A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은
 - 10-5: 첫 시도에서 워커가 앞 워커(cw1)의 스레드로 잘못 등록되어 과제가 도착하지 않았다. 같은 폴더의 가장 최근 스레드로 추정한 탓이었다. 이름과 생성 시각으로 찾도록 고친 뒤 다시 해서 통과했다(새 ref, 답장 42, 패널 닫힘).
 - 10-6: 부모 에이전트가 스스로 워커를 띄우고 144를 전했다.
 - 10-8~10-11: 패널 Claude 워커가 부모(auto)와 달리 `manual mode`로 떴다. 워커 둘이 있을 때 세 번째가 이름과 함께 거부됐다. 부모 `/exit` 뒤 2초 안에 패널 워커와 헤드리스 워커가 모두 정리됐다. `kill -9`한 부모의 워커는 다음 `xsm workers`에서 정리됐다.
+- 10-13: auto 모드 A가 워커의 승인 대기 알림(task)을 받자 곧바로 `xsm_approve`를 불렀다. 분류기가 막자 질문 도구로 선택지를 내밀었다. 동의 뒤 재호출은 통과해 양식이 떴다. 워커(haiku)가 홈 폴더에 쓰려 해서 거부했더니, A는 경로를 고쳐 새 워커로 다시 맡겼다. 두 번째 요청을 허용하자 올바른 폴더에 42가 쓰이고 답장이 왔으며 워커가 정리됐다. 첫 워커는 쓰지 않은 파일을 "만들었다"고 보고했다. 그래서 워커 규칙에 "한 것과 확인한 것만 말하라"와 작업 폴더를 넣었다.
 - 10-12: auto 모드의 A에서는 Claude Code 분류기가 `xsm_grant` 호출을 막았고, A는 우회하지 않고 멈췄다. 기본 권한 모드의 A에서는 도구 호출 확인, "FULL ACCESS" 양식, 허가 id, spawn 확인 순서로 진행됐다. luna 워커는 승인 없이 폴더 밖에 쓰고 답했으며 허가는 `.used`가 됐다.
 - 10-7: 기본 한도에서 패널 워커 안의 spawn이 거부됐다. `--max-depth 2`로 띄운 워커는 헤드리스 워커를 하나 더 띄웠고(`depth 2/2`), 그 워커 명의의 spawn은 depth 3으로 거부됐다.
 - Codex 워커의 승인 전달: 사용자가 Codex에 xsm `PermissionRequest` 그룹을 설치하고 신뢰한 뒤 실측했다. 작업 폴더 밖 쓰기를 시켰는데 승인 요청 없이 파일이 생겼다. 원인은 둘이었다. 재개 턴(`exec resume`)에 샌드박스가 걸리지 않아 사용자 설정인 `danger-full-access`로 돌았고, `codex exec`는 `approval_policy`를 주어도 `never`로 돌았다. 모든 턴에 `sandbox_mode`를 주도록 고친 뒤에는 같은 과제가 `operation not permitted`로 거부되고 답장만 왔다. 그 훅 그룹은 설치 목록에서 뺐다. 이후 Codex app-server(IDE 클라이언트가 쓰는 JSON-RPC 인터페이스)가 승인 요청을 클라이언트로 보낸다는 것을 확인했고, 헤드리스 Codex 턴을 app-server로 옮겼다. 직접 시험에서 decline은 실행되지 않았고 accept는 실행됐다. 10-4a 실측에서는 승인 요청이 명령과 이유를 담아 xsm으로 왔고, 부모 에이전트는 승인하지 않았다. 터미널에서 승인하자 파일이 생기고 답장이 왔으며 워커가 스스로 정리됐다. 10-5a: 패널 Codex의 인자가 `-s workspace-write -a on-request`였고 YOLO 표시가 사라졌다.

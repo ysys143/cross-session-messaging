@@ -54,6 +54,12 @@ TOOLS = [
          "reason": {"type": "string"},
          "dir": {"type": "string", "description": "the worker's folder; default this session's"}},
          "required": ["runtime", "options", "reason"]}},
+    {"name": "xsm_approve",
+     "description": ("Show your user a permission request from a worker you started, and pass "
+                     "on their answer. Call it as soon as you are told a worker is waiting; the "
+                     "worker is blocked until it is answered. Without an id, takes the oldest "
+                     "waiting request of your workers."),
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}}},
     {"name": "xsm_decide",
      "description": ("Ask your user to decide, and record their answer as a decision in the "
                      "channel. Your user sees the question and picks an option or writes an "
@@ -129,6 +135,8 @@ class Server:
             return self.decide(where, me, args)
         if name == "xsm_grant":
             return self.grant(where, me, args)
+        if name == "xsm_approve":
+            return self.approve(me, args)
         raise channel.ChannelError("unknown tool %s" % name)
 
     def decide(self, where: tuple, me: dict, args: dict) -> str:
@@ -161,6 +169,36 @@ class Server:
                            approved={"question": question, "answer": answer,
                                      "options": options or None})
         return "recorded decision %s in %s: %s" % (rec["id"], where[0], answer)
+
+    def approve(self, me: dict, args: dict) -> str:
+        from . import workers
+        mine = [r for r in workers.approvals()
+                if (workers.load(r.get("worker") or "") or {}).get("parent_ref") == me.get("ref")]
+        req = next((r for r in mine if r["id"] == args.get("id")), None) if args.get("id") \
+            else (mine[0] if mine else None)
+        if not req:
+            return "no waiting request from your workers" + (
+                " with id %s" % args["id"] if args.get("id") else "")
+        if "elicitation" not in (self.client_caps or {}):
+            raise channel.ChannelError("this client cannot ask its user; they can answer with "
+                                       "`xsm approve %s` in a terminal" % req["id"])
+        allow, deny = "allow", "deny"
+        reply = self.ask_client("elicitation/create", {
+            "message": "Worker %s is waiting for your permission:\n%s\nAllow it?"
+                       % (req["worker"], req["summary"]),
+            "requestedSchema": {"type": "object", "properties": {"answer": {
+                "type": "string", "title": "Permission", "enum": [allow, deny]}},
+                "required": ["answer"]}})
+        result = reply.get("result") or {}
+        answer = (result.get("content") or {}).get("answer") if result.get("action") == "accept" \
+            else None
+        if answer not in (allow, deny):
+            return ("your user did not answer (%s); the request is still waiting — ask again "
+                    "or tell them it is blocking the worker" % (result.get("action") or "no answer"))
+        workers.answer_asked(req["id"], answer == allow, me.get("ref"),
+                             None if answer == allow else "your user said no")
+        return "%s: worker %s's request [%s] %s" % (
+            "allowed" if answer == allow else "denied", req["worker"], req["id"], req["summary"])
 
     def grant(self, where: tuple, me: dict, args: dict) -> str:
         from . import workers

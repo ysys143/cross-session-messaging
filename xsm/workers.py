@@ -180,7 +180,8 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
     """Consume a grant that covers exactly this spawn, or refuse."""
     if not grant_id:
         raise WorkerError("%s needs your user's explicit permission: ask with the xsm_grant MCP "
-                          "tool, then pass --grant <id>" % " and ".join(
+                          "tool, then pass --grant <id>. If that call is blocked, ask your user "
+                          "whether to request it, and call it again if they agree" % " and ".join(
                               "--" + o.replace("_", "-") for o in options))
     p = paths.path(GRANTS, grant_id + ".json")
     claimed = p + ".used"
@@ -858,11 +859,15 @@ def _await_person(worker: dict, runtime: str, tool: str, tool_input) -> tuple:
     while time.time() < deadline:
         cur = paths.read_json(_approval_path(req["id"])) or {}
         if cur.get("status") in ("approved", "denied"):
+            if cur["status"] == "denied":
+                _notify_parent(worker, cur, outcome="denied (%s)" % (cur.get("reason") or
+                                                                  "your user said no"))
             return cur["status"] == "approved", cur.get("reason")
         time.sleep(1)
     req.update({"status": "denied", "reason": "nobody answered within %ds" %
                 (deadline - req["t"])})
     paths.write_json(_approval_path(req["id"]), req)
+    _notify_parent(worker, req, outcome=req["reason"])
     return False, req["reason"]
 
 
@@ -872,7 +877,9 @@ def _decision(allow: bool, reason: str | None) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
 
 
-def _notify_parent(worker: dict, req: dict) -> None:
+def _notify_parent(worker: dict, req: dict, outcome: str | None = None) -> None:
+    """Tell the session that started the worker, as a task it acts on now: a
+    worker must never sit idle on a permission nobody was asked for."""
     if not worker.get("parent_ref") or not worker.get("session_id"):
         return
     try:
@@ -880,11 +887,19 @@ def _notify_parent(worker: dict, req: dict) -> None:
         if not me:
             return
         from . import send as send_mod
-        send_mod.send("ref:%s" % worker["parent_ref"], (
-            "Worker %s is waiting for approval [%s] %s. Only your user can answer it, in a "
-            "terminal: xsm approve %s (or xsm deny %s). Do not try to answer it yourself."
-            % (worker["name"], req["id"], req["summary"], req["id"], req["id"])),
-            sender=me, kind="note")
+        if outcome:
+            text = ("Worker %s's request [%s] %s ended: %s. The worker carries on without it. If "
+                    "the work needs it, ask your user again with the xsm_approve MCP tool when it "
+                    "asks again, or re-send the task with what they allow."
+                    % (worker["name"], req["id"], req["summary"], outcome))
+            kind = "note"
+        else:
+            text = ("Worker %s is blocked on a permission and is waiting: [%s] %s. Now, call the "
+                    "xsm_approve MCP tool with id %s: it shows the request to your user, who "
+                    "allows or denies it. Do not decide it yourself, and do not leave it waiting."
+                    % (worker["name"], req["id"], req["summary"], req["id"]))
+            kind = "task"
+        send_mod.send("ref:%s" % worker["parent_ref"], text, sender=me, kind=kind)
     except Exception:                       # telling is best effort; waiting is not
         pass
 
@@ -913,6 +928,22 @@ def human_terminal() -> bool:
         return False
     os.close(fd)
     return True
+
+
+def answer_asked(req_id: str, approve: bool, asked_by: str | None, reason: str | None = None) -> dict:
+    """An answer the person gave in an MCP elicitation form (xsm_approve). The
+    form is the check that a person answered, so no terminal is needed; only
+    the session that started the worker may ask."""
+    req = paths.read_json(_approval_path(req_id))
+    if not req or req.get("status") != "pending":
+        raise WorkerError("no pending approval request %s" % req_id)
+    worker = load(req.get("worker") or "") or {}
+    if worker.get("parent_ref") != asked_by:
+        raise WorkerError("request %s belongs to a worker another session started" % req_id)
+    req.update({"status": "approved" if approve else "denied", "answered": time.time(),
+                "reason": reason, "via": "mcp-elicitation"})
+    paths.write_json(_approval_path(req_id), req)
+    return req
 
 
 def answer(req_id: str, approve: bool, reason: str | None = None) -> dict:
