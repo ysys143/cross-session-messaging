@@ -32,7 +32,7 @@
 | [0002](0002-delivery-and-wakeup.md) | 에이전트별 전달·wakeup 방식 | Accepted | G2, G3 |
 | [0003](0003-no-wrapper-runtime-boundary.md) | 진입점 래퍼 금지의 경계 | Accepted | C1 |
 | [0004](0004-communication-scope.md) | 통신 범위(scope) 모델 | Accepted | G5 |
-| [0005](0005-channel-thread-store.md) | 채널-스레드 기록 저장소 | Discussing | G6 |
+| [0005](0005-channel-thread-store.md) | 채널-스레드 기록 저장소 | Accepted | G6 |
 | [0006](0006-shared-document-editing.md) | 공동 문서 편집 규약 | Deferred | G7 |
 | [0007](0007-remote-transport-and-trust.md) | 원격 통신과 신뢰 모델 | Deferred | G4 |
 | [0008](0008-session-naming-and-namespace.md) | 세션 이름, 주소, 네임스페이스 | Accepted | G1, G2, G5 |
