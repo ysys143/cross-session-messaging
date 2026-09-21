@@ -76,9 +76,14 @@ def cmd_who(args) -> int:
     if not me:
         print("this session is not registered (no hook record for this cwd)", file=sys.stderr)
         return REFUSED
-    print(json.dumps(me, ensure_ascii=False, indent=1) if args.json
-          else "%s@%s [%s] %s %s" % (me["name"], me["alias"], me["ref"],
-                                     me["runtime"], me.get("cwd") or ""))
+    if args.json:
+        print(json.dumps(me, ensure_ascii=False, indent=1))
+        return OK
+    print("%s@%s [%s] %s %s" % (me["name"], me["alias"], me["ref"],
+                                me["runtime"], me.get("cwd") or ""))
+    if me.get("name_source") and me["name_source"] != "user":
+        print("this name was %s, not chosen by your user; it can change. "
+              "The stable address is ref:%s" % (me["name_source"], me["ref"]))
     return OK
 
 

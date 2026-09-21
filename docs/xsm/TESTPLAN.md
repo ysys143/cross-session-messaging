@@ -175,6 +175,8 @@ ls -l ~/.claude-4/skills/xsm
 
 명령을 쓰려면 세션을 다시 띄워야 한다(3장). 세션 안에서 `/xsm-list`를 입력하면 등록된 세션 목록이 나온다.
 
+**`--setting-sources`를 주면 명령이 로드되지 않는다.** 명령 파일은 홈(사용자 설정 범위)에 있으므로, `--setting-sources project,local`처럼 사용자 범위를 뺀 세션에서는 `/xsm-who`가 "Unknown command"로 뜬다(2026-09-21 확인). 이 테스트에서는 그 옵션을 쓰지 않는다.
+
 사람이 터미널에서 직접 쓰려면 실행 파일을 PATH에 둔다. 선택 사항이다.
 
 ```bash
@@ -213,6 +215,8 @@ CLAUDE_CONFIG_DIR=~/.claude-4 claude --name builder
 cd /tmp/xsm-trial/review
 CLAUDE_CONFIG_DIR=~/.claude-5 claude --name reviewer
 ```
+
+`--name`은 선택 사항이다. 주지 않으면 Claude가 폴더 이름에 짧은 접미사를 붙여 이름을 만든다(`ws-99` 같은 형태). 주소로 쓸 수는 있지만 사람이 고른 이름이 아니고 나중에 바뀔 수 있으므로, 이 테스트처럼 역할이 정해진 세션에는 `--name`을 준다.
 
 두 세션 모두에서 아무 프롬프트나 한 번 입력한다(예: `준비됐으면 ready라고만 답해`). `permission_mode`는 첫 프롬프트에서 기록되므로, 이걸 해야 목록에 모드가 표시된다.
 

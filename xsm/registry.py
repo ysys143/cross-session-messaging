@@ -50,9 +50,17 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
 
 
 def _claude_native(home: str, pid) -> dict:
-    """Claude's own registry entry: authoritative name and inbox socket."""
+    """Claude's own registry entry: authoritative name and inbox socket.
+
+    nameSource tells us how stable the name is. Observed values: `user` (given
+    with --name or /rename), `derived` (built from the folder, e.g.
+    graduate-school-path-7b) and `auto` (generated from the conversation). Only
+    a user-set name is something a person chose, so anything written down should
+    use the ref instead.
+    """
     data = paths.read_json(os.path.join(home, "sessions", "%s.json" % pid), {}) or {}
     return {"name": data.get("name"), "socket": data.get("messagingSocketPath"),
+            "name_source": data.get("nameSource"),
             "native_session_id": data.get("sessionId")}
 
 
@@ -79,6 +87,7 @@ def _enrich(record: dict) -> dict:
         native = _claude_native(record.get("home", ""), record.get("pid"))
         out["name"] = native["name"] or record.get("name") or "claude-%s" % record.get("pid")
         out["socket"] = native["socket"]
+        out["name_source"] = native["name_source"]
     else:
         out["name"] = (_codex_thread_name(record.get("home", ""), str(record.get("session_id") or ""))
                        or record.get("name") or "codex-%s" % str(record.get("session_id"))[:8])
@@ -114,6 +123,7 @@ def unregistered() -> list:
             rec = {"runtime": "claude", "home": home["path"], "alias": home.get("alias"),
                    "session_id": sid, "pid": data.get("pid"), "cwd": data.get("cwd"),
                    "name": data.get("name"), "socket": data.get("messagingSocketPath"),
+                   "name_source": data.get("nameSource"),
                    # Claude writes procStart in UTC while `ps lstart` prints local
                    # time, so the two are not comparable; liveness for a session we
                    # did not register rests on pid plus a live socket.
