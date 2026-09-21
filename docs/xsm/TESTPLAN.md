@@ -38,6 +38,11 @@ done
 1. **`crossSessionInbound`가 `accept`인가.** `hold`이거나 없으면, 권한 모드가 다른 세션끼리 보낸 메시지는 수신 화면에서 사람이 승인해야 전달된다(S1). 두 세션을 같은 모드로 띄우면 `accept`가 아니어도 된다. 켜는 방법은 1.1절에 있다.
 2. **로그인돼 있는가.** 처음 쓰는 홈이면 `CLAUDE_CONFIG_DIR=~/.claude-5 claude` 를 한 번 실행해 로그인한다.
 3. 기존 훅 목록을 적어 둔다. 설치 뒤 그대로 남아 있어야 한다.
+4. **상대 경로를 쓰는 훅이 있는지 본다.** 테스트는 `/tmp/xsm-trial` 같은 낯선 폴더에서 세션을 띄우므로, 특정 프로젝트를 전제한 훅은 거기서 실패한다. 예를 들어 `python3 refactor/verify_loop.py …` 같은 `Stop` 훅은 매 턴 끝에 "can't open file" 메시지를 남긴다. 테스트에는 해가 없지만 화면이 시끄럽다. 신경 쓰이면 테스트 동안만 그 항목을 설정에서 지우거나(사본 먼저), 그 훅이 없는 홈을 고른다.
+
+```bash
+grep -n '"command"' ~/.claude-4/settings.json ~/.claude-5/settings.json
+```
 
 ### 1.1 `crossSessionInbound`를 `accept`로 두는 방법
 
@@ -178,6 +183,12 @@ xsm --help | head -3
 
 ## 3. 세션 열기
 
+**훅을 먼저 설치했는지 확인한다.** 훅은 세션이 시작할 때 읽히므로, 2장 전에 띄워 둔 세션은 등록되지 않는다. 이미 열려 있으면 닫고 다시 띄운다.
+
+```bash
+grep -c '#xsm-hook' ~/.claude-4/settings.json ~/.claude-5/settings.json   # 각 2가 나와야 한다
+```
+
 터미널 두 개를 연다. 두 세션의 **작업 폴더는 같은 git 저장소 안**이어야 한다(기본 범위 규칙). 테스트용 저장소를 하나 만든다.
 
 ```bash
@@ -301,7 +312,8 @@ builder가 메시지를 보내면 그 스크립트를 읽고 직접 실행해서
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
-| `xsm list`가 비어 있다 | 훅이 설치되지 않았거나, 세션이 설치 전에 떠 있었다 | `xsm doctor`로 설치 확인. 세션을 다시 띄운다 |
+| `xsm list`가 비어 있다 | 훅이 설치되지 않았거나, 세션이 설치 전에 떠 있었다 | `grep -c '#xsm-hook' <홈>/settings.json`으로 설치를 확인하고(2가 나와야 한다), 세션을 다시 띄운다 |
+| 턴이 끝날 때마다 "can't open file …" | 그 홈에 있던 다른 훅이 상대 경로를 쓴다. xsm과 무관하다 | 무시해도 된다. 1장 4번 참고 |
 | `this session is not registered` | CLI를 세션 밖에서 실행했다 | 세션 안의 셸에서 실행하거나 `xsm list`로 대상 ref를 확인한다 |
 | 수신 화면에 보류 창 | 권한 모드 부류가 다르고 `crossSessionInbound`가 `accept`가 아니다 | 1.1절 (a) 또는 (b)로 켠다. 프로젝트 설정으로는 안 된다 |
 | `refused: out of scope` | 두 세션이 다른 저장소에 있다 | 같은 저장소에서 띄우거나 `~/.xsm/config.json`에 scope를 적는다 |
