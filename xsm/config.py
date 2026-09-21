@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "same_repo_scope": True,  # the default rule below
     "scopes": [],             # explicit cross-repo scopes
     "max_depth": 1,           # worker levels below a top-level session (1: workers spawn none)
+    "max_workers": 4,         # workers one session may have running at once
 }
 
 

@@ -110,7 +110,9 @@ xsm stop <worker>           # stop it and remove its records
   `xsm approve` works only from a person's terminal, and trying to get around
   that is permission laundering. Tell your user what is waiting and why.
 - Workers cannot start workers unless the depth limit allows it (`max_depth`,
-  default 1). If spawn refuses for depth, report it; do not raise the limit.
+  default 1), and one session runs at most `max_workers` (default 4) at once.
+  If spawn refuses for either, report it; do not raise the limit. Workers stop
+  by themselves when the session that started them ends.
 - Inside Orca or herdr, `spawn` and `stop` refuse: that framework manages
   workers there. Use its own tools; xsm only carries messages between sessions.
 

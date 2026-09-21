@@ -210,9 +210,13 @@ def _claude_argv(worker: dict, settings: str) -> list:
         argv += ["--model", worker["model"]]
     if worker.get("effort"):
         argv += ["--effort", worker["effort"]]
+    # Default mode in both: a pane worker asks its person in the pane, a
+    # headless one asks through xsm, whatever mode the user's config starts
+    # sessions in (the same rule as Codex's explicit sandbox and approvals).
+    argv += ["--permission-mode", "default"]
     if worker["mode"] == "headless":
         argv += ["-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                 "--verbose", "--permission-mode", "default"]
+                 "--verbose"]
     return argv
 
 
@@ -255,6 +259,30 @@ def depth_budget(caller: dict | None, requested: int | None = None) -> tuple:
     return depth, limit
 
 
+def _limit(key: str, env: str, default: int) -> int:
+    value = os.environ.get(env)
+    if value and value.isdigit():
+        return int(value)
+    try:
+        return int(config.load().get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def check_concurrency(caller: dict | None) -> None:
+    """At most max_workers (config, XSM_MAX_WORKERS; default 4) running workers
+    per starting session. Orphans are reaped first so they do not count."""
+    reap()
+    parent = (caller or {}).get("ref")
+    running = [w for w in all_workers() if w.get("parent_ref") == parent and state(w) != "gone"]
+    limit = _limit("max_workers", "XSM_MAX_WORKERS", 4)
+    if len(running) >= limit:
+        raise WorkerError("%s already has %d running worker(s) and the limit is %d (max_workers): "
+                          "%s. Stop one first: xsm stop <name>" % (
+                              "this session" if parent else "this terminal", len(running), limit,
+                              ", ".join(w["name"] for w in running)))
+
+
 def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
           effort: str | None = None, cwd: str | None = None, home: str | None = None,
           once: bool = False, headless: bool = False, approval_timeout: int = APPROVAL_TIMEOUT,
@@ -262,6 +290,7 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
           max_depth: int | None = None) -> dict:
     refuse_inside_framework()
     depth, limit = depth_budget(caller, max_depth)
+    check_concurrency(caller)
     if runtime not in ("claude", "codex"):
         raise WorkerError("runtime must be claude or codex")
     name = name or "w-%s" % uuid.uuid4().hex[:4]
@@ -877,6 +906,54 @@ def _cleanup(worker: dict) -> None:
         os.unlink(_record_path(worker["name"]))
     except OSError:
         pass
+
+
+def orphans() -> list:
+    """Workers whose starting session is over: it ended, stopped without a
+    goodbye, or its pointer is gone (a stopped parent worker's is deleted, so
+    this cascades down a tree). A parent whose state is unknown — a Codex pid
+    that could not be confirmed — is not over. Also workers whose own process
+    is gone, which have nothing left to stop but their records."""
+    by_ref = {r.get("ref"): r for r in registry.records()}
+    out = []
+    for w in all_workers():
+        parent = by_ref.get(w.get("parent_ref")) if w.get("parent_ref") else None
+        if w.get("parent_ref") and (parent is None or parent.get("state") in ("ended", "stale")):
+            out.append((w, "its starting session is over"))
+        elif state(w) == "gone" and time.time() - w.get("created", 0) > 120:
+            out.append((w, "its process is gone"))
+    return out
+
+
+def reap() -> list:
+    stopped = []
+    for w, why in orphans():
+        try:
+            stop(w["name"], reason=why)
+            stopped.append((w["name"], why))
+        except WorkerError:
+            pass
+    return stopped
+
+
+def reap_detached(ending: dict | None = None) -> None:
+    """For hooks: reaping waits on signals, so it runs in its own process.
+
+    `ending` is a session saying goodbye. Its SessionEnd hook runs while its
+    process is still alive, so it still reads as live; the reaper waits for
+    that process to exit before it looks."""
+    argv = [install.pinned_python(), "-m", "xsm", "reap"]
+    if ending:
+        if not any(w.get("parent_ref") == ending.get("ref") for w in all_workers()):
+            return
+        if ending.get("pid"):
+            argv += ["--after-pid", str(ending["pid"])]
+    elif not orphans():
+        return
+    env = dict(os.environ)
+    env["PYTHONPATH"] = install.REPO
+    subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, env=env, start_new_session=True)
 
 
 def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None) -> None:

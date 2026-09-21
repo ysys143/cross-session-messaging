@@ -11,6 +11,7 @@ import glob
 import json
 import os
 import sys
+import time
 
 from . import config, envelope, housekeeping, install, ledger, paths, registry, resolve, send, \
     workers
@@ -515,7 +516,20 @@ def cmd_spawn(args) -> int:
     return OK
 
 
+def cmd_reap(args) -> int:
+    if args.after_pid:
+        from . import identity
+        deadline = time.time() + 120
+        while identity.pid_alive(args.after_pid) and time.time() < deadline:
+            time.sleep(0.5)
+    for name, why in workers.reap():
+        print("stopped %s: %s" % (name, why))
+    return OK
+
+
 def cmd_workers(args) -> int:
+    for name, why in workers.reap():
+        print("stopped %s: %s" % (name, why))
     rows = workers.all_workers()
     if not rows:
         print("no workers")
@@ -637,6 +651,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_spawn)
     wk = sub.add_parser("workers", help="workers xsm started")
     wk.set_defaults(func=cmd_workers)
+    rp = sub.add_parser("reap", help=argparse.SUPPRESS)
+    rp.add_argument("--after-pid", type=int)
+    rp.set_defaults(func=cmd_reap)
     for verb, helptext, func in (("stop", "stop a worker and remove its records", cmd_stop),
                                  ("attach", "watch a headless worker and talk to it", cmd_attach),
                                  ("pump", argparse.SUPPRESS, cmd_pump)):
@@ -734,6 +751,6 @@ def main(argv=None) -> int:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
     paths.ensure_home()
-    if args.command not in ("hook", "statusline", "prune", "pump"):
+    if args.command not in ("hook", "statusline", "prune", "pump", "reap"):
         housekeeping.maybe_prune()
     return args.func(args)

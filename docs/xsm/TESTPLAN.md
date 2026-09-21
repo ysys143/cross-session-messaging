@@ -538,7 +538,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 | 협업 | 5-1과 5-2가 사람 개입 없이 이어지고 5-4가 동작한다 |
 | Codex | 6-1~6-3이 `delivered`로 닫히고, 6-4에서 턴 경계 전달, 6-6에서 같은 ref로 재개된다 |
 | Codex 협업 | 6-7과 6-8이 사람 개입 없이 이어지고 6-9가 동작한다 |
-| 워커 | 10-1이 거부되고, 10-2~10-6이 답장까지 닫히며, 10-2a와 10-7의 한도 초과가 거부되고, 10-8이 비어 있다 |
+| 워커 | 10-1이 거부되고, 10-2~10-6이 답장까지 닫히며, 10-2a·10-7·10-9의 한도 초과가 거부되고, 10-10·10-11에서 워커가 정리되며, 10-12가 비어 있다 |
 | 무해함 | 설치 전 훅이 모두 남아 있고, 제거 후 설정 파일이 원래대로 돌아온다 |
 
 ## 8. 문제 해결
@@ -605,7 +605,11 @@ A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은
 | 10-5 | tmux 패널 Codex | `! xsm spawn codex --name pcx --once --task '6*7을 계산해 숫자만 보고해'` | 패널에 Codex TUI, 하단에 이름 `pcx`, 답장 42, 패널이 닫힌다. ref가 앞의 워커와 겹치지 않는다 |
 | 10-6 | 에이전트가 스스로 | A에게: `xsm spawn으로 claude haiku 워커를 --headless --once로 띄워서 "12의 제곱을 계산해 숫자만 보고해"를 맡기고, 답이 오면 결과만 알려줘` | A가 워커를 띄우고 144를 전한다 |
 | 10-7 | 깊이 제한 | 10-3처럼 패널 워커를 띄우고, 그 패널에서 `! xsm spawn claude --model haiku` | `refused: worker … (depth 1) may not start a worker: that would be depth 2 and the limit is 1`. 첫 워커를 `--max-depth 2`로 띄우면 두 번째 단계는 되고 세 번째에서 거부된다. `xsm workers`에 `depth 1/2`, `2/2`로 보인다 |
-| 10-8 | 정리 | `xsm workers`, `xsm approvals` | 둘 다 비어 있다 |
+| 10-8 | 패널 Claude 권한 | 10-3의 워커 패널 하단과 `ps -p <pid> -o args=` | 부모가 auto 모드여도 워커는 `manual mode on`, 인자에 `--permission-mode default` |
+| 10-9 | 동시 수 | `! XSM_MAX_WORKERS=2 xsm spawn … --name h1 && XSM_MAX_WORKERS=2 xsm spawn … --name h2`(이미 워커 하나가 있을 때) | h1은 뜨고 h2는 `refused: this session already has 2 running worker(s) and the limit is 2 (max_workers): …` |
+| 10-10 | 부모 종료 | 워커가 있는 상태에서 A에 `/exit` | 몇 초 안에 `xsm workers`가 `no workers`, 패널이 닫힌다 |
+| 10-11 | 부모 강제 종료 | 워커를 하나 띄우고 A를 `kill -9` | 다음 `xsm workers`가 `stopped …: its starting session is over`를 출력하고 비어 있다 |
+| 10-12 | 정리 | `xsm workers`, `xsm approvals` | 둘 다 비어 있다 |
 
 `--once` 없이 띄운 워커는 `xsm stop <이름>`으로 끝낸다. 대기 중인 승인은 거부로 닫히고 워커의 기록이 지워진다. 헤드리스 워커의 진행은 `xsm attach <이름>`으로 본다. 입력한 줄은 사람의 메시지로 워커에 들어가고, Ctrl-C로 빠져나와도 워커는 계속 돈다.
 
@@ -624,5 +628,6 @@ A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은
 - 10-4: luna 워커의 답 42를 pump가 대신 보냈고 `delivered`였다.
 - 10-5: 첫 시도에서 워커가 앞 워커(cw1)의 스레드로 잘못 등록되어 과제가 도착하지 않았다. 같은 폴더의 가장 최근 스레드로 추정한 탓이었다. 이름과 생성 시각으로 찾도록 고친 뒤 다시 해서 통과했다(새 ref, 답장 42, 패널 닫힘).
 - 10-6: 부모 에이전트가 스스로 워커를 띄우고 144를 전했다.
+- 10-8~10-11: 패널 Claude 워커가 부모(auto)와 달리 `manual mode`로 떴다. 워커 둘이 있을 때 세 번째가 이름과 함께 거부됐다. 부모 `/exit` 뒤 2초 안에 패널 워커와 헤드리스 워커가 모두 정리됐다. `kill -9`한 부모의 워커는 다음 `xsm workers`에서 정리됐다.
 - 10-7: 기본 한도에서 패널 워커 안의 spawn이 거부됐다. `--max-depth 2`로 띄운 워커는 헤드리스 워커를 하나 더 띄웠고(`depth 2/2`), 그 워커 명의의 spawn은 depth 3으로 거부됐다.
 - Codex 워커의 승인 전달: 사용자가 Codex에 xsm `PermissionRequest` 그룹을 설치하고 신뢰한 뒤 실측했다. 작업 폴더 밖 쓰기를 시켰는데 승인 요청 없이 파일이 생겼다. 원인은 둘이었다. 재개 턴(`exec resume`)에 샌드박스가 걸리지 않아 사용자 설정인 `danger-full-access`로 돌았고, `codex exec`는 `approval_policy`를 주어도 `never`로 돌았다. 모든 턴에 `sandbox_mode`를 주도록 고친 뒤에는 같은 과제가 `operation not permitted`로 거부되고 답장만 왔다. 그 훅 그룹은 설치 목록에서 뺐다. 이후 Codex app-server(IDE 클라이언트가 쓰는 JSON-RPC 인터페이스)가 승인 요청을 클라이언트로 보낸다는 것을 확인했고, 헤드리스 Codex 턴을 app-server로 옮겼다. 직접 시험에서 decline은 실행되지 않았고 accept는 실행됐다. 10-4a 실측에서는 승인 요청이 명령과 이유를 담아 xsm으로 왔고, 부모 에이전트는 승인하지 않았다. 터미널에서 승인하자 파일이 생기고 답장이 왔으며 워커가 스스로 정리됐다. 10-5a: 패널 Codex의 인자가 `-s workspace-write -a on-request`였고 YOLO 표시가 사라졌다.

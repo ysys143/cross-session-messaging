@@ -85,6 +85,8 @@ def maybe_prune() -> dict | None:
     try:
         if not due():
             return None
+        from . import workers
+        workers.reap_detached()        # workers left by sessions that are over
         return prune()
     except Exception:                  # housekeeping must never break a hook
         return None

@@ -399,3 +399,57 @@ class DepthTest(TempState):
         with self._env():
             with self.assertRaises(workers.WorkerError):
                 workers.depth_budget({"session_id": "s-w1"})
+
+
+class SafetyTest(TempState):
+    def _env(self, **extra):
+        from unittest import mock
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("XSM_WORKER", "XSM_MAX_WORKERS", "XSM_MAX_DEPTH")}
+        env.update(extra)
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def test_running_workers_per_session_are_capped(self):
+        from xsm import workers
+        workers.reap = lambda: []
+        workers.state = lambda w: "running"
+        for i in range(2):
+            workers.save({"name": "w%d" % i, "parent_ref": "pppppp", "created": i})
+        workers.save({"name": "other", "parent_ref": "qqqqqq", "created": 9})
+        with self._env(XSM_MAX_WORKERS="2"):
+            with self.assertRaises(workers.WorkerError) as cm:
+                workers.check_concurrency({"ref": "pppppp"})
+            workers.check_concurrency({"ref": "qqqqqq"})       # counted per session
+        self.assertIn("limit is 2", str(cm.exception))
+
+    def test_orphans_are_workers_of_sessions_that_are_over(self):
+        from xsm import registry, workers
+        registry.records = lambda: [{"ref": "live01", "state": "live"},
+                                    {"ref": "ended1", "state": "ended"},
+                                    {"ref": "stale1", "state": "stale"},
+                                    {"ref": "unkn01", "state": "unknown"}]
+        workers.state = lambda w: "running"
+        for name, parent in (("a", "live01"), ("b", "ended1"), ("c", "stale1"),
+                             ("d", "unkn01"), ("e", "gone01")):
+            workers.save({"name": name, "parent_ref": parent, "created": time.time()})
+        self.assertEqual(sorted(w["name"] for w, _ in workers.orphans()), ["b", "c", "e"],
+                         "an unknown parent is not over")
+
+    def test_a_parent_goodbye_reaps_once_its_process_is_gone(self):
+        from unittest import mock
+        from xsm import receive, registry, workers
+        rec = registry.upsert("claude", self.tmp, "s1", os.getpid(), self.tmp)
+        workers.save({"name": "b", "parent_ref": rec["ref"], "created": 0})
+        started = []
+        with mock.patch.object(workers.subprocess, "Popen",
+                               lambda argv, **kw: started.append(argv[3:])):
+            receive.handle({"hook_event_name": "SessionEnd", "session_id": "s1",
+                            "session_title": "boss", "reason": "exit"})
+        self.assertEqual(started, [["reap", "--after-pid", str(os.getpid())]],
+                         "the parent is still alive during its own SessionEnd")
+
+    def test_both_claude_modes_start_in_default_permission_mode(self):
+        from xsm import workers
+        for mode in ("pane", "headless"):
+            argv = workers._claude_argv({"name": "w", "mode": mode}, "/s.json")
+            self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")

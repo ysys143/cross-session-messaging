@@ -149,7 +149,7 @@ xsm approvals | approve <id> | deny <id>
 
 | 부른 곳 | 워커 | 승인 창 |
 |---|---|---|
-| tmux 안 | 부른 패널 옆에 분할한 패널에서 실제 TUI | 사람이 그 패널에서 답한다 |
+| tmux 안 | 부른 패널 옆에 분할한 패널에서 실제 TUI. Claude는 `--permission-mode default`, Codex는 `-s workspace-write -a on-request`로 띄워 사용자 기본 설정(auto, YOLO)을 따르지 않는다 | 사람이 그 패널에서 답한다 |
 | 일반 셸 | 헤드리스. Claude는 `claude -p` 스트림 모드(스스로 연 FIFO로 턴을 받는다), Codex는 턴마다 `codex app-server`를 잠깐 띄워 한 턴을 돈다 | xsm이 넘긴다. 사람이 터미널에서 `xsm approve`/`deny`, 또는 `xsm attach` 안에서 y/n |
 | Orca·herdr 안 | 띄우지 않는다. 워커 관리는 그 도구의 몫이고, xsm은 세션 간 메시지만 맡는다 | |
 
@@ -158,6 +158,8 @@ xsm approvals | approve <id> | deny <id>
 - 워커가 미리 허용받는 것은 `xsm send`(보고)뿐이다. 과제가 `xsm stop`이나 `xsm install`을 시켜도 승인을 거친다.
 - 보고는 승인 없이 된다. Claude 워커는 xsm 실행 권한을 받고 뜬다. 헤드리스 Codex 워커는 샌드박스 안에서 xsm에 닿지 못하므로, 과제를 받은 턴의 마지막 메시지를 pump가 대신 답장으로 보낸다.
 - **깊이 제한(`max_depth`, 기본 1).** 최상위 세션 아래로 워커가 몇 단계까지 이어질 수 있는지다. 1이면 세션은 워커를 띄우고, 워커는 더 띄우지 못한다. 전역값은 `~/.xsm/config.json`의 `max_depth`나 환경변수 `XSM_MAX_DEPTH`로 정하고, 워커를 띄울 때 `--max-depth N`으로 그 워커 아래의 한도를 정한다. 워커는 물려받은 한도를 낮출 수만 있다. 한도는 워커 기록에 있으므로 워커가 환경변수를 바꿔서 늘릴 수 없다.
+- **동시 워커 수(`max_workers`, 기본 4).** 한 세션이 동시에 돌릴 수 있는 워커 수다. config `max_workers`나 `XSM_MAX_WORKERS`로 정한다. 넘기면 돌고 있는 워커 이름과 함께 거부한다.
+- **남은 워커 정리.** 워커를 띄운 세션이 끝나면(정상 종료, 흔적 없는 정지, 기록 삭제) 그 워커를 종료하고 기록을 지운다. Claude 부모가 정상 종료하면 SessionEnd 훅이 부모 프로세스가 사라지기를 기다렸다가 바로 정리한다(실측 2초 안). 그 밖의 경우는 `xsm workers`, `xsm spawn`, 매시간 정리 때 잡힌다. 부모가 정지한 워커면 그 아래 워커도 이어서 정리된다. 상태를 확인할 수 없는(unknown) 부모의 워커는 건드리지 않는다.
 - `--once`면 과제의 답이 부모에게 도착하는 순간 부모 쪽 훅이 워커를 종료하고 기록을 지운다.
 - **Codex 워커도 사용자 설정과 관계없이 승인을 묻는다.** 헤드리스 턴은 매번 작업 폴더 쓰기만 허용하는 샌드박스(`workspace-write`)와 `on-request` 승인 정책을 명시해서 돈다. 그 밖의 작업은 승인 요청이 되어 xsm으로 사람에게 간다. 패널의 Codex TUI도 `-s workspace-write -a on-request`로 띄우므로 사용자의 YOLO 설정을 따르지 않고 패널에서 묻는다. `codex exec`는 승인을 묻지 않아서(승인 정책이 `never`로 강제된다, 실측) 이 경로에는 쓰지 않는다.
 

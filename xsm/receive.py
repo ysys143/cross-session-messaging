@@ -139,7 +139,8 @@ def handle(data: dict) -> dict | None:
     if data.get("hook_event_name") == "SessionEnd":
         # Do not re-register on the way out; just note the goodbye.
         if data.get("session_id"):
-            registry.mark_ended(runtime, data["session_id"], data.get("reason"))
+            ended = registry.mark_ended(runtime, data["session_id"], data.get("reason"))
+            workers.reap_detached(ended)    # its workers have nobody to report to now
         return None
     me = register(data, runtime)
     if me:
