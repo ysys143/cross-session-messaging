@@ -648,10 +648,51 @@ class CompactOutputTest(TempState):
         registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="worker")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            cli.main(["list", "--compact"])
+            cli.main(["list", "--compact", "--dir", self.tmp])
         line = out.getvalue().strip()
         self.assertTrue(line.startswith("worker@codex ["), line)
         self.assertNotIn("  ", line)
+
+
+class ListScopeTest(TempState):
+    """`xsm list` shows the sessions this folder can talk to; -a shows all."""
+
+    def _list(self, *argv):
+        from xsm import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["list", "--compact"] + list(argv))
+        return out.getvalue()
+
+    def test_default_is_this_project_and_a_shows_everything(self):
+        from xsm import config, registry
+        here, there = os.path.join(self.tmp, "here"), os.path.join(self.tmp, "there")
+        os.makedirs(here)
+        os.makedirs(there)
+        home = os.path.join(self.tmp, "codex")
+        os.makedirs(home)
+        registry.upsert("codex", home, "t1", os.getpid(), here, name="near")
+        registry.upsert("codex", home, "t2", os.getpid(), there, name="far")
+        out = self._list("--dir", here)
+        self.assertIn("near@", out)
+        self.assertNotIn("far@", out)
+        self.assertIn("far@", self._list("--dir", here, "-a"))
+        config.join("demo", here)
+        config.join("demo", there)
+        self.assertIn("far@", self._list("--dir", here), "a joined project counts as this one")
+
+
+class SupersededSessionTest(TempState):
+    def test_an_id_the_process_no_longer_runs_is_ended(self):
+        from xsm import registry
+        registry.identity.socket_live = lambda path: True
+        registry._claude_native = lambda home, pid: {"name": "b", "socket": "/s",
+                                                    "name_source": "user",
+                                                    "native_session_id": "current"}
+        registry.upsert("claude", self.tmp, "current", os.getpid(), self.tmp)
+        registry.upsert("claude", self.tmp, "old", os.getpid(), self.tmp)
+        states = {r["session_id"]: r["state"] for r in registry.records()}
+        self.assertEqual(states, {"current": "live", "old": "ended"})
 
     def _ledger_line(self):
         from xsm import cli

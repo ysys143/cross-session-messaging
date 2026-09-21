@@ -19,7 +19,30 @@ from . import config, envelope, housekeeping, install, ledger, paths, registry, 
 OK, REFUSED, UNCONFIRMED, USAGE = 0, 2, 3, 4
 
 
-def _rows(args) -> list:
+def _here(args, me=None) -> str:
+    """The folder a command speaks for: --dir, else the session running it
+    (its own cwd, which the shell may have left), else this shell."""
+    if getattr(args, "dir", None):
+        return os.path.realpath(os.path.expanduser(args.dir))
+    me = me if me is not None else registry.me()
+    return (me and me.get("cwd")) or os.getcwd()
+
+
+def _in_this_project(row: dict, here: str, me: dict | None) -> bool:
+    """Whether a session could be talked to from this folder: the same default
+    project, or a named project this folder has joined."""
+    probe = dict(me) if me else {}
+    probe["cwd"] = here
+    return bool(config.scope_for(probe, row)[0])
+
+
+def _width(text: str) -> int:
+    """Terminal columns: wide characters (Korean names, say) take two."""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in text)
+
+
+def _rows(args, me=None) -> list:
     rows = registry.records()
     if getattr(args, "all", False):
         rows += registry.unregistered()
@@ -28,14 +51,17 @@ def _rows(args) -> list:
     if getattr(args, "home", None):
         rows = [r for r in rows if args.home in (r.get("alias"), r.get("home"))]
     if not getattr(args, "all", False):
-        rows = [r for r in rows if r.get("state") != "stale"]
+        rows = [r for r in rows if r.get("state") not in ("stale", "ended")]
+        here = _here(args, me)
+        rows = [r for r in rows if (me and r.get("ref") == me.get("ref"))
+                or _in_this_project(r, here, me)]
     return rows
 
 
 def cmd_list(args) -> int:
     registry.adopt_open_codex()
     me = registry.me()
-    rows = _rows(args)
+    rows = _rows(args, me)
     for row in rows:
         row["inbound"] = registry.inbound_setting(row.get("home", "")) if \
             row.get("runtime") == "claude" else None
@@ -51,7 +77,13 @@ def cmd_list(args) -> int:
         print(json.dumps(rows, ensure_ascii=False, indent=1))
         return OK
     if not rows:
-        print("no sessions registered. Install the hooks first: xsm install --help")
+        if args.all:
+            print("no sessions registered. Install the hooks first: xsm install --help")
+        else:
+            others = len([r for r in registry.records() if r.get("state") == "live"])
+            print("no live sessions in this project (%s)%s" % (
+                config.default_project(_here(args, me))[0],
+                "; xsm list -a shows %d elsewhere" % others if others else ""))
         return OK
     if args.compact:
         # For a model to copy back verbatim: no alignment padding (every space
@@ -75,7 +107,7 @@ def cmd_list(args) -> int:
         # Run from a plain terminal there is no "us" to be in scope with, and
         # saying "out-of-scope" about every row would read as a verdict.
         print("(this terminal is not a registered session, so scope is not shown)")
-    width = max(len("%s@%s" % (r.get("name"), r.get("alias"))) for r in rows)
+    width = max(_width("%s@%s" % (r.get("name"), r.get("alias"))) for r in rows)
     for r in rows:
         addr = "%s@%s" % (r.get("name"), r.get("alias"))
         flags = [] if r.get("registered") else ["unregistered"]
@@ -85,8 +117,8 @@ def cmd_list(args) -> int:
             flags.append("you")
         if r.get("native") == "hold":
             flags.append("would be held")
-        print("%-*s  [%s]  %-6s %-7s %-9s %s%s" % (
-            width, addr, r.get("ref"), r.get("runtime"), r.get("state"),
+        print("%s  [%s]  %-6s %-7s %-9s %s%s" % (
+            addr + " " * (width - _width(addr)), r.get("ref"), r.get("runtime"), r.get("state"),
             r.get("permission_mode") or "mode?", r.get("cwd") or "",
             ("  (" + ", ".join(flags) + ")") if flags else ""))
     return OK
@@ -106,15 +138,6 @@ def cmd_who(args) -> int:
         print("this name was %s, not chosen by your user; it can change. "
               "The stable address is ref:%s" % (me["name_source"], me["ref"]))
     return OK
-
-
-def _here(args) -> str:
-    """The folder a project command speaks for: --dir, else the session running
-    it (its own cwd, which the shell may have left), else this shell."""
-    if getattr(args, "dir", None):
-        return os.path.realpath(os.path.expanduser(args.dir))
-    me = registry.me()
-    return (me and me.get("cwd")) or os.getcwd()
 
 
 def _home_tilde(path: str) -> str:
@@ -615,7 +638,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     ls = sub.add_parser("list", help="registered sessions")
-    ls.add_argument("--all", action="store_true", help="include stale and unregistered")
+    ls.add_argument("-a", "--all", action="store_true",
+                    help="every project, plus stopped and unregistered sessions "
+                         "(default: live sessions this folder can talk to)")
+    ls.add_argument("--dir", help="list for this folder instead of this session's")
     ls.add_argument("--runtime", choices=["claude", "codex"])
     ls.add_argument("--home", help="alias or path")
     ls.add_argument("--json", action="store_true")

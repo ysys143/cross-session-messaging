@@ -93,6 +93,7 @@ def _enrich(record: dict) -> dict:
         out["name"] = native["name"] or record.get("name") or "claude-%s" % record.get("pid")
         out["socket"] = native["socket"]
         out["name_source"] = native["name_source"]
+        out["native_session_id"] = native["native_session_id"]
     else:
         from . import workers           # lazy: workers imports this module
         worker = workers.for_session(record.get("session_id"))
@@ -107,6 +108,12 @@ def _enrich(record: dict) -> dict:
             out["registered"] = True
             return out
     out["state"] = identity.state_of(out)
+    if out["state"] == "live" and record.get("runtime") == "claude" and \
+            out.get("native_session_id") and out["native_session_id"] != record.get("session_id"):
+        # The process is alive but now runs another session: /clear and
+        # --resume change the id in place (measured: three ids on one pid).
+        out["state"] = "ended"
+        out["end_reason"] = out.get("end_reason") or "superseded"
     out["registered"] = True
     return out
 

@@ -19,8 +19,8 @@ the inbox socket and the queue database are both outside it.
 ## Finding out who is there
 
 ```bash
-xsm list                 # registered, live sessions you may address
-xsm list --all           # plus stopped and unregistered ones
+xsm list                 # live sessions this folder can talk to (its project)
+xsm list -a              # every project, plus stopped and unregistered ones
 xsm who                  # how other sessions see this session
 ```
 

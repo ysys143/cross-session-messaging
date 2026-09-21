@@ -184,7 +184,7 @@ ls -l ~/.claude-4/skills/xsm
 ```bash
 mkdir -p ~/.local/bin
 ln -sfn $XSM_REPO/bin/xsm ~/.local/bin/xsm
-which xsm && xsm list
+which xsm && xsm list -a
 ```
 
 `xsm: no package at …`가 나오면 링크가 저장소의 `bin/xsm`을 가리키고 있지 않다. `ls -l $(which xsm)`으로 확인한다.
@@ -225,8 +225,10 @@ CLAUDE_CONFIG_DIR=~/.claude-5 claude --name reviewer
 세 번째 터미널(사람이 관찰하는 자리)에서:
 
 ```bash
-cd $XSM_REPO && xsm list
+cd $XSM_REPO && xsm list --dir /tmp/xsm-trial
 ```
+
+`xsm list`는 기본으로 그 폴더(여기서는 `--dir`로 준 시험용 저장소)와 주고받을 수 있는 살아 있는 세션만 보여 준다. 모든 프로젝트와 멈춘 세션까지 보려면 `xsm list -a`.
 
 기대 출력: 두 세션이 `live`로 보이고 `would be held` 표시가 없다. 관찰 터미널은 등록된 세션이 아니므로 "(this terminal is not a registered session, so scope is not shown)"이 먼저 나오고 범위 표시는 생략된다. 범위는 세션 안에서 `xsm list`를 실행할 때 상대적으로 계산된다.
 
@@ -309,7 +311,7 @@ B 터미널에서 `/exit`로 종료한 뒤, A에게 넣는다.
 reviewer@claude-5 에게 xsm send로 "정지 확인"이라고 보내고 출력을 보여줘.
 ```
 
-기대: `refused: only stopped sessions match 'reviewer@claude-5'`와 후보 목록. 관찰 터미널에서 `xsm list`에는 B가 보이지 않고 `xsm list --all`에는 `stale`로 보인다. 확인 후 B를 다시 띄운다(3장과 같은 명령, 프롬프트 한 번).
+기대: `refused: only stopped sessions match 'reviewer@claude-5'`와 후보 목록. 관찰 터미널에서 `xsm list --dir /tmp/xsm-trial`에는 B가 보이지 않고 `xsm list -a`에는 `stale`로 보인다. 확인 후 B를 다시 띄운다(3장과 같은 명령, 프롬프트 한 번).
 
 ### 4.4 헤더 없는 주입 차단(4-9)
 
@@ -474,7 +476,7 @@ Codex는 첫 프롬프트부터 훅을 돌리므로, 이 시점에는 훅이 아
 관찰 터미널에서 확인한다.
 
 ```bash
-xsm list
+xsm list -a
 ```
 
 `cx-reviewer@codex [ref]`가 보여야 한다. 훅 신뢰가 빠진 홈이면 대신 등록하지 않고, 보낼 때 이유를 알려 준다.
@@ -545,7 +547,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
-| `xsm list`가 비어 있다 | 훅이 설치되지 않았거나, 세션이 설치 전에 떠 있었다 | `grep -c '#xsm-hook' <홈>/settings.json`으로 설치를 확인하고(3이 나와야 한다), 세션을 다시 띄운다 |
+| `xsm list`가 비어 있다 | 다른 프로젝트의 세션만 있다(`no live sessions in this project …; xsm list -a shows N elsewhere`), 또는 훅이 설치되지 않았거나 세션이 설치 전에 떠 있었다 | `grep -c '#xsm-hook' <홈>/settings.json`으로 설치를 확인하고(3이 나와야 한다), 세션을 다시 띄운다 |
 | 턴이 끝날 때마다 "can't open file …" | 그 홈에 있던 다른 훅이 상대 경로를 쓴다. xsm과 무관하다 | 무시해도 된다. 1장 4번 참고 |
 | `this session is not registered` | CLI를 세션 밖에서 실행했다 | 세션 안의 셸에서 실행하거나 `xsm list`로 대상 ref를 확인한다 |
 | 수신 화면에 보류 창 | 권한 모드 부류가 다르고 `crossSessionInbound`가 `accept`가 아니다 | 1.1절 (a) 또는 (b)로 켠다. 프로젝트 설정으로는 안 된다 |

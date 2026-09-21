@@ -70,7 +70,7 @@ python3 -m xsm uninstall --claude-home ~/.claude-3
 ## 쓰기
 
 ```bash
-xsm list                          # 주소를 지정할 수 있는 세션
+xsm list                          # 이 폴더와 주고받을 수 있는 살아 있는 세션 (-a: 모든 프로젝트, 멈춘 세션 포함)
 xsm who                           # 지금 세션의 신원
 xsm send "reviewer@claude-4" --text "..." --wait 20
 xsm status <msg-id>
@@ -165,7 +165,8 @@ xsm approvals | approve <id> | deny <id>
 
 ## 종료된 세션
 
-- 정상 종료한 세션은 `ended`, 흔적 없이 사라진 세션은 `stale`로 표시된다. 기본 목록에는 보이지 않고 `xsm list --all`에 나온다.
+- 정상 종료한 세션은 `ended`, 흔적 없이 사라진 세션은 `stale`로 표시된다. 기본 목록에는 보이지 않고 `xsm list -a`에 나온다.
+- 한 Claude 프로세스에서 `/clear`나 재개로 세션 id가 바뀌면, 옛 id는 그 프로세스가 살아 있어도 `ended`(대체됨)로 본다. Claude의 네이티브 기록에 적힌 현재 세션 id와 비교해 판정한다.
 - 멈춘 세션으로 보내면 거부되고, 재개 명령이 함께 나온다. `claude --resume <id>`로 재개하면 **같은 주소와 ref**로 돌아온다.
 - 원장에 `queued`로 남았는데 대상이 멈췄으면 `undelivered`로 보인다.
 - 정리는 자동이다. 멈춘 세션 포인터는 7일, 원장과 보류 본문은 30일 뒤 지워진다. 기간은 `config.json`의 `retention_days`, `ledger_retention_days`로 바꾼다. `xsm prune --dry-run`으로 미리 볼 수 있다.
