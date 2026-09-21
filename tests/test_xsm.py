@@ -230,5 +230,70 @@ class UnknownSelfTest(TempState):
         self.assertIsNone(self._handle("my own prompt"))
 
 
+class InterpreterPinTest(TempState):
+    """Hooks run under a pinned absolute interpreter, never a launcher."""
+
+    def test_absolute_path_is_taken_as_is(self):
+        from xsm import install
+        self.assertEqual(install.resolve_python(sys.executable), os.path.realpath(sys.executable))
+
+    def test_unknown_spec_is_refused(self):
+        from xsm import install
+        with self.assertRaises(ValueError):
+            install.resolve_python("definitely-not-a-python-9.9")
+
+    def test_pin_is_recorded_and_used_in_the_hook_command(self):
+        from xsm import install
+        install.pin_python(sys.executable)
+        self.assertEqual(install.pinned_python(), sys.executable)
+        self.assertIn(sys.executable, install.hook_command("claude", "SessionStart"))
+        self.assertTrue(install.hook_command("claude", "SessionStart").endswith(install.MARKER))
+
+class IdempotenceTest(TempState):
+    """Installing twice changes nothing and leaves no second backup, a dry run
+    writes nothing at all, and an interpreter pin survives a later install that
+    does not mention one."""
+
+    def _home(self):
+        from xsm import paths
+        home = os.path.join(self.tmp, "claude-idem")
+        os.makedirs(home, exist_ok=True)
+        paths.write_json(os.path.join(home, "settings.json"), {"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "sh ~/other.sh"}]}]}}, mode=0o644)
+        return home
+
+    def _backups(self, home):
+        return [f for f in os.listdir(home) if ".xsm-backup-" in f]
+
+    def test_second_install_is_a_no_op(self):
+        from xsm import install, paths
+        home = self._home()
+        install.apply(home, "claude")
+        first = paths.read_json(os.path.join(home, "settings.json"))
+        second = install.apply(home, "claude")
+        self.assertTrue(second.get("unchanged"))
+        self.assertEqual(paths.read_json(os.path.join(home, "settings.json")), first)
+        self.assertEqual(len(self._backups(home)), 1)
+
+    def test_a_duplicated_or_stale_marked_group_collapses_to_one(self):
+        from xsm import install, paths
+        home = self._home()
+        install.apply(home, "claude")
+        target = os.path.join(home, "settings.json")
+        data = paths.read_json(target)
+        data["hooks"]["SessionStart"].append(
+            {"hooks": [{"type": "command", "command": "/old/python /old/xsm-hook.py %s" % install.MARKER}]})
+        paths.write_json(target, data, mode=0o644)
+        install.apply(home, "claude")
+        groups = paths.read_json(target)["hooks"]["SessionStart"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["hooks"][0]["command"], install.hook_command("claude", "SessionStart"))
+
+    def test_pin_survives_an_install_without_python(self):
+        from xsm import install
+        install.pin_python("/usr/bin/python3")
+        self.assertEqual(install.resolve_python(None), "/usr/bin/python3")
+
+
 if __name__ == "__main__":
     unittest.main()

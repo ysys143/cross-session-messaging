@@ -17,6 +17,13 @@ python3 -m xsm doctor
 - 훅 명령에는 **설치 시점의 파이썬 절대 경로**가 박힌다. 훅이 뜨지 못하면 검문이 통째로 열리기 때문이다(S8-g2).
 - Codex는 첫 세션에서 훅 신뢰를 한 번 승인해야 한다. 승인 전에는 훅이 실행되지 않는다. 설치기는 안내만 하고 우회 옵션을 쓰지 않는다.
 
+```bash
+python3 -m xsm install --claude-home ~/.claude-4 --python 3.13       # uv python find로 해석
+python3 -m xsm install --claude-home ~/.claude-4 --python /opt/homebrew/bin/python3.13
+```
+
+**`uv run`을 훅에 쓰지 않는 이유.** 버전을 고정하려면 `uv python find <버전>`이 알려 준 **경로**를 박으면 된다. 훅 명령에 `uv run`을 넣으면 매 프롬프트마다 런처가 하나 더 끼고, PATH에서 uv를 찾아야 하고, 인터프리터가 없으면 내려받기까지 시도한다(훅 제한 시간 10초). xsm은 표준 라이브러리만 쓰므로 의존성 해석에서 얻을 것도 없다. 측정: 고정 인터프리터 0.04초, `uv run --no-project` 첫 실행 0.16초·이후 0.04초. CLI를 uv로 실행하는 것은 자유다(`uv run --no-project python -m xsm list`), `bin/xsm`은 `XSM_PYTHON`을 따른다.
+
 제거:
 
 ```bash

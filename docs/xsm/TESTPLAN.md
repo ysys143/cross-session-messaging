@@ -97,6 +97,14 @@ xsm doctor
 
 `doctor`의 `install` 줄이 두 홈 모두 `SessionStart:keep, UserPromptSubmit:keep`이면 설치된 것이다.
 
+`install`은 멱등하다. 다시 실행해도 설정 파일이 그대로면 쓰지 않고 "already installed … (nothing changed)"만 출력한다.
+
+훅이 돌 파이썬 버전을 고정하려면 `--python`을 준다. 경로를 그대로 쓰거나, 버전을 주면 `uv python find`로 해석한다.
+
+```bash
+xsm install --claude-home ~/.claude-4 --python 3.13
+```
+
 설치 전후 비교(기존 훅 보존 확인):
 
 ```bash
