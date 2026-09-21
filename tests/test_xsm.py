@@ -310,5 +310,42 @@ class IdempotenceTest(TempState):
         self.assertEqual(install.resolve_python(None), "/usr/bin/python3")
 
 
+class LauncherTest(TempState):
+    """bin/xsm is meant to be symlinked onto PATH, so it must follow the link
+    chain to find the package — resolving $0's directory alone once made
+    `~/.local/bin/xsm` look for the code in ~/.local."""
+
+    def _run(self, path, *args):
+        env = dict(os.environ, XSM_HOME=self.tmp)
+        return subprocess.run([path, *args], capture_output=True, text=True, env=env, cwd="/")
+
+    def test_direct_call_works(self):
+        out = self._run(os.path.join(REPO, "bin", "xsm"), "list")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_symlinked_call_works(self):
+        link = os.path.join(self.tmp, "xsm")
+        os.symlink(os.path.join(REPO, "bin", "xsm"), link)
+        out = self._run(link, "list")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_symlink_to_a_symlink_works(self):
+        first = os.path.join(self.tmp, "xsm-one")
+        second = os.path.join(self.tmp, "xsm-two")
+        os.symlink(os.path.join(REPO, "bin", "xsm"), first)
+        os.symlink(first, second)
+        out = self._run(second, "list")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_a_copy_away_from_the_package_says_so(self):
+        lonely = os.path.join(self.tmp, "lonely", "bin")
+        os.makedirs(lonely)
+        copied = os.path.join(lonely, "xsm")
+        shutil.copy2(os.path.join(REPO, "bin", "xsm"), copied)
+        out = self._run(copied, "list")
+        self.assertEqual(out.returncode, 4)
+        self.assertIn("no package at", out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

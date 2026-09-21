@@ -1,5 +1,22 @@
 #!/bin/sh
-# Thin launcher. `xsm install` pins an absolute interpreter into the hooks;
-# this script only needs to find the package next to itself.
-here=$(cd "$(dirname "$0")/.." && pwd)
-exec "${XSM_PYTHON:-python3}" -c "import sys; sys.path.insert(0, '$here'); from xsm.cli import main; sys.exit(main())" "$@"
+# Thin launcher: find the package next to this script and run the CLI.
+#
+# The script is meant to be symlinked onto PATH (~/.local/bin/xsm), so it has to
+# follow the link chain before looking for the package — $0 is the symlink, and
+# its directory is not where the code lives.
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in
+        /*) self=$link ;;
+        *) self=$(dirname "$self")/$link ;;
+    esac
+done
+here=$(cd "$(dirname "$self")/.." && pwd) || exit 1
+if [ ! -d "$here/xsm" ]; then
+    echo "xsm: no package at $here/xsm (is this launcher still next to the repo?)" >&2
+    exit 4
+fi
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec "${XSM_PYTHON:-python3}" -m xsm "$@"

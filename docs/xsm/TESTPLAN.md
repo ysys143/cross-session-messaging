@@ -177,9 +177,17 @@ ln -sfn $XSM_REPO/skills/xsm $h/skills/xsm
 스킬은 `xsm` 명령이 PATH에 있다고 가정한다. 세션에서 쓸 수 있게 해 둔다.
 
 ```bash
+mkdir -p ~/.local/bin
 ln -sfn $XSM_REPO/bin/xsm ~/.local/bin/xsm        # 또는 PATH에 $XSM_REPO/bin 추가
-xsm --help | head -3
 ```
+
+링크를 걸었으면 **여기서 바로 확인한다.** 세션 안에서 처음 쓰다가 실패하면 원인을 찾기 번거롭다.
+
+```bash
+which xsm && xsm list
+```
+
+`xsm: no package at …`가 나오면 링크가 저장소의 `bin/xsm`을 가리키고 있지 않다. `ls -l $(which xsm)`으로 확인한다. `ModuleNotFoundError: No module named 'xsm'`가 나오면 예전 버전의 실행 스크립트다. 저장소를 최신으로 맞춘다.
 
 ## 3. 세션 열기
 
