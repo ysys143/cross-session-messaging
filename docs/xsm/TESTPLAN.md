@@ -246,7 +246,7 @@ cd $XSM_REPO && xsm list
 | 4-8 | 정지한 상대 | 4.3절 | `refused: only stopped sessions match` |
 | 4-9 | 검문 | 4.4절 | B에서 차단, `xsm held list`에 본문 보관 |
 | 4-10 | 고장 대비 | 관찰 터미널에서 `xsm selftest` | 피어 메시지 차단, 사람 입력 통과 |
-| 4-11 | 프로젝트 가입 | 4.5절 | 양쪽이 가입한 뒤에만 `delivered`, 탈퇴하면 다시 `refused` |
+| 4-11 | 프로젝트 가입 | 4.5절 | 양쪽이 가입한 뒤에만 `delivered`, 같은 저장소는 계속 기본 프로젝트, 탈퇴하면 다시 `refused` |
 
 ### 4.1 범위 밖 세션(4-6)
 
@@ -337,15 +337,21 @@ xsm held show <목록에 나온 id>      # 전체 기록. show다, how가 아니
 
 ### 4.5 프로젝트 가입(4-11)
 
-범위 밖이던 C(`/tmp/xsm-outside`)와 A(시험용 저장소)를 이름 붙인 xsm 프로젝트로 묶는다. 4.1절의 C를 그대로 쓴다.
+범위 밖이던 C(`/tmp/xsm-outside`)와 A·B(시험용 저장소)를 이름 붙인 xsm 프로젝트로 묶는다. 4.1절의 C를 그대로 쓴다.
 
-1. **A에서만 가입한다.** A 세션에 `/xsm-join trial`. 출력에 `joined project trial: /private/tmp/xsm-trial`과 "no other project has joined trial yet"이 나온다. 가입 단위는 저장소 루트라서 같은 저장소의 B도 함께 들어간다.
+모든 세션은 시작한 디렉터리의 프로젝트에 **기본으로 속한다**. git 저장소 안이면 `repo:<저장소 이름>`, 아니면 `dir:<폴더 이름>`이다. 이름 붙인 프로젝트는 여기에 **추가로** 가입하는 것이고, 기본 프로젝트를 대신하지 않는다. 가입 단위는 폴더(저장소 루트)라서, 같은 저장소의 세션과 그 하위 폴더에서 연 세션도 함께 들어간다.
+
+0. **기본 프로젝트를 확인한다.** A 세션에 `/xsm-projects`. 기대: `this folder (/private/tmp/xsm-trial) is in: repo:xsm-trial (default)`와 "no named projects".
+1. **A에서만 가입한다.** A 세션에 `/xsm-join trial`. 기대: `joined project trial: /private/tmp/xsm-trial`, `this folder is in: repo:xsm-trial (default), trial`, "no other project has joined trial yet".
 2. **한쪽만 가입한 상태로 보낸다.** A에서 `/xsm-send <C의 이름> 한쪽만 가입`. 기대: `refused: out of scope: …; /private/tmp/xsm-outside has not joined project trial (run /xsm-join trial there)`. 한 저장소가 다른 저장소를 끌어들일 수 없다는 확인이다.
-3. **C도 가입한다.** C 세션에 `/xsm-join trial`. 출력의 "sessions in the other projects you can now reach"에 A와 B가 보인다.
-4. **다시 보낸다.** A에게: `<C의 이름>에게 xsm send --kind task로 "네 작업 폴더 경로를 알려줘"를 보내고 결과를 알려줘`. 기대: A는 `delivered`, C 화면의 헤더에 `scope="trial"`, C가 따로 지시하지 않아도 답장한다.
-5. **탈퇴한다.** C에서 `/xsm-leave trial`, 이어서 A에서 2번을 다시 하면 `refused`로 돌아온다. `/xsm-projects`로 남은 구성원을 확인하고, A에서도 `/xsm-leave trial`로 정리한다.
+3. **C도 가입한다.** C 세션에 `/xsm-join trial`. 기대: `this folder is in: dir:xsm-outside (default), trial`, 그리고 "sessions in the other projects you can now reach"에 A와 B가 보인다.
+4. **저장소를 넘어 보낸다.** A에게: `<C의 이름>에게 xsm send --kind task로 "네 작업 폴더 경로를 알려줘"를 보내고 결과를 알려줘`. 기대: A는 `delivered`, C 화면의 헤더에 `scope="trial"`, C가 따로 지시하지 않아도 답장한다. B에서 C로 보내도 `trial`로 전달된다.
+5. **같은 저장소는 기본 프로젝트 그대로다.** A에서 `/xsm-send reviewer 가입 후 같은 저장소`. 기대: `delivered`이고 헤더와 원장의 scope가 `trial`이 아니라 `repo:xsm-trial`이다. 관찰 터미널에서 `xsm ledger --json`으로 확인할 수 있다.
+6. **탈퇴한다.** C에서 `/xsm-leave trial`, 이어서 A에서 2번을 다시 하면 `refused`로 돌아오고 같은 안내가 붙는다. A→B는 탈퇴와 관계없이 계속 `repo:xsm-trial`로 전달된다. 끝으로 A에서도 `/xsm-leave trial`로 정리하고 `/xsm-projects`가 0번과 같은지 본다.
 
-가입 기록은 `~/.xsm/config.json`의 `scopes`에 `{"root": …}`로 남는다. 손으로 쓴 범위와 이름이 같으면 가입이 거부된다.
+가입 기록은 `~/.xsm/config.json`의 `scopes`에 `{"root": …}`로 남는다. 탈퇴할 때까지 유지되고 시간이 지나도 만료되지 않는다. 손으로 쓴 범위와 이름이 같으면 가입이 거부된다. 이름 붙인 프로젝트 이름에는 `:`를 쓸 수 없어서 기본 프로젝트 이름과 겹치지 않는다.
+
+실측(2026-09-21): 저장소 `app`의 루트(A 역할)와 하위 폴더(B 역할), 저장소 밖 `lib`(C 역할) 세 세션으로 0~6번을 돌렸다. 가입 전과 한쪽 가입 뒤에는 `refused`였다. 양쪽이 가입한 뒤 app→lib와 하위 폴더→lib는 `demo`로, app→하위 폴더는 가입 전후 모두 `repo:app`으로 `delivered`였다. lib가 탈퇴한 뒤에는 다시 `refused`였다.
 
 ## 5. 협업 과제
 
@@ -526,7 +532,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 | 발견 | 두 홈의 세션이 서로 `live`로 보이고 주소를 지정할 수 있다 |
 | 전달 | 4-3, 4-4가 `delivered`로 닫힌다 |
 | 거부 | 4-6, 4-7, 4-8이 발신 단계에서 거부된다 |
-| 가입 | 4-11에서 양쪽 가입 뒤에만 전달되고, 한쪽 가입과 탈퇴 뒤에는 거부된다 |
+| 가입 | 4-11에서 양쪽 가입 뒤에만 전달되고, 한쪽 가입과 탈퇴 뒤에는 거부되며, 같은 저장소 세션끼리의 scope는 가입 전후로 바뀌지 않는다 |
 | 검문 | 4-9가 차단되고 본문이 보관된다 |
 | 고장 | 4-10이 통과한다 |
 | 협업 | 5-1과 5-2가 사람 개입 없이 이어지고 5-4가 동작한다 |
