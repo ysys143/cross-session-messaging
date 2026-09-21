@@ -163,7 +163,7 @@ def state(worker: dict) -> str:
 
 GRANTS = "grants"
 GRANT_TTL = 600
-DANGEROUS = ("full_access", "trust_hooks")
+DANGEROUS = ("full_access", "trust_hooks", "outside_scope")
 
 
 def create_grant(asked_by: str, runtime: str, cwd: str, options: list, answer: str) -> dict:
@@ -378,6 +378,10 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
         if not trust or not all(trust.get(k) for k in ("SessionStart", "UserPromptSubmit")):
             raise WorkerError("the xsm hooks are not trusted in %s, so the worker could not "
                               "register; start codex there once and trust them" % home)
+    if caller and not config.scope_for(caller, {"cwd": cwd})[0]:
+        # A worker in a folder outside the caller's scope joins that folder's
+        # project and can talk to every session there, who never agreed.
+        dangerous.append("outside_scope")
     granted = None
     if dangerous and not human_terminal():
         granted = use_grant(grant, caller, runtime, cwd, dangerous)

@@ -1,6 +1,8 @@
 """Workers: framework deference, approvals that only a person can grant, and
 the headless Codex pump. Live behaviour (spawning real sessions) is covered by
 TESTPLAN chapter 10; these tests pin the rules around it."""
+import contextlib
+import io
 import json
 import os
 import sys
@@ -640,3 +642,67 @@ class NoIdleWorkerTest(TempState):
         self.assertIn("Report only what you actually did", ctx)
         self.assertIn("Your working folder is /w/proj", ctx)
         self.assertNotIn("do not end with", envelope.sender_context(parsed, worker=False))
+
+
+class Adr0009FixesTest(TempState):
+    """The four fixes ADR-0009 required before it closes."""
+
+    def _cli(self, *argv):
+        from xsm import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = cli.main(list(argv))
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 2
+                err.write(str(exc.code))
+        return code, out.getvalue() + err.getvalue()
+
+    def test_an_agent_cannot_join_or_speak_for_another_folder(self):
+        from xsm import workers
+        workers.human_terminal = lambda: False
+        code, text = self._cli("join", "demo")
+        self.assertEqual(code, 2)
+        self.assertIn("xsm_join", text)
+        code, text = self._cli("post", "hi", "--dir", self.tmp)
+        self.assertIn("only a person", text)
+
+    def test_block_is_open_to_anyone_unblock_only_to_a_person(self):
+        from xsm import config, workers
+        workers.human_terminal = lambda: False
+        self._cli("block", "abcdef")
+        self.assertIn("abcdef", config.blocked())
+        code, _ = self._cli("unblock", "abcdef")
+        self.assertEqual(code, 2)
+        self.assertIn("abcdef", config.blocked())
+        workers.human_terminal = lambda: True
+        self._cli("unblock", "abcdef")
+        self.assertNotIn("abcdef", config.blocked())
+
+    def test_send_refuses_a_blocked_target(self):
+        from xsm import config, registry, send
+        home = os.path.join(self.tmp, "codex")
+        os.makedirs(home)
+        me = registry.upsert("codex", home, "me", os.getpid(), self.tmp, name="me")
+        registry.upsert("codex", home, "you", os.getpid(), self.tmp, name="you")
+        target = registry.by_session("codex", "you")
+        config.block(target["ref"])
+        result = send.send("ref:%s" % target["ref"], "hi", sender=registry.by_session("codex", "me"))
+        self.assertEqual(result.status, "refused")
+        self.assertIn("blocked", result.reason)
+
+    def test_a_worker_outside_the_callers_scope_needs_a_grant(self):
+        from unittest import mock
+        from xsm import workers
+        workers.human_terminal = lambda: False
+        workers._check_installed = lambda home, runtime: None
+        workers.check_concurrency = lambda caller: None
+        here, there = os.path.join(self.tmp, "here"), os.path.join(self.tmp, "there")
+        os.makedirs(here)
+        os.makedirs(there)
+        caller = {"ref": "pppppp", "cwd": here, "runtime": "claude"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_", "TMUX"))}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(workers.WorkerError) as cm:
+                workers.spawn("claude", cwd=there, caller=caller, headless=True)
+        self.assertIn("outside-scope", str(cm.exception))

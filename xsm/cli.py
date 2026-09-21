@@ -21,8 +21,13 @@ OK, REFUSED, UNCONFIRMED, USAGE = 0, 2, 3, 4
 
 def _here(args, me=None) -> str:
     """The folder a command speaks for: --dir, else the session running it
-    (its own cwd, which the shell may have left), else this shell."""
+    (its own cwd, which the shell may have left), else this shell. A command
+    that changes or writes on a folder's behalf takes --dir only from a person:
+    otherwise one agent could speak for another project (ADR-0009)."""
     if getattr(args, "dir", None):
+        if args.command in ("join", "leave", "post") and not workers.human_terminal():
+            raise SystemExit("refused: --dir speaks for another folder; only a person at a "
+                             "terminal may use it with %s" % args.command)
         return os.path.realpath(os.path.expanduser(args.dir))
     me = me if me is not None else registry.me()
     return (me and me.get("cwd")) or os.getcwd()
@@ -176,7 +181,19 @@ def _print_members(scope: dict, root: str) -> None:
         print("  %s%s" % (_home_tilde(m.get("root", "")), "  (this project)" if mine else ""))
 
 
+def _person_or_refuse(what: str, mcp_tool: str) -> str | None:
+    """Changing who may talk to whom is the user's decision (ADR-0009)."""
+    if workers.human_terminal():
+        return None
+    return ("%s is your user's decision: ask them with the %s MCP tool (it shows them a form), "
+            "or they run it in a terminal" % (what, mcp_tool))
+
+
 def cmd_join(args) -> int:
+    why = _person_or_refuse("joining a project", "xsm_join")
+    if why:
+        print("refused: %s" % why, file=sys.stderr)
+        return REFUSED
     here = _here(args)
     try:
         scope, added = config.join(args.project, here)
@@ -206,6 +223,10 @@ def cmd_join(args) -> int:
 
 
 def cmd_leave(args) -> int:
+    why = _person_or_refuse("leaving a project", "xsm_join (with leave)")
+    if why:
+        print("refused: %s" % why, file=sys.stderr)
+        return REFUSED
     here = _here(args)
     if config.leave(args.project, here):
         print("left project %s: %s" % (args.project, _home_tilde(config.project_root(here))))
@@ -222,6 +243,19 @@ def _memberships(here: str) -> list:
     named = [s.get("id") for s in config.projects()
              if any(os.path.realpath(m.get("root", "")) == root for m in s.get("members", []))]
     return ["%s (default)" % default] + named
+
+
+def cmd_block(args) -> int:
+    if args.command == "unblock":
+        why = _person_or_refuse("lifting a block", "no")
+        if why:
+            print("refused: lifting a block needs a person at a terminal", file=sys.stderr)
+            return REFUSED
+        changed = config.unblock(args.ref)
+    else:
+        changed = config.block(args.ref)
+    print("%s %s" % (args.command + "ed" if changed else "no change for", args.ref))
+    return OK
 
 
 def cmd_projects(args) -> int:
@@ -814,6 +848,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--reason")
         sp.set_defaults(func=cmd_answer)
 
+    for verb, helptext in (("block", "stop one session from sending or receiving"),
+                           ("unblock", "lift a block (a person only)")):
+        bp = sub.add_parser(verb, help=helptext)
+        bp.add_argument("ref")
+        bp.set_defaults(func=cmd_block)
     pj = sub.add_parser("projects", help="named xsm projects and their member folders")
     pj.add_argument("--dir", help="mark membership relative to this folder")
     pj.set_defaults(func=cmd_projects)

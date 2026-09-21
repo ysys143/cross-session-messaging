@@ -31,7 +31,23 @@ class VectorCase(unittest.TestCase):
             os.makedirs(os.path.join(self.tmp, name), exist_ok=True)
 
     def tearDown(self):
+        for s in getattr(self, "_socks", []):
+            s.close()
+        shutil.rmtree(getattr(self, "_sockdir", ""), ignore_errors=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _listening_socket(self, name):
+        """A live session has an inbox socket that answers; the gate checks
+        that the sender is running. Kept short: unix socket paths are limited."""
+        import socket
+        if not getattr(self, "_sockdir", None):
+            self._sockdir, self._socks = tempfile.mkdtemp(prefix="xv", dir="/tmp"), []
+        path = os.path.join(self._sockdir, "%s.sock" % name)
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(path)
+        s.listen(4)
+        self._socks.append(s)
+        return path
 
     # helpers -----------------------------------------------------------------
 
@@ -53,9 +69,11 @@ class VectorCase(unittest.TestCase):
         cwd = self.fill(spec.get("cwd") or self.tmp)
         rec = registry.upsert("claude", home, spec["session_id"], os.getpid(), cwd,
                               permission_mode=spec.get("permission_mode"), name=spec["name"])
+        sock = spec.get("socket") or ("" if spec.get("stopped")
+                                      else self._listening_socket(spec["session_id"]))
         paths.write_json(os.path.join(home, "sessions", "%d.json" % os.getpid()),
                          {"name": spec["name"], "sessionId": spec["session_id"],
-                          "messagingSocketPath": spec.get("socket", "")})
+                          "messagingSocketPath": sock})
         return rec
 
     def records_by_session(self, sessions):

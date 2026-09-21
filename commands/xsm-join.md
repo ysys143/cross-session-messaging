@@ -1,17 +1,16 @@
 ---
-description: Put this project in a named xsm project so sessions in other projects that also joined it can talk to this one
+description: Let this folder join a named xsm project, so sessions in other repositories that also joined it can talk to this one
 argument-hint: <project-name>
-allowed-tools: Bash({{XSM}} join:*)
 disable-model-invocation: true
 ---
 
-This is a display command. There is nothing to decide.
+This is a mechanical command. Do exactly this and nothing else.
 
-Reply with the block between the markers, copied exactly, inside one code block.
-Nothing before it, nothing after it. Do not translate, reword, summarise or
-explain it, and do not call any tool.
+Call the MCP tool `xsm_join` with `project` set to the first word of the
+arguments below. It shows your user a form; their answer decides. Then reply
+with the tool's result, copied exactly, inside one code block.
 
-<<<
-!`{{XSM}} join $ARGUMENTS`
->>>
+If there are no arguments, reply with exactly: usage: /xsm-join <project-name>
+
+Arguments: $ARGUMENTS
 <!-- xsm-managed -->

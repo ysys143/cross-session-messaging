@@ -28,6 +28,7 @@ DEFAULT_CONFIG = {
     "scopes": [],             # explicit cross-repo scopes
     "max_depth": 1,           # worker levels below a top-level session (1: workers spawn none)
     "max_workers": 4,         # workers one session may have running at once
+    "deny": [],               # session refs that may neither send nor receive (ADR-0009)
 }
 
 
@@ -236,3 +237,33 @@ def leave(name: str, cwd: str) -> bool:
         _save(raw)
         return True
     return False
+
+
+# --- blocked sessions (ADR-0009) ------------------------------------------------------
+#
+# One session, not a folder: the way to cut off a misbehaving session inside an
+# otherwise allowed project. Blocking only narrows, so anyone may add a ref;
+# lifting a block widens again, so only a person may.
+
+def blocked() -> set:
+    return set(load().get("deny") or [])
+
+
+def block(ref: str) -> bool:
+    raw = _raw()
+    refs = raw.setdefault("deny", [])
+    if ref in refs:
+        return False
+    refs.append(ref)
+    _save(raw)
+    return True
+
+
+def unblock(ref: str) -> bool:
+    raw = _raw()
+    refs = raw.get("deny") or []
+    if ref not in refs:
+        return False
+    raw["deny"] = [r for r in refs if r != ref]
+    _save(raw)
+    return True

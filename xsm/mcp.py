@@ -50,10 +50,18 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "runtime": {"type": "string", "enum": ["claude", "codex"]},
          "options": {"type": "array", "items": {"type": "string",
-                                                 "enum": ["full_access", "trust_hooks"]}},
+                                                 "enum": ["full_access", "trust_hooks",
+                                                          "outside_scope"]}},
          "reason": {"type": "string"},
          "dir": {"type": "string", "description": "the worker's folder; default this session's"}},
          "required": ["runtime", "options", "reason"]}},
+    {"name": "xsm_join",
+     "description": ("Ask your user to let this session's folder join (or leave) a named xsm "
+                     "project, so sessions in other repositories that also joined it can talk "
+                     "with this one. Joining is their decision; this shows them a form."),
+     "inputSchema": {"type": "object", "properties": {
+         "project": {"type": "string"}, "leave": {"type": "boolean", "default": False},
+         "reason": {"type": "string"}}, "required": ["project"]}},
     {"name": "xsm_approve",
      "description": ("Show your user a permission request from a worker you started, and pass "
                      "on their answer. Call it as soon as you are told a worker is waiting; the "
@@ -137,6 +145,8 @@ class Server:
             return self.grant(where, me, args)
         if name == "xsm_approve":
             return self.approve(me, args)
+        if name == "xsm_join":
+            return self.join(me, args)
         raise channel.ChannelError("unknown tool %s" % name)
 
     def decide(self, where: tuple, me: dict, args: dict) -> str:
@@ -169,6 +179,35 @@ class Server:
                            approved={"question": question, "answer": answer,
                                      "options": options or None})
         return "recorded decision %s in %s: %s" % (rec["id"], where[0], answer)
+
+    def join(self, me: dict, args: dict) -> str:
+        from . import config
+        if "elicitation" not in (self.client_caps or {}):
+            raise channel.ChannelError("this client cannot ask its user; they can run "
+                                       "`xsm join` in a terminal")
+        project, leaving = (args.get("project") or "").strip(), bool(args.get("leave"))
+        root = config.project_root(me.get("cwd") or os.getcwd())
+        verb = "leave" if leaving else "join"
+        question = ("%s@%s asks to let %s %s the xsm project %r.%s\nAllow it?" % (
+            me.get("name"), me.get("alias"), root, verb, project,
+            ("\nReason: " + args["reason"]) if args.get("reason") else ""))
+        reply = self.ask_client("elicitation/create", {"message": question, "requestedSchema": {
+            "type": "object", "properties": {"answer": {"type": "string", "title": "Permission",
+                                                        "enum": ["allow", "deny"]}},
+            "required": ["answer"]}})
+        result = reply.get("result") or {}
+        if result.get("action") != "accept" or (result.get("content") or {}).get("answer") != "allow":
+            return "your user did not allow it; the folder's projects are unchanged"
+        try:
+            if leaving:
+                changed = config.leave(project, me.get("cwd") or os.getcwd())
+                return ("left %s" % project) if changed else "this folder was not in %s" % project
+            scope, added = config.join(project, me.get("cwd") or os.getcwd())
+        except ValueError as exc:
+            raise channel.ChannelError(str(exc))
+        others = [m["root"] for m in scope["members"] if os.path.realpath(m["root"]) != root]
+        return "%s %s; other members: %s" % ("joined" if added else "already in", project,
+                                             ", ".join(others) or "none yet")
 
     def approve(self, me: dict, args: dict) -> str:
         from . import workers
@@ -208,7 +247,9 @@ class Server:
         runtime = args.get("runtime")
         cwd = os.path.realpath(os.path.expanduser(args.get("dir") or me.get("cwd") or os.getcwd()))
         reason = (args.get("reason") or "").strip() or "(no reason given)"
-        words = {"full_access": "FULL ACCESS: no sandbox and no approval prompts",
+        words = {"outside_scope": "a folder OUTSIDE this session's project: the worker will be "
+                                  "able to talk to the sessions there",
+                 "full_access": "FULL ACCESS: no sandbox and no approval prompts",
                  "trust_hooks": "hooks run WITHOUT Codex's trust review, including any in that "
                                 "folder"}
         question = ("%s@%s wants to start a %s worker in %s with %s.\nReason: %s\n"

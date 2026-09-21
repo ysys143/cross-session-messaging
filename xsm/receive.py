@@ -171,6 +171,13 @@ def handle(data: dict) -> dict | None:
         sender = _sender_record(parsed)
         if sender is None:
             decision, reason = "block", "sender %r is not registered" % parsed.header.get("from")
+        elif sender.get("state") not in ("live", "unknown"):
+            # A stopped session's pointer stays for days; its name must not
+            # carry a message now (S8-e, ADR-0009).
+            decision, reason = "block", "sender %r is not running (%s)" % (
+                parsed.header.get("from"), sender.get("state"))
+        elif sender.get("ref") in config.blocked() or (me.get("ref") in config.blocked()):
+            decision, reason = "block", "a blocked session is on this message"
         else:
             scope, why = config.scope_for(sender, me, cfg)
             if not scope:

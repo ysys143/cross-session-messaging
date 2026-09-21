@@ -52,6 +52,10 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
         return SendResult("refused", "target has no hook record, so it cannot be addressed")
     if target.get("ref") == sender.get("ref"):
         return SendResult("refused", "refusing to send to yourself")
+    blocked = config.blocked()
+    if sender.get("ref") in blocked or target.get("ref") in blocked:
+        return SendResult("refused", "%s is blocked (xsm block); only a person can lift it" % (
+            "this session" if sender.get("ref") in blocked else "the target"), target=target)
 
     scope, reason = config.scope_for(sender, target)
     if not scope:
