@@ -10,6 +10,7 @@
 | Discussing | 토론 라운드 진행 중 |
 | Accepted | 결정됨. 결정과 근거가 기록됨 |
 | Superseded | 다른 ADR로 대체됨 |
+| Deferred | 사용자가 범위 밖으로 미룸. 다시 열 조건을 결정 절에 적는다 |
 
 ## 토론 라운드 절차
 
@@ -27,15 +28,15 @@
 
 | ADR | 제목 | 상태 | 관련 목표 |
 |---|---|---|---|
-| [0001](0001-session-registry.md) | 세션 레지스트리 위치와 형식 | Proposed | G1, G2 |
-| [0002](0002-delivery-and-wakeup.md) | 에이전트별 전달·wakeup 방식 | Proposed | G2, G3 |
-| [0003](0003-no-wrapper-runtime-boundary.md) | 진입점 래퍼 금지의 경계 | Proposed | C1 |
-| [0004](0004-communication-scope.md) | 통신 범위(scope) 모델 | Proposed | G5 |
-| [0005](0005-channel-thread-store.md) | 채널-스레드 기록 저장소 | Proposed | G6 |
-| [0006](0006-shared-document-editing.md) | 공동 문서 편집 규약 | Proposed | G7 |
-| [0007](0007-remote-transport-and-trust.md) | 원격 통신과 신뢰 모델 | Proposed | G4 |
-| [0008](0008-session-naming-and-namespace.md) | 세션 이름, 주소, 네임스페이스 | Proposed | G1, G2, G5 |
-| [0009](0009-session-trust-handshake.md) | 세션 간 신뢰 수립(핸드셰이크) | Proposed | G1, G2, G4, G5 |
+| [0001](0001-session-registry.md) | 세션 레지스트리 위치와 형식 | Accepted | G1, G2 |
+| [0002](0002-delivery-and-wakeup.md) | 에이전트별 전달·wakeup 방식 | Accepted | G2, G3 |
+| [0003](0003-no-wrapper-runtime-boundary.md) | 진입점 래퍼 금지의 경계 | Accepted | C1 |
+| [0004](0004-communication-scope.md) | 통신 범위(scope) 모델 | Accepted | G5 |
+| [0005](0005-channel-thread-store.md) | 채널-스레드 기록 저장소 | Deferred | G6 |
+| [0006](0006-shared-document-editing.md) | 공동 문서 편집 규약 | Deferred | G7 |
+| [0007](0007-remote-transport-and-trust.md) | 원격 통신과 신뢰 모델 | Deferred | G4 |
+| [0008](0008-session-naming-and-namespace.md) | 세션 이름, 주소, 네임스페이스 | Accepted | G1, G2, G5 |
+| [0009](0009-session-trust-handshake.md) | 세션 간 신뢰 수립(핸드셰이크) | Deferred | G1, G2, G4, G5 |
 | [0010](0010-workers.md) | 워커를 띄우고 끝내는 일의 경계 | Accepted | C1 |
 
 새 ADR은 [TEMPLATE.md](TEMPLATE.md)를 복사해 만든다.
