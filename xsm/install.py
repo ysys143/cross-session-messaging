@@ -28,7 +28,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # SessionEnd lets a clean exit read as `ended` rather than `stale`. Codex has
 # no SessionEnd event, so a stopped Codex session always reads as stale.
 CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "SessionEnd")
-CODEX_EVENTS = ("SessionStart", "UserPromptSubmit")
+# PermissionRequest carries headless workers' approvals to a person. It is
+# silent for every session that is not an xsm worker, and it has to be allowed
+# to wait as long as a person might take.
+CODEX_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest")
+TIMEOUTS = {"PermissionRequest": 660}
 
 
 INTERPRETER = "interpreter"
@@ -183,7 +187,7 @@ def install_skill(home: str) -> tuple:
     return "linked", target
 
 
-def codex_trust(home: str) -> dict:
+def codex_trust(home: str, approvals: bool = False) -> dict:
     """Whether Codex has trusted the xsm hook groups in this home.
 
     Codex records trust in config.toml as
@@ -197,6 +201,8 @@ def codex_trust(home: str) -> dict:
     data = paths.read_json(hooks_file, {}) or {}
     config_text = _read_text(os.path.join(home, "config.toml")) or ""
     snake = {"SessionStart": "session_start", "UserPromptSubmit": "user_prompt_submit"}
+    if approvals:
+        snake["PermissionRequest"] = "permission_request"
     out = {}
     for event, key in snake.items():
         for index, group in enumerate((data.get("hooks") or {}).get(event, [])):
@@ -285,7 +291,8 @@ def plan(home: str, runtime: str) -> dict:
         want = hook_command(runtime, event)
         # "keep" means exactly one marked group with exactly the right command:
         # a duplicate or a stale path still needs replacing.
-        have = len(ours) == 1 and ours[0]["hooks"][0].get("command") == want
+        have = len(ours) == 1 and ours[0]["hooks"][0].get("command") == want and \
+            ours[0]["hooks"][0].get("timeout", 10) == TIMEOUTS.get(event, 10)
         actions.append({"event": event, "others": len(groups) - len(ours),
                         "action": "keep" if have else ("replace" if ours else "add"),
                         "command": want})
@@ -309,7 +316,8 @@ def apply(home: str, runtime: str) -> dict:
     for action in result["actions"]:
         event = action["event"]
         groups = [g for g in hooks.get(event, []) if not _is_ours(g)]
-        groups.append({"hooks": [{"type": "command", "command": action["command"], "timeout": 10}]})
+        groups.append({"hooks": [{"type": "command", "command": action["command"],
+                                  "timeout": TIMEOUTS.get(event, 10)}]})
         hooks[event] = groups
     paths.write_json(target, data, mode=0o644)
     if paths.read_json(target) is None:                # re-parse or roll back
@@ -370,7 +378,7 @@ def doctor() -> dict:
         "codex_binary": adapters.codex_bin(),
         "homes": config.homes(),
         "installs": [plan(h["path"], h["runtime"]) for h in config.homes()],
-        "codex_trust": {h["path"]: codex_trust(h["path"]) for h in config.homes()
+        "codex_trust": {h["path"]: codex_trust(h["path"], approvals=True) for h in config.homes()
                         if h.get("runtime") == "codex"},
         "sessions": {"registered": len(registry.records()),
                      "live": len([r for r in registry.records() if r["state"] == "live"]),

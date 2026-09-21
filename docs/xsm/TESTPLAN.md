@@ -538,6 +538,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 | 협업 | 5-1과 5-2가 사람 개입 없이 이어지고 5-4가 동작한다 |
 | Codex | 6-1~6-3이 `delivered`로 닫히고, 6-4에서 턴 경계 전달, 6-6에서 같은 ref로 재개된다 |
 | Codex 협업 | 6-7과 6-8이 사람 개입 없이 이어지고 6-9가 동작한다 |
+| 워커 | 10-1이 거부되고, 10-2~10-6이 답장까지 닫히며, 10-2a가 거부되고, 10-7이 비어 있다 |
 | 무해함 | 설치 전 훅이 모두 남아 있고, 제거 후 설정 파일이 원래대로 돌아온다 |
 
 ## 8. 문제 해결
@@ -584,3 +585,37 @@ grep -c '#xsm-hook' ~/.claude-4/settings.json     # 0이어야 한다
 `restored: True`면 설치 전 상태와 같다. 백업은 설치와 제거에서 각각 하나씩, 홈마다 두 개가 남는다(`sorted(...)[0]`이 설치 전 것이다). 필요 없으면 지운다.
 
 이 9장의 절차는 실제 설정 파일의 사본으로 미리 실행해 확인했다: 설치 후 기존 훅이 모두 남았고, 제거 후 파일이 설치 전 백업과 완전히 같았다.
+
+## 10. 워커
+
+세션이 작업용 세션을 직접 띄우고, 과제를 주고, 답을 받고, 끝나면 종료하는지 본다. 부모 세션은 A를 쓴다. Claude 워커는 비용이 적은 `--model haiku`, Codex 워커는 기본값인 `gpt-5.6-luna`로 띄운다.
+
+**Orca나 herdr 안에서는 하지 않는다.** 그 안에서는 `spawn`이 거부된다(10-1). 나머지 항목은 그 도구 밖의 터미널에서 띄운 A로 한다. tmux 항목(10-3, 10-5)은 A가 tmux 안에서 떠 있어야 하고, 헤드리스 항목은 `--headless`로 강제한다.
+
+A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은 모델에게 시켜 본다.
+
+| # | 항목 | A에서 | 기대 |
+|---|---|---|---|
+| 10-1 | 프레임워크 안 | Orca 터미널에서 `xsm spawn claude` | `refused: this terminal belongs to orca, …` |
+| 10-2 | 헤드리스 Claude + 승인 | `! xsm spawn claude --headless --model haiku --name hw1 --once --task 'Write 도구로 작업 폴더에 result.txt를 만들고 42를 넣어. 한 줄로 보고해.'` | `started hw1 … headless`, `task …: delivered`. A에 "hw1 is waiting for approval [id] Write: …" 알림이 오고, A의 에이전트는 승인하지 않는다 |
+| 10-2a | 승인은 사람만 | 에이전트에게 `xsm approve <id>`를 시키거나 셸 도구로 실행 | `refused: approving needs a person at a terminal` |
+| 10-2b | 사람이 승인 | 일반 터미널에서 `xsm approve <id>`, `yes` 입력(또는 `xsm attach hw1`에서 y) | 파일이 생기고 A에 답장이 오고, `xsm workers`가 `no workers`(once) |
+| 10-3 | tmux 패널 Claude | `! xsm spawn claude --model haiku --name pw1 --once --task '6*7을 계산해 숫자만 보고해'` | A 옆에 패널이 생기고 TUI 워커가 과제를 받아 42로 답한 뒤 패널이 닫힌다 |
+| 10-4 | 헤드리스 Codex | `! xsm spawn codex --headless --name cw1 --once --task '6*7을 계산해 숫자만 보고해'` | `model gpt-5.6-luna`, 답장 42가 A에 도착(pump가 대신 보낸다), 워커가 사라진다 |
+| 10-5 | tmux 패널 Codex | `! xsm spawn codex --name pcx --once --task '6*7을 계산해 숫자만 보고해'` | 패널에 Codex TUI, 하단에 이름 `pcx`, 답장 42, 패널이 닫힌다. ref가 앞의 워커와 겹치지 않는다 |
+| 10-6 | 에이전트가 스스로 | A에게: `xsm spawn으로 claude haiku 워커를 --headless --once로 띄워서 "12의 제곱을 계산해 숫자만 보고해"를 맡기고, 답이 오면 결과만 알려줘` | A가 워커를 띄우고 144를 전한다 |
+| 10-7 | 정리 | `xsm workers`, `xsm approvals` | 둘 다 비어 있다 |
+
+`--once` 없이 띄운 워커는 `xsm stop <이름>`으로 끝낸다. 대기 중인 승인은 거부로 닫히고 워커의 기록이 지워진다. 헤드리스 워커의 진행은 `xsm attach <이름>`으로 본다. 입력한 줄은 사람의 메시지로 워커에 들어가고, Ctrl-C로 빠져나와도 워커는 계속 돈다.
+
+**Codex 워커의 승인 전달**은 `~/.codex/hooks.json`에 xsm `PermissionRequest` 그룹이 있어야 한다. `xsm install --codex-home ~/.codex`로 넣고, Codex를 한 번 띄워 새 훅을 신뢰한다. 그 전에는 헤드리스 Codex 워커가 작업 폴더 밖 쓰기 같은 권한 상승을 요청해도 사람에게 전달되지 않고 거부된다. 확인은 10-2와 같은 과제를 `xsm spawn codex --headless`로 주되, 작업 폴더 밖 경로에 쓰게 해서 한다.
+
+실측(2026-09-21, Orca 밖의 별도 tmux 서버에서 부모 `boss`로):
+
+- 10-1: 이 저장소를 연 Orca 터미널에서 거부됐다.
+- 10-2: haiku 워커가 처음에 작업 폴더가 아닌 경로(xsm 저장소)에 쓰려고 해서 승인 요청이 떴다. 부모 에이전트는 경로가 이상하다고 알렸고 승인하지 않았다. 셸 도구의 `xsm approve`는 거부됐다. `xsm deny --reason`으로 사유를 주자 워커가 경로를 고쳐 다시 요청했고, 터미널에서 `yes`로 승인하자 파일이 생기고 답장이 왔으며 워커가 스스로 사라졌다.
+- 10-3: 패널이 생겼다가 답장 42 뒤에 닫혔다.
+- 10-4: luna 워커의 답 42를 pump가 대신 보냈고 `delivered`였다.
+- 10-5: 첫 시도에서 워커가 앞 워커(cw1)의 스레드로 잘못 등록되어 과제가 도착하지 않았다. 같은 폴더의 가장 최근 스레드로 추정한 탓이었다. 이름과 생성 시각으로 찾도록 고친 뒤 다시 해서 통과했다(새 ref, 답장 42, 패널 닫힘).
+- 10-6: 부모 에이전트가 스스로 워커를 띄우고 144를 전했다.
+- Codex 워커의 승인 전달은 아직 실측하지 않았다. 신뢰 절차는 사용자가 해야 한다.

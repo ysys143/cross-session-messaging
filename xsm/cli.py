@@ -12,7 +12,8 @@ import json
 import os
 import sys
 
-from . import config, envelope, housekeeping, install, ledger, paths, registry, resolve, send
+from . import config, envelope, housekeeping, install, ledger, paths, registry, resolve, send, \
+    workers
 
 OK, REFUSED, UNCONFIRMED, USAGE = 0, 2, 3, 4
 
@@ -472,6 +473,117 @@ def cmd_statusline(args) -> int:
     return OK
 
 
+def cmd_spawn(args) -> int:
+    caller = registry.me()
+    if args.once and not args.task:
+        print("refused: --once stops the worker when its answer to --task arrives, so it "
+              "needs --task", file=sys.stderr)
+        return USAGE
+    if args.task and not caller:
+        print("refused: --task needs a registered session to send it from and to report back "
+              "to; run spawn from a session", file=sys.stderr)
+        return REFUSED
+    try:
+        worker = workers.spawn(args.runtime, name=args.name, model=args.model, effort=args.effort,
+                               cwd=args.dir, home=args.home, once=args.once,
+                               headless=args.headless, approval_timeout=args.approval_timeout,
+                               wait=args.wait, caller=caller)
+    except workers.WorkerError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    where = "tmux pane %s" % worker["pane"] if worker.get("pane") else "headless"
+    print("started %s (%s, %s%s) [%s] in %s" % (
+        worker["name"], worker["runtime"], where,
+        ", model %s" % worker["model"] if worker.get("model") else "", worker.get("ref"),
+        worker["cwd"]))
+    if args.task:
+        # The id is on record before the task leaves, so the answer can never
+        # arrive ahead of it (a `once` worker stops only on that exact answer).
+        task_id = envelope.new_id()
+        worker["task_id"] = task_id
+        workers.save(worker)
+        result = send.send("ref:%s" % worker["ref"], args.task, sender=caller, kind="task",
+                           wait=args.task_wait, msg_id=task_id)
+        print("task %s: %s%s" % (result.msg_id or "-", result.status,
+                                 ": " + result.reason if result.reason else ""))
+    if worker["mode"] == "headless":
+        print("watch it: xsm attach %s   stop it: xsm stop %s" % (worker["name"], worker["name"]))
+    else:
+        print("stop it: xsm stop %s" % worker["name"])
+    if worker.get("once"):
+        print("it stops by itself once its answer to the task reaches this session")
+    return OK
+
+
+def cmd_workers(args) -> int:
+    rows = workers.all_workers()
+    if not rows:
+        print("no workers")
+        return OK
+    for w in rows:
+        print("%s [%s] %s %s %s %s%s" % (
+            w["name"], w.get("ref"), w["runtime"], w["mode"], workers.state(w),
+            w.get("model") or "-", "  once" if w.get("once") else ""))
+    return OK
+
+
+def cmd_stop(args) -> int:
+    try:
+        if not args.internal:           # the hook's own once-stop is not a framework's call
+            workers.refuse_inside_framework()
+        worker = workers.stop(args.name)
+    except workers.WorkerError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    print("stopped %s and removed its records" % worker["name"])
+    return OK
+
+
+def cmd_attach(args) -> int:
+    try:
+        return workers.attach(args.name)
+    except workers.WorkerError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+
+
+def cmd_approvals(args) -> int:
+    rows = workers.approvals()
+    if not rows:
+        print("no approvals waiting")
+        return OK
+    for r in rows:
+        print("[%s] %s asks: %s  (xsm approve %s | xsm deny %s)" % (
+            r["id"], r["worker"], r["summary"], r["id"], r["id"]))
+    return OK
+
+
+def cmd_answer(args) -> int:
+    approve = args.command == "approve"
+    if approve:
+        req = next((r for r in workers.approvals() if r["id"] == args.id), None)
+        if req and workers.human_terminal():
+            # Separate read and write handles: a tty opened "r+" in text mode
+            # is not seekable and Python refuses it.
+            with open("/dev/tty", "w") as tty_out, open("/dev/tty") as tty_in:
+                tty_out.write("%s asks: %s\nType yes to approve: " % (req["worker"], req["summary"]))
+                tty_out.flush()
+                if tty_in.readline().strip().lower() != "yes":
+                    print("not approved")
+                    return REFUSED
+    try:
+        req = workers.answer(args.id, approve, args.reason)
+    except workers.WorkerError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    print("%s %s: %s" % (req["status"], req["id"], req["summary"]))
+    return OK
+
+
+def cmd_pump(args) -> int:
+    return workers.pump(args.name)
+
+
 def cmd_prune(args) -> int:
     removed = housekeeping.prune(dry_run=args.dry_run)
     verb = "would remove" if args.dry_run else "removed"
@@ -506,6 +618,39 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("project")
         sp.add_argument("--dir", help="the folder to speak for (default: this session's)")
         sp.set_defaults(func=func)
+    sp = sub.add_parser("spawn", help="start a worker session, optionally with a task")
+    sp.add_argument("runtime", choices=["claude", "codex"])
+    sp.add_argument("--name")
+    sp.add_argument("--model")
+    sp.add_argument("--effort", help="reasoning effort (claude --effort, codex model_reasoning_effort)")
+    sp.add_argument("--dir", help="working folder (default: this session's)")
+    sp.add_argument("--home", help="CONFIG_DIR / CODEX_HOME (default: this session's, else env)")
+    sp.add_argument("--task", help="send this as a task once the worker is up")
+    sp.add_argument("--task-wait", type=float, default=30.0)
+    sp.add_argument("--once", action="store_true", help="stop the worker when its answer arrives")
+    sp.add_argument("--headless", action="store_true", help="headless even inside tmux")
+    sp.add_argument("--approval-timeout", type=int, default=workers.APPROVAL_TIMEOUT)
+    sp.add_argument("--wait", type=float, default=90.0, help="seconds to wait for it to register")
+    sp.set_defaults(func=cmd_spawn)
+    wk = sub.add_parser("workers", help="workers xsm started")
+    wk.set_defaults(func=cmd_workers)
+    for verb, helptext, func in (("stop", "stop a worker and remove its records", cmd_stop),
+                                 ("attach", "watch a headless worker and talk to it", cmd_attach),
+                                 ("pump", argparse.SUPPRESS, cmd_pump)):
+        sp = sub.add_parser(verb, help=helptext)
+        sp.add_argument("name")
+        if verb == "stop":
+            sp.add_argument("--internal", action="store_true", help=argparse.SUPPRESS)
+        sp.set_defaults(func=func)
+    ap = sub.add_parser("approvals", help="permission requests waiting for a person")
+    ap.set_defaults(func=cmd_approvals)
+    for verb in ("approve", "deny"):
+        sp = sub.add_parser(verb, help="%s a worker's permission request (approve needs a terminal)"
+                            % verb)
+        sp.add_argument("id")
+        sp.add_argument("--reason")
+        sp.set_defaults(func=cmd_answer)
+
     pj = sub.add_parser("projects", help="named xsm projects and their member folders")
     pj.add_argument("--dir", help="mark membership relative to this folder")
     pj.set_defaults(func=cmd_projects)
@@ -586,6 +731,6 @@ def main(argv=None) -> int:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
     paths.ensure_home()
-    if args.command not in ("hook", "statusline", "prune"):
+    if args.command not in ("hook", "statusline", "prune", "pump"):
         housekeeping.maybe_prune()
     return args.func(args)

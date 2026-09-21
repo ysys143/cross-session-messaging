@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from . import adapters, config, envelope, ledger, paths, registry, resolve
+from . import adapters, config, envelope, ledger, paths, registry, resolve, workers
 
 
 class SendResult:
@@ -36,7 +36,8 @@ class SendResult:
 
 
 def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
-         reply_to: str | None = None, priority: str = "next", wait: float = 0.0) -> SendResult:
+         reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
+         msg_id: str | None = None) -> SendResult:
     sender = sender or registry.me()
     if not sender:
         return SendResult("refused", "this session is not registered; run `xsm doctor`")
@@ -60,7 +61,7 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
     if forecast in ("refuse",):
         return SendResult("refused", "the receiver would drop this: %s" % why, target=target)
 
-    msg_id = envelope.new_id()
+    msg_id = msg_id or envelope.new_id()
     content = envelope.build(body, msg_id=msg_id, sender=sender, scope=scope, kind=kind,
                              reply_to=reply_to)
     ledger.queued(msg_id, sender, target, scope, kind, body)
@@ -72,6 +73,8 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
             adapters.to_claude(target["socket"], content, msg_id, priority=priority,
                                reply_address=("uds:%s" % sender["socket"]) if sender.get("socket")
                                else None)
+        elif workers.is_headless_codex(workers.for_session(target.get("session_id"))):
+            workers.deliver(workers.for_session(target.get("session_id")), content)
         else:
             adapters.to_codex(target.get("home", os.path.expanduser("~/.codex")),
                               str(target.get("session_id")), content)

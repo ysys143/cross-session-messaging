@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-from . import config, envelope, housekeeping, identity, ledger, paths, registry
+from . import config, envelope, housekeeping, identity, ledger, paths, registry, workers
 
 CLAUDE_FIELDS = ("scratchpad_dir", "session_title", "prompt_id")
 CODEX_FIELDS = ("turn_id",)
@@ -134,6 +134,8 @@ def block(runtime: str, reason: str) -> dict:
 
 def handle(data: dict) -> dict | None:
     runtime = detect_runtime(data)
+    if data.get("hook_event_name") == "PermissionRequest":
+        return workers.permission_request(data, runtime)
     if data.get("hook_event_name") == "SessionEnd":
         # Do not re-register on the way out; just note the goodbye.
         if data.get("session_id"):
@@ -195,7 +197,11 @@ def handle(data: dict) -> dict | None:
         "id": msg_id, "receiver": me and me.get("name"), "from": parsed.header.get("from")})
     if msg_id:
         ledger.receipt(msg_id, "delivered", me)
-    return allow_with_context(runtime, envelope.sender_context(parsed, runtime))
+    if parsed.header.get("kind") == "reply":
+        workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
+    worker = workers.load(os.environ.get("XSM_WORKER") or "") if os.environ.get("XSM_WORKER") else None
+    return allow_with_context(runtime, envelope.sender_context(
+        parsed, runtime, auto_reply=workers.is_headless_codex(worker)))
 
 
 def _sender_record(parsed) -> dict | None:
@@ -227,6 +233,10 @@ def main(argv=None) -> int:
                 "block" if looks_like_peer else "pass",
             "reason": "xsm internal error: %s" % type(err).__name__,
             "detail": str(err)[:300], "peer_like": looks_like_peer})
+        if (data or {}).get("hook_event_name") == "PermissionRequest":
+            # No answer means the runtime's own default, which for a headless
+            # worker is to refuse. Never print a prompt decision here.
+            return 0
         if looks_like_peer:
             print(json.dumps({
                 "decision": "block",

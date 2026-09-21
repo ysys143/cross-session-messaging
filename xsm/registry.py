@@ -94,8 +94,18 @@ def _enrich(record: dict) -> dict:
         out["socket"] = native["socket"]
         out["name_source"] = native["name_source"]
     else:
+        from . import workers           # lazy: workers imports this module
+        worker = workers.for_session(record.get("session_id"))
         out["name"] = (_codex_thread_name(record.get("home", ""), str(record.get("session_id") or ""))
-                       or record.get("name") or "codex-%s" % str(record.get("session_id"))[:8])
+                       or (worker or {}).get("name") or record.get("name")
+                       or "codex-%s" % str(record.get("session_id"))[:8])
+        if workers.is_headless_codex(worker):
+            # No process between turns: a headless Codex worker is reachable for
+            # as long as its worker record exists.
+            out["worker"] = worker["name"]
+            out["state"] = "live"
+            out["registered"] = True
+            return out
     out["state"] = identity.state_of(out)
     out["registered"] = True
     return out
@@ -157,7 +167,9 @@ def _running_codex() -> list:
             continue
         if len(argv) > 1 and argv[1] in ("app-server", "mcp", "mcp-server", "exec", "queue"):
             continue
-        resumed = argv[2] if len(argv) > 2 and argv[1] == "resume" else None
+        # "?" is `codex resume` from the picker: some older thread, unknown which.
+        resumed = (argv[2] if len(argv) > 2 else "?") if len(argv) > 1 and argv[1] == "resume" \
+            else None
         try:
             res = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
                                  capture_output=True, text=True, timeout=5).stdout
@@ -181,11 +193,18 @@ def _open_codex_threads(home: str) -> list:
     threads = _codex_recent_threads(home, within=7 * 86400)
     chosen = []
     for cwd, epoch, resumed, pid in _running_codex():
-        if resumed:
+        if resumed and resumed != "?":
             chosen += [t + (pid,) for t in threads if t[0] == resumed]
             continue
         here = [t for t in threads if os.path.realpath(t[2] or "") == cwd]
-        since = [t for t in here if t[4] >= epoch - 5] or here
+        # A fresh TUI has open only a thread created after it started. Falling
+        # back to an older thread in the same folder adopted the wrong one when
+        # the new thread was not written yet (measured with a worker whose folder
+        # held an earlier worker's thread).
+        # A thread opened with /resume inside that TUI was created earlier but is
+        # touched after the TUI started; it counts only when no newer one exists.
+        since = here if resumed == "?" else (
+            [t for t in here if t[4] >= epoch - 5] or [t for t in here if t[5] >= epoch + 2])
         if since:
             chosen.append(max(since, key=lambda t: t[5]) + (pid,))
     return chosen

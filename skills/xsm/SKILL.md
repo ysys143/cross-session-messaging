@@ -89,6 +89,28 @@ A Codex session picks up a queued message within about ten seconds when its
 thread is loaded and idle, otherwise at its user's next input. It cannot be
 interrupted mid-turn. Never report `sent-unconfirmed` as delivered.
 
+## Workers: starting a session to hand work to
+
+```bash
+xsm spawn claude --model haiku --once --task "Run the tests in ./pkg and report failures"
+xsm spawn codex --effort high --task "Review docs/plan.md for gaps"     # Codex default model: gpt-5.6-luna
+xsm workers                 # what xsm started and whether it is running
+xsm attach <worker>         # watch a headless worker, type to it
+xsm stop <worker>           # stop it and remove its records
+```
+
+- Inside tmux the worker opens as the real TUI in a pane next to yours; its
+  user can watch and answer its prompts there. Elsewhere it runs headless.
+- `--task` sends the task as `--kind task` once the worker is up; the answer
+  comes back to you as a reply. `--once` stops the worker when that answer
+  arrives. Put everything the worker needs in the task.
+- A headless worker's permission prompts go to your user: you get a note
+  saying what it is waiting for. **Never try to approve it yourself** —
+  `xsm approve` works only from a person's terminal, and trying to get around
+  that is permission laundering. Tell your user what is waiting and why.
+- Inside Orca or herdr, `spawn` and `stop` refuse: that framework manages
+  workers there. Use its own tools; xsm only carries messages between sessions.
+
 ## Receiving
 
 A message from another session arrives with a `[xsm]` note naming the sender,
