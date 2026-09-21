@@ -394,7 +394,7 @@ Claude 세션 A(`builder`)와 Codex 세션 X를 같은 저장소에 두고 주�
 |---|---|---|
 | 전달 경로 | 세션의 inbox 소켓. 바로 도착 | `codex queue`. 스레드가 로드된 유휴 상태면 약 10초 안에 턴이 시작된다 |
 | 진행 중인 턴 | 끼어든다(다음 입력으로 쌓임) | 끼어들지 않는다. 지금 턴이 끝난 뒤 전달된다 |
-| 등록 시점 | 세션 시작 | **첫 프롬프트**. 그 전에는 목록에 없다 |
+| 등록 시점 | 세션 시작 | 스레드가 생길 때. 프롬프트나 `/rename`으로 스레드가 생기면, 훅이 돌기 전이라도 xsm이 대신 등록한다 |
 | 종료 표시 | `ended` 또는 `stale` | 항상 `stale`(SessionEnd 이벤트가 없다) |
 | 슬래시 명령 | `/xsm-*` | 없음. 셸에서 `xsm`을 실행한다 |
 
@@ -442,11 +442,15 @@ CODEX_HOME=~/.codex codex
 준비됐으면 ready라고만 답해.
 ```
 
-이름을 붙인다. Codex도 `/rename`이 있다. 붙이지 않으면 첫 메시지로 만든 제목("준비됐으면 …")이 이름이 된다.
+이름을 붙인다. Codex도 `/rename`이 있다. **프롬프트를 넣지 않아도 된다.**
 
 ```
 /rename cx-reviewer
 ```
+
+Codex는 첫 프롬프트부터 훅을 돌리므로, 이 시점에는 훅이 아직 한 번도 실행되지 않았다. 대신 `xsm list`나 `xsm send`가 실행될 때 xsm이 실행 중인 Codex 프로세스와 Codex의 상태 DB를 맞춰 **열린 스레드를 대신 등록한다.** 조건은 그 Codex 홈에 xsm 훅이 설치돼 있고 **신뢰돼 있는 것**이다. 설치와 신뢰가 곧 동의이기 때문이다. 이렇게 등록된 세션에 보낸 첫 메시지가 그 스레드의 첫 프롬프트가 되고, 그때 Codex 훅이 정식으로 등록하고 검문한다(2026-09-21 실측: 프롬프트를 한 번도 받지 않은 스레드가 큐로 `task`를 받아 수행하고 답장했다).
+
+아무것도 하지 않은 Codex(프롬프트도 `/rename`도 없음)는 스레드 자체가 없어서 주소를 줄 수 없다. 이름을 붙이거나 프롬프트를 하나 넣어야 한다.
 
 관찰 터미널에서 확인한다.
 
@@ -454,13 +458,13 @@ CODEX_HOME=~/.codex codex
 xsm list
 ```
 
-`cx-reviewer@codex [ref]`가 보여야 한다. **프롬프트를 넣기 전에는 보이지 않는다** — `/rename`만 해서는 등록되지 않는다. 그 상태에서 보내면 xsm이 이렇게 알려 준다.
+`cx-reviewer@codex [ref]`가 보여야 한다. 훅 신뢰가 빠진 홈이면 대신 등록하지 않고, 보낼 때 이유를 알려 준다.
 
 ```
-refused: cx-reviewer@codex is open but has not registered with xsm: no prompt yet; Codex registers a session at its first prompt
+refused: cx-reviewer@codex is open but has not registered with xsm: the xsm hooks are not trusted in … ; start codex and choose 'Trust all and continue'
 ```
 
-훅 신뢰가 빠졌으면 이유가 "the xsm hooks are not trusted …"로 나온다. `xsm doctor`의 `codex … hooks trusted` 줄로도 확인한다.
+`xsm doctor`의 `codex … hooks trusted` 줄로도 확인한다.
 
 ### 6.3 통신 확인
 
@@ -528,7 +532,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 | `sent-unconfirmed`가 계속된다 | 수신 세션이 꺼졌거나 훅이 없다 | `xsm list`로 상태 확인. Codex면 턴이 끝날 때까지 기다린다 |
 | 훅 오류가 `doctor`에 보인다 | 인터프리터나 경로 문제 | `xsm install`을 다시 실행해 인터프리터를 다시 고정한다 |
 | Codex에서 훅이 안 돈다 | 훅 신뢰를 아직 승인하지 않았다("Continue without trusting"을 골랐다) | Codex를 다시 띄워 훅 검토에서 신뢰한다 |
-| `xsm list`에 Codex가 없다 | 아직 프롬프트를 넣지 않았다(`/rename`만으로는 등록되지 않는다). Codex는 첫 프롬프트 때 등록된다 | 프롬프트를 한 번 넣는다. `xsm list --all`에는 열려 있는 미등록 스레드가 이유와 함께 보인다 |
+| `xsm list`에 Codex가 없다 | 스레드가 아직 없다(프롬프트도 `/rename`도 안 했다), 또는 그 홈의 훅이 신뢰되지 않았다 | `/rename`이나 프롬프트로 스레드를 만든다. 신뢰는 `xsm doctor`로 확인한다. `xsm list --all`에 이유가 보인다 |
 | Codex 이름이 첫 메시지 문장이다 | 이름을 붙이지 않았다 | Codex에서 `/rename cx-reviewer`. 이미 쓴 ref는 그대로다 |
 | Codex에서 보내면 `sandbox-blocked` | 샌드박스 안에서 실행됐다 | `--sandbox danger-full-access`로 띄우거나 명령 승인 요청을 허용한다 |
 | Codex가 메시지를 계속 안 받는다 | 턴이 진행 중이거나, 중단(Interrupted) 상태라 사람 입력을 기다린다 | 턴이 끝나길 기다리거나 Codex에 아무 입력이나 한 번 넣는다 |

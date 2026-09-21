@@ -742,7 +742,7 @@ class CodexVisibilityTest(TempState):
 
     def _with_open_thread(self, home, rollout=None):
         from xsm import registry
-        registry._open_codex_threads = lambda h: [("t-open", "reviewer", self.tmp, rollout, 0, 0)]
+        registry._open_codex_threads = lambda h: [("t-open", "reviewer", self.tmp, rollout, 0, 0, os.getpid())]
 
     def test_unprompted_thread_is_reported_with_the_reason(self):
         from xsm import resolve
@@ -757,6 +757,53 @@ class CodexVisibilityTest(TempState):
         home = self._codex_home(trusted=False)
         self._with_open_thread(home)
         self.assertIn("not trusted", resolve.resolve("reviewer").reason)
+
+
+class AdoptionTest(TempState):
+    """An open Codex thread in a home whose xsm hooks are trusted is registered
+    by the CLI before its first prompt, so it can be handed its first task.
+    Measured: a never-prompted thread took a task through the queue, and its
+    own hook registered it on that first turn."""
+
+    def _home(self, trusted):
+        from xsm import config, install, paths
+        home = os.path.join(self.tmp, "codex-adopt")
+        os.makedirs(home, exist_ok=True)
+        paths.write_json(os.path.join(home, "hooks.json"), {"hooks": {}}, mode=0o644)
+        install.apply(home, "codex")
+        hooks_file = os.path.realpath(os.path.join(home, "hooks.json"))
+        body = "".join('[hooks.state."%s:%s:0:0"]\ntrusted_hash = "sha256:x"\n\n' % (hooks_file, k)
+                       for k in ("session_start", "user_prompt_submit")) if trusted else ""
+        open(os.path.join(home, "config.toml"), "w").write(body)
+        config.add_home(home, "codex")
+        return home
+
+    def _open_thread(self):
+        from xsm import registry
+        registry._open_codex_threads = lambda h: [
+            ("t-new", "fresh", self.tmp, None, 0, 0, os.getpid())]
+
+    def test_trusted_home_is_adopted(self):
+        from xsm import registry, resolve
+        self._home(trusted=True)
+        self._open_thread()
+        adopted = registry.adopt_open_codex()
+        self.assertEqual([r["name"] for r in adopted], ["fresh"])
+        self.assertEqual(resolve.resolve("fresh").status, "resolved")
+
+    def test_untrusted_home_is_not_adopted(self):
+        from xsm import registry
+        self._home(trusted=False)
+        self._open_thread()
+        self.assertEqual(registry.adopt_open_codex(), [])
+
+    def test_the_hook_takes_over_the_pointer(self):
+        from xsm import registry
+        home = self._home(trusted=True)
+        self._open_thread()
+        registry.adopt_open_codex()
+        again = registry.upsert("codex", home, "t-new", os.getpid(), self.tmp, permission_mode="auto")
+        self.assertNotIn("adopted", again)
 
 
 if __name__ == "__main__":

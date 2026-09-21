@@ -41,6 +41,7 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
     if not sender:
         return SendResult("refused", "this session is not registered; run `xsm doctor`")
 
+    registry.adopt_open_codex()             # an unprompted Codex thread can still be addressed
     found = resolve.resolve(target_spec)
     if not found.ok:
         return SendResult("refused", found.reason, candidates=found.candidates)

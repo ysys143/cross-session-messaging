@@ -43,6 +43,7 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
     # back with the same session id, so an earlier goodbye no longer applies.
     record.pop("ended_at", None)
     record.pop("end_reason", None)
+    record.pop("adopted", None)       # the session's own hook has now spoken for it
     if permission_mode:
         record["permission_mode"] = permission_mode
     if name:
@@ -170,7 +171,7 @@ def _running_codex() -> list:
             epoch = time.mktime(time.strptime(started, "%a %b %d %H:%M:%S %Y")) if started else 0
         except ValueError:
             epoch = 0
-        found.append((os.path.realpath(cwd), epoch, resumed))
+        found.append((os.path.realpath(cwd), epoch, resumed, int(pid)))
     return found
 
 
@@ -179,15 +180,50 @@ def _open_codex_threads(home: str) -> list:
     the most recently touched thread in its folder since it started."""
     threads = _codex_recent_threads(home, within=7 * 86400)
     chosen = []
-    for cwd, epoch, resumed in _running_codex():
+    for cwd, epoch, resumed, pid in _running_codex():
         if resumed:
-            chosen += [t for t in threads if t[0] == resumed]
+            chosen += [t + (pid,) for t in threads if t[0] == resumed]
             continue
         here = [t for t in threads if os.path.realpath(t[2] or "") == cwd]
         since = [t for t in here if t[4] >= epoch - 5] or here
         if since:
-            chosen.append(max(since, key=lambda t: t[5]))
+            chosen.append(max(since, key=lambda t: t[5]) + (pid,))
     return chosen
+
+
+def adopt_open_codex() -> list:
+    """Register open Codex threads that have not run their hook yet.
+
+    Codex runs hooks only from a thread's first prompt, so a freshly started
+    (or only /rename'd) session is invisible and cannot be messaged — which is
+    exactly when someone wants to hand it its first task. Registration is
+    consent (ADR-0001), and here the consent was already given: xsm is
+    installed in that Codex home and its hooks are trusted. So the CLI records
+    the pointer itself. Homes without trusted hooks are left alone; the sender
+    is told why instead.
+
+    The first message delivered becomes the thread's first prompt, at which
+    point Codex's own hook re-registers it properly and gates the message.
+    Not called from hooks: reading the process table costs a few hundred ms.
+    """
+    adopted = []
+    known = {r.get("session_id") for r in records()}
+    for home in config.homes():
+        if home.get("runtime") != "codex":
+            continue
+        from . import install
+        trust = install.codex_trust(home["path"])
+        if not trust or not all(trust.values()):
+            continue
+        for row in _open_codex_threads(home["path"]):
+            thread_id, name, cwd, _rollout, _created, _updated, pid = row
+            if thread_id in known:
+                continue
+            rec = upsert("codex", home["path"], thread_id, pid, cwd or "", name=name)
+            rec["adopted"] = True
+            paths.write_json(_record_path("codex", thread_id), rec)
+            adopted.append(rec)
+    return adopted
 
 
 def unregistered() -> list:
@@ -200,7 +236,7 @@ def unregistered() -> list:
         if home.get("runtime") == "codex":
             from . import install                         # lazy: keeps hook imports small
             trust = install.codex_trust(home["path"])
-            for thread_id, name, cwd, rollout, _created, _updated in _open_codex_threads(home["path"]):
+            for thread_id, name, cwd, rollout, _created, _updated, _pid in _open_codex_threads(home["path"]):
                 if ("codex", str(thread_id)) in known:
                     continue
                 if trust and not all(trust.values()):

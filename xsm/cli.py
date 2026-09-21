@@ -31,6 +31,7 @@ def _rows(args) -> list:
 
 
 def cmd_list(args) -> int:
+    registry.adopt_open_codex()
     me = registry.me()
     rows = _rows(args)
     for row in rows:
