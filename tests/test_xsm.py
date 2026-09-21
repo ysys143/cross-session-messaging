@@ -954,3 +954,26 @@ class AdoptionTest(TempState):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListClearTest(TempState):
+    def test_clear_forgets_stopped_sessions_only(self):
+        from xsm import cli, registry
+        here = os.path.join(self.tmp, "here")
+        there = os.path.join(self.tmp, "there")
+        os.makedirs(here)
+        os.makedirs(there)
+        home = os.path.join(self.tmp, "codex")
+        os.makedirs(home)
+        registry.upsert("codex", home, "live1", os.getpid(), here, name="alive")
+        for sid, cwd in (("dead1", here), ("dead2", there)):
+            rec = registry.upsert("codex", home, sid, 999999, cwd, name=sid)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["list", "clear", "--dir", here])
+        self.assertIn("cleared 1", out.getvalue())
+        left = {r["session_id"] for r in registry.records()}
+        self.assertEqual(left, {"live1", "dead2"}, "live kept; other project untouched")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["list", "clear", "-a", "--dir", here])
+        self.assertEqual({r["session_id"] for r in registry.records()}, {"live1"})

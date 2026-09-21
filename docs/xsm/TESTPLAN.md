@@ -567,6 +567,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 cd $XSM_REPO
 xsm uninstall --claude-home ~/.claude-4 --claude-home ~/.claude-5 --codex-home ~/.codex
 rm -rf ~/.claude-4/skills/xsm ~/.claude-5/skills/xsm     # 복사본이면. 링크는 uninstall이 지운다
+xsm list clear -a                  # 멈춘 세션 기록만 지운다(살아 있는 세션은 남는다)
 rm -rf ~/.xsm                      # 레지스트리·원장·보류 기록까지 지울 때만
 rm -rf /tmp/xsm-trial
 ```

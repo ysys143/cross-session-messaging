@@ -189,6 +189,7 @@ xsm approvals | approve <id> | deny <id>
 ## 종료된 세션
 
 - 정상 종료한 세션은 `ended`, 흔적 없이 사라진 세션은 `stale`로 표시된다. 기본 목록에는 보이지 않고 `xsm list -a`에 나온다.
+- **바로 지우기.** `xsm list clear`는 이 프로젝트의 멈춘 세션(`ended`, `stale`) 기록을 보존 기간을 기다리지 않고 지운다. `xsm list clear -a`는 모든 프로젝트의 기록을 지운다. 살아 있는 세션과 상태를 확인할 수 없는 세션은 남긴다. 지운 세션도 재개하면 같은 ref로 다시 등록된다.
 - 한 Claude 프로세스에서 `/clear`나 재개로 세션 id가 바뀌면, 옛 id는 그 프로세스가 살아 있어도 `ended`(대체됨)로 본다. Claude의 네이티브 기록에 적힌 현재 세션 id와 비교해 판정한다.
 - 멈춘 세션으로 보내면 거부되고, 재개 명령이 함께 나온다. `claude --resume <id>`로 재개하면 **같은 주소와 ref**로 돌아온다.
 - 원장에 `queued`로 남았는데 대상이 멈췄으면 `undelivered`로 보인다.

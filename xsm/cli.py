@@ -58,9 +58,34 @@ def _rows(args, me=None) -> list:
     return rows
 
 
+def cmd_list_clear(args, me) -> int:
+    """Forget stopped sessions now instead of after the retention window.
+    Live ones and ones whose state cannot be confirmed stay; a cleared session
+    that is resumed registers again under the same ref."""
+    here = _here(args, me)
+    rows = [r for r in registry.records() if r.get("state") in ("ended", "stale")]
+    if not args.all:
+        rows = [r for r in rows if _in_this_project(r, here, me)]
+    for r in rows:
+        try:
+            os.unlink(registry._record_path(r["runtime"], r["session_id"]))
+        except OSError:
+            pass
+    if not rows:
+        print("nothing to clear%s" % ("" if args.all else " in this project; -a clears every "
+                                                          "project"))
+        return OK
+    print("cleared %d stopped session(s): %s" % (len(rows), ", ".join(
+        "%s@%s [%s] %s" % (r.get("name"), r.get("alias"), r.get("ref"), r.get("state"))
+        for r in rows)))
+    return OK
+
+
 def cmd_list(args) -> int:
     registry.adopt_open_codex()
     me = registry.me()
+    if getattr(args, "action", None) == "clear":
+        return cmd_list_clear(args, me)
     rows = _rows(args, me)
     for row in rows:
         row["inbound"] = registry.inbound_setting(row.get("home", "")) if \
@@ -704,6 +729,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     ls = sub.add_parser("list", help="registered sessions")
+    ls.add_argument("action", nargs="?", choices=["clear"],
+                    help="clear: forget stopped (ended/stale) sessions now; with -a in every project")
     ls.add_argument("-a", "--all", action="store_true",
                     help="every project, plus stopped and unregistered sessions "
                          "(default: live sessions this folder can talk to)")

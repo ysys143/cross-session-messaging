@@ -21,6 +21,7 @@ the inbox socket and the queue database are both outside it.
 ```bash
 xsm list                 # live sessions this folder can talk to (its project)
 xsm list -a              # every project, plus stopped and unregistered ones
+xsm list clear [-a]      # forget stopped sessions now (this project, or all)
 xsm who                  # how other sessions see this session
 ```
 
