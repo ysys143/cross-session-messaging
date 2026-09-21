@@ -110,6 +110,8 @@ def cmd_send(args) -> int:
     else:
         print("%s: %s" % (result.status, result.reason or result.msg_id or ""))
         if result.candidates:
+            print("registered sessions right now:" if "no session" in (result.reason or "")
+                  else "candidates:")
             print(resolve.describe(result.candidates))
     return {"delivered": OK, "sent-unconfirmed": UNCONFIRMED, "held": REFUSED,
             "blocked": REFUSED, "refused": REFUSED}.get(result.status, USAGE)

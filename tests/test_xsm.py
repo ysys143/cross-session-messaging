@@ -370,5 +370,27 @@ class ListFromAPlainTerminalTest(TempState):
         self.assertNotIn("out-of-scope", printed)
 
 
+class SuggestionTest(TempState):
+    """A name that matches nothing comes back with what does exist, so a caller
+    working from a stale list does not have to fetch one."""
+
+    def test_unknown_name_lists_registered_sessions(self):
+        from xsm import paths, registry, resolve
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="worker")
+        found = resolve.resolve("nobody-here")
+        self.assertEqual(found.status, "not-found")
+        self.assertEqual([c["name"] for c in found.candidates], ["worker"])
+        self.assertIn("worker@codex", resolve.describe(found.candidates))
+
+    def test_unknown_ref_also_suggests(self):
+        from xsm import registry, resolve
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="worker")
+        self.assertEqual(resolve.resolve("ref:zzzzzz").candidates[0]["name"], "worker")
+
+
 if __name__ == "__main__":
     unittest.main()

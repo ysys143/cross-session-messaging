@@ -33,6 +33,15 @@ def _pool(include_offline: bool) -> list:
     return rows if include_offline else [r for r in rows if r.get("state") != "stale"]
 
 
+def _live_addresses(limit: int = 8) -> list:
+    """Addresses worth suggesting when a name did not match: a caller working
+    from a list it fetched minutes ago should not have to fetch it again."""
+    rows = registry.records()
+    live = [r for r in rows if r.get("state") == "live"]
+    ordered = sorted(live or rows, key=lambda r: r.get("updated", 0), reverse=True)
+    return ordered[:limit]
+
+
 def resolve(target: str, include_offline: bool = False) -> Resolution:
     target = (target or "").strip()
     if not target:
@@ -47,7 +56,8 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
                 if key in ("claude", "codex") and rec.get("runtime") == key \
                         and rec.get("session_id") == value:
                     return Resolution("resolved", rec)
-            return Resolution("not-found", reason="no session with %s" % target)
+            return Resolution("not-found", reason="no session with %s" % target,
+                              candidates=_live_addresses())
 
     match = QUALIFIED_RE.match(target)
     if not match:
@@ -67,7 +77,8 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
     if ref:
         pool = [r for r in pool if r.get("ref") == ref]
     if not pool:
-        return Resolution("not-found", reason="no session named %r" % name)
+        return Resolution("not-found", reason="no session named %r" % name,
+                          candidates=_live_addresses())
 
     live = [r for r in pool if r.get("state") == "live"]
     usable = live or (pool if include_offline else [])
@@ -81,6 +92,7 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
 
 
 def describe(candidates) -> str:
-    return "\n".join("  %s@%s [%s] %s %s" % (c.get("name"), c.get("alias"), c.get("ref"),
-                                             c.get("runtime"), c.get("cwd") or "")
-                     for c in candidates)
+    return "\n".join("  %s@%s [%s] %s %s%s" % (
+        c.get("name"), c.get("alias"), c.get("ref"), c.get("runtime"),
+        "" if c.get("state") == "live" else "(%s) " % c.get("state"), c.get("cwd") or "")
+        for c in candidates)

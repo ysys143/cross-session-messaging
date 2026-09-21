@@ -30,9 +30,12 @@ xsm send "reviewer@claude-4" --text "..." --wait 20     # wait for the receiver'
 xsm send "ref:a1b2c3" --text "..." --kind task --reply-to 9f2c1d
 ```
 
-Address by `name`, `name@home`, `name [ref]`, or `ref:xxxxxx`. If a name
-matches more than one live session the command refuses and prints the
-candidates; pick one, do not guess.
+Address by `name`, `name@home`, `name [ref]`, or `ref:xxxxxx`. The target is
+resolved when you send, so do not re-run `xsm list` to check that a session
+still exists — a list you fetched earlier is a snapshot, and sending is the
+check. If the name matches nothing, or matches more than one session, the
+command refuses and prints the sessions that exist right now; pick one from
+that list rather than guessing.
 
 Read the result as it is written:
 
