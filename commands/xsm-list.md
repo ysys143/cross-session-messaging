@@ -8,7 +8,7 @@ Sessions registered with xsm:
 
 !`{{XSM}} list --all`
 
-Present this as it is. One line per session, keep the `name@home [ref]` form, and
-keep the flags (`stale`, `unregistered`, `out-of-scope`, `would be held`) — each
-one changes whether a message would arrive. Add nothing else.
+The list above is the answer. Reply with nothing at all unless a row carries a
+flag that would stop a message arriving (`stale`, `unregistered`, `out-of-scope`,
+`would be held`) — then say only that, in one line.
 <!-- xsm-managed -->

@@ -134,6 +134,21 @@ def unregistered() -> list:
     return out
 
 
+def cheap_records() -> list:
+    """Pointers whose process is still alive, without the expensive checks.
+
+    `records()` runs `ps` per session and probes each socket, which is right for
+    addressing but far too slow for something drawn on every keystroke. Here a
+    dead pid is enough to drop a row; a recycled pid may survive one render.
+    """
+    out = []
+    for p in glob.glob(paths.path(paths.SESSIONS, "*.json")):
+        rec = paths.read_json(p)
+        if rec and rec.get("pid") and identity.pid_alive(rec["pid"]):
+            out.append(rec)
+    return out
+
+
 def by_session(runtime: str, session_id: str) -> dict | None:
     rec = paths.read_json(_record_path(runtime, session_id))
     return _enrich(rec) if rec else None

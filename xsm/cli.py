@@ -221,6 +221,13 @@ def cmd_install(args) -> int:
                 "foreign": "something else is at skills/xsm; left alone",
             }
             print("  skill: %s" % notes.get(state, state))
+        if runtime == "claude" and args.statusline:
+            outcome = install.install_statusline(home)
+            print("  statusLine: %s" % {
+                "installed": "set to `xsm statusline` (no model call)",
+                "already": "already set",
+                "kept-existing": "left alone: this home already has its own statusLine",
+            }[outcome])
         if runtime == "codex":
             print("  Codex asks you to trust hooks once, at the next session start. "
                   "Until you do, the hook does not run.")
@@ -238,6 +245,8 @@ def cmd_uninstall(args) -> int:
                 print("%s: removed %d slash command file(s)" % (home, gone))
             if install.remove_skill(home):
                 print("%s: unlinked the skill" % home)
+            if install.remove_statusline(home):
+                print("%s: removed the xsm statusLine" % home)
         print("%s: removed %s xsm hook group(s)%s" % (
             result.get("file"), result.get("removed", 0),
             "" if not result.get("error") else " (%s)" % result["error"]))
@@ -287,6 +296,39 @@ def cmd_selftest(args) -> int:
     print("human prompt on a broken hook: %s" % ("passed (good)" if not human.stdout.strip()
                                                  else "BLOCKED"))
     return OK if passed else USAGE
+
+
+def cmd_statusline(args) -> int:
+    """One short line for Claude's statusLine, which runs on every render and
+    calls no model. Deliberately cheap: pointer files plus a kill(pid, 0) each,
+    no socket probes and no `ps`, so it costs nothing to show continuously."""
+    try:
+        rows = registry.cheap_records()
+    except Exception:                              # a statusline must never break the UI
+        print("xsm ?")
+        return OK
+    # Claude hands a statusLine command the session as JSON on stdin; fall back
+    # to the environment when run by hand.
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sys.stdin.isatty():
+        try:
+            session_id = (json.loads(sys.stdin.read() or "{}") or {}).get("session_id") or session_id
+        except ValueError:
+            pass
+    me = next((r for r in rows if r.get("session_id") == session_id), None)
+    others = [r for r in rows if r is not me]
+    held = 0
+    try:
+        held = len([f for f in os.listdir(paths.path(paths.HELD)) if f.endswith(".json")])
+    except OSError:
+        pass
+    parts = ["xsm %d peer%s" % (len(others), "" if len(others) == 1 else "s")]
+    if me:
+        parts.append("as %s" % me.get("name"))
+    if held:
+        parts.append("%d held" % held)
+    print(" · ".join(parts))
+    return OK
 
 
 def cmd_prune(args) -> int:
@@ -355,6 +397,8 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--python", help="interpreter for the hooks: an absolute path, or a version "
                                      "like 3.12 resolved via `uv python find`")
     ins.add_argument("--dry-run", action="store_true")
+    ins.add_argument("--statusline", action="store_true",
+                     help="also show peers in Claude's statusLine (never replaces an existing one)")
     ins.add_argument("--no-commands", action="store_true",
                      help="hooks only: do not write the slash commands or link the skill")
     ins.set_defaults(func=cmd_install)
@@ -367,6 +411,9 @@ def build_parser() -> argparse.ArgumentParser:
     doc = sub.add_parser("doctor", help="what is installed, what is running, what is not covered")
     doc.add_argument("--json", action="store_true")
     doc.set_defaults(func=cmd_doctor)
+
+    sl = sub.add_parser("statusline", help="one line for Claude's statusLine (no model call)")
+    sl.set_defaults(func=cmd_statusline)
 
     stest = sub.add_parser("selftest", help="check the hook fails closed for peer messages")
     stest.set_defaults(func=cmd_selftest)

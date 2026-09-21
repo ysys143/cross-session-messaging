@@ -181,6 +181,39 @@ def install_skill(home: str) -> tuple:
     return "linked", target
 
 
+def statusline_command() -> str:
+    return "%s statusline %s" % (launcher(), MARKER)
+
+
+def install_statusline(home: str) -> str:
+    """Opt-in. Claude has one statusLine per home, so an existing one is never
+    replaced — the user would lose theirs without asking."""
+    target = _settings_file(home, "claude")
+    data = paths.read_json(target, {}) or {}
+    current = data.get("statusLine")
+    if current and MARKER not in json.dumps(current):
+        return "kept-existing"
+    want = {"type": "command", "command": statusline_command()}
+    if current == want:
+        return "already"
+    if os.path.exists(target):
+        _backup(target)
+    data["statusLine"] = want
+    paths.write_json(target, data, mode=0o644)
+    return "installed"
+
+
+def remove_statusline(home: str) -> bool:
+    target = _settings_file(home, "claude")
+    data = paths.read_json(target)
+    if not data or MARKER not in json.dumps(data.get("statusLine") or {}):
+        return False
+    _backup(target)
+    del data["statusLine"]
+    paths.write_json(target, data, mode=0o644)
+    return True
+
+
 def remove_commands(home: str) -> int:
     removed = 0
     for source in command_files():

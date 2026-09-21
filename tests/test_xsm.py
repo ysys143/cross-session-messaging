@@ -488,5 +488,47 @@ class CommandInstallTest(TempState):
         self.assertTrue(detail.endswith("xsm/xsm"))
 
 
+class StatuslineTest(TempState):
+    """The statusLine path calls no model, so it must be cheap, read the session
+    from stdin, and never replace a statusLine the user already has."""
+
+    def _home(self, settings=None):
+        from xsm import paths
+        home = os.path.join(self.tmp, "claude-sl")
+        os.makedirs(home, exist_ok=True)
+        paths.write_json(os.path.join(home, "settings.json"), settings or {}, mode=0o644)
+        return home
+
+    def test_output_names_this_session_from_stdin(self):
+        from xsm import registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="worker")
+        env = dict(os.environ, XSM_HOME=self.tmp)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        out = subprocess.run([os.path.join(REPO, "bin", "xsm"), "statusline"],
+                             input='{"session_id": "t1"}', capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("as worker", out.stdout)
+        self.assertIn("0 peers", out.stdout)
+
+    def test_install_sets_it_and_uninstall_removes_it(self):
+        from xsm import install, paths
+        home = self._home({"model": "opus"})
+        self.assertEqual(install.install_statusline(home), "installed")
+        self.assertEqual(install.install_statusline(home), "already")
+        self.assertIn("statusline", paths.read_json(os.path.join(home, "settings.json"))["statusLine"]["command"])
+        self.assertTrue(install.remove_statusline(home))
+        self.assertEqual(paths.read_json(os.path.join(home, "settings.json")), {"model": "opus"})
+
+    def test_an_existing_statusline_is_never_replaced(self):
+        from xsm import install, paths
+        mine = {"type": "command", "command": "~/my-status.sh"}
+        home = self._home({"statusLine": mine})
+        self.assertEqual(install.install_statusline(home), "kept-existing")
+        self.assertFalse(install.remove_statusline(home))
+        self.assertEqual(paths.read_json(os.path.join(home, "settings.json"))["statusLine"], mine)
+
+
 if __name__ == "__main__":
     unittest.main()

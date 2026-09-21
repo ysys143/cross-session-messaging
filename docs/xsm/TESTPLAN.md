@@ -173,6 +173,8 @@ ls ~/.claude-4/commands/xsm-*.md ~/.claude-5/commands/xsm-*.md
 ls -l ~/.claude-4/skills/xsm
 ```
 
+모델을 부르지 않고 보려면 `--statusline`을 더해 설치하거나(상태줄에 상대 수가 늘 보인다), 세션 입력창에서 `! xsm list`처럼 셸 모드로 실행한다. 슬래시 명령은 편하지만 모델 턴이 한 번 든다.
+
 명령을 쓰려면 세션을 다시 띄워야 한다(3장). 세션 안에서 `/xsm-list`를 입력하면 등록된 세션 목록이 나온다.
 
 **`--setting-sources`를 주면 명령이 로드되지 않는다.** 명령 파일은 홈(사용자 설정 범위)에 있으므로, `--setting-sources project,local`처럼 사용자 범위를 뺀 세션에서는 `/xsm-who`가 "Unknown command"로 뜬다(2026-09-21 확인). 이 테스트에서는 그 옵션을 쓰지 않는다.

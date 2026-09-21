@@ -8,8 +8,7 @@ This session's xsm identity:
 
 !`{{XSM}} who`
 
-Report the address (`name@home`), the `[ref]`, and the working directory. If the
-command says this session is not registered, say so plainly: the xsm hooks were
-not installed when it started, so it cannot send or be addressed until it is
-restarted after `xsm install`.
+The output above is the answer. Reply with nothing unless it says this session is
+not registered — then say, in one line, that the hooks were not installed when
+this session started and it must be restarted after `xsm install`.
 <!-- xsm-managed -->
