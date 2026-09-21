@@ -294,3 +294,52 @@ class ResumeInsideTuiTest(TempState):
             ("resumed", "r", self.tmp, "/r", now - 900, now - 1)]
         registry._running_codex = lambda: [(os.path.realpath(self.tmp), now - 30, None, 4242)]
         self.assertEqual([t[0] for t in registry._open_codex_threads(self.tmp)], ["resumed"])
+
+
+class DepthTest(TempState):
+    """max_depth: worker levels below a top-level session. Default 1."""
+
+    def _env(self, **extra):
+        from unittest import mock
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("XSM_WORKER", "XSM_MAX_DEPTH")}
+        env.update(extra)
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def test_default_lets_a_session_spawn_and_stops_its_workers(self):
+        from xsm import workers
+        with self._env():
+            self.assertEqual(workers.depth_budget(None), (1, 1))
+        workers.save({"name": "w1", "depth": 1, "max_depth": 1, "created": 0})
+        with self._env(XSM_WORKER="w1"):
+            with self.assertRaises(workers.WorkerError) as cm:
+                workers.depth_budget(None)
+        self.assertIn("depth 2", str(cm.exception))
+
+    def test_global_setting_and_spawn_option(self):
+        from xsm import config, paths, workers
+        paths.write_json(paths.path(config.CONFIG), {"max_depth": 2}, mode=0o644)
+        with self._env():
+            self.assertEqual(workers.depth_budget(None), (1, 2))
+            self.assertEqual(workers.depth_budget(None, 3), (1, 3), "spawn can set it")
+        with self._env(XSM_MAX_DEPTH="0"):
+            with self.assertRaises(workers.WorkerError):
+                workers.depth_budget(None)
+
+    def test_a_worker_inherits_its_budget_and_can_only_narrow_it(self):
+        from xsm import workers
+        workers.save({"name": "w1", "depth": 1, "max_depth": 3, "created": 0})
+        with self._env(XSM_WORKER="w1", XSM_MAX_DEPTH="1"):
+            self.assertEqual(workers.depth_budget(None), (2, 3),
+                             "the record decides, not an environment variable")
+            self.assertEqual(workers.depth_budget(None, 2), (2, 2))
+            with self.assertRaises(workers.WorkerError):
+                workers.depth_budget(None, 5)
+
+    def test_worker_found_by_its_session_when_the_variable_is_gone(self):
+        from xsm import workers
+        workers.save({"name": "w1", "depth": 1, "max_depth": 1, "session_id": "s-w1",
+                      "created": 0})
+        with self._env():
+            with self.assertRaises(workers.WorkerError):
+                workers.depth_budget({"session_id": "s-w1"})

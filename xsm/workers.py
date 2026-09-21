@@ -41,7 +41,7 @@ import sys
 import time
 import uuid
 
-from . import envelope, identity, install, paths, registry
+from . import config, envelope, identity, install, paths, registry
 
 WORKERS = "workers"
 APPROVALS = "approvals"
@@ -223,11 +223,45 @@ def _codex_config_args(worker: dict) -> list:
     return args
 
 
+def depth_budget(caller: dict | None, requested: int | None = None) -> tuple:
+    """(depth of the new worker, the limit that will govern its own spawns).
+
+    A top-level session's limit is `requested`, else XSM_MAX_DEPTH, else
+    config `max_depth` (default 1). A worker's limit is the one it was given,
+    and a worker can only narrow it for what it starts: the budget lives in the
+    worker's record, not in an environment variable the worker could reset."""
+    parent = None
+    if os.environ.get("XSM_WORKER"):
+        parent = load(os.environ["XSM_WORKER"])
+    if not parent and caller:
+        parent = for_session(caller.get("session_id"))
+    if parent:
+        inherited = int(parent.get("max_depth", 1))
+        if requested is not None and requested > inherited:
+            raise WorkerError("worker %s may not raise the depth limit above %d"
+                              % (parent["name"], inherited))
+        limit, depth = (requested if requested is not None else inherited), \
+            int(parent.get("depth", 1)) + 1
+        who = "worker %s (depth %d)" % (parent["name"], depth - 1)
+    else:
+        env_limit = os.environ.get("XSM_MAX_DEPTH")
+        limit = requested if requested is not None else \
+            int(env_limit) if env_limit and env_limit.isdigit() else \
+            int(config.load().get("max_depth", 1))
+        depth, who = 1, "this session"
+    if depth > limit:
+        raise WorkerError("%s may not start a worker: that would be depth %d and the limit is "
+                          "%d (max_depth)" % (who, depth, limit))
+    return depth, limit
+
+
 def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
           effort: str | None = None, cwd: str | None = None, home: str | None = None,
           once: bool = False, headless: bool = False, approval_timeout: int = APPROVAL_TIMEOUT,
-          wait: float = 90.0, caller: dict | None = None) -> dict:
+          wait: float = 90.0, caller: dict | None = None,
+          max_depth: int | None = None) -> dict:
     refuse_inside_framework()
+    depth, limit = depth_budget(caller, max_depth)
     if runtime not in ("claude", "codex"):
         raise WorkerError("runtime must be claude or codex")
     name = name or "w-%s" % uuid.uuid4().hex[:4]
@@ -248,7 +282,8 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
     worker = {"name": name, "runtime": runtime, "home": home, "model": model, "effort": effort,
               "cwd": cwd, "mode": "pane" if pane else "headless", "once": bool(once),
               "approval_timeout": int(approval_timeout), "created": time.time(),
-              "parent_ref": (caller or {}).get("ref"), "session_id": None}
+              "parent_ref": (caller or {}).get("ref"), "session_id": None,
+              "depth": depth, "max_depth": limit}
     if runtime == "codex" and not worker["model"]:
         worker["model"] = CODEX_MODEL
     if runtime == "codex":

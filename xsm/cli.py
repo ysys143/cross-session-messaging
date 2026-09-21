@@ -487,7 +487,7 @@ def cmd_spawn(args) -> int:
         worker = workers.spawn(args.runtime, name=args.name, model=args.model, effort=args.effort,
                                cwd=args.dir, home=args.home, once=args.once,
                                headless=args.headless, approval_timeout=args.approval_timeout,
-                               wait=args.wait, caller=caller)
+                               wait=args.wait, caller=caller, max_depth=args.max_depth)
     except workers.WorkerError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return REFUSED
@@ -521,9 +521,10 @@ def cmd_workers(args) -> int:
         print("no workers")
         return OK
     for w in rows:
-        print("%s [%s] %s %s %s %s%s" % (
+        print("%s [%s] %s %s %s %s depth %s/%s%s" % (
             w["name"], w.get("ref"), w["runtime"], w["mode"], workers.state(w),
-            w.get("model") or "-", "  once" if w.get("once") else ""))
+            w.get("model") or "-", w.get("depth", 1), w.get("max_depth", 1),
+            "  once" if w.get("once") else ""))
     return OK
 
 
@@ -631,6 +632,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--headless", action="store_true", help="headless even inside tmux")
     sp.add_argument("--approval-timeout", type=int, default=workers.APPROVAL_TIMEOUT)
     sp.add_argument("--wait", type=float, default=90.0, help="seconds to wait for it to register")
+    sp.add_argument("--max-depth", type=int, help="worker levels this worker's subtree may use "
+                    "(default: XSM_MAX_DEPTH or config max_depth, 1; a worker can only lower it)")
     sp.set_defaults(func=cmd_spawn)
     wk = sub.add_parser("workers", help="workers xsm started")
     wk.set_defaults(func=cmd_workers)
