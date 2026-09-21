@@ -48,6 +48,13 @@ check. If the name matches nothing, or matches more than one session, the
 command refuses and prints the sessions that exist right now; pick one from
 that list rather than guessing.
 
+**Asking another session to do something:** send it as `--kind task` and put
+everything it needs in the message — what to do, where the files are, what
+counts as done. The receiver is told to carry a task out on arrival and is
+handed the exact command to report back, so it should not need its user to
+explain anything. Use `--kind reply --reply-to <id>` to answer, which tells the
+other side not to answer again.
+
 Read the result as it is written:
 
 | status | meaning |

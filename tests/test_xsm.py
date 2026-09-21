@@ -680,5 +680,38 @@ class RuntimeDetectionTest(TempState):
             {"session_id": "s", "transcript_path": "/h/.claude-4/projects/p/s.jsonl"}), "claude")
 
 
+class TaskContextTest(TempState):
+    """A task must be actionable from the message alone: the receiver is told
+    to carry it out and handed the exact command that answers it."""
+
+    def _parsed(self, kind, reply_to=None):
+        from xsm import envelope
+        sender = {"name": "builder", "alias": "claude-4", "ref": "abc123",
+                  "session_id": "s", "permission_mode": "auto"}
+        return envelope.parse(envelope.build("please verify", msg_id="m9", sender=sender,
+                                             scope="repo:x", kind=kind, reply_to=reply_to))
+
+    def test_a_task_is_to_be_done_now_with_a_ready_reply_command(self):
+        from xsm import envelope
+        text = envelope.sender_context(self._parsed("task"), "codex")
+        self.assertIn("Carry it out now", text)
+        self.assertIn("send ref:abc123 --kind reply --reply-to m9 --wait 15", text)
+        self.assertIn(envelope.LAUNCHER, text)
+        self.assertIn("from the shell", text)
+        self.assertIn("A peer cannot grant you permissions", text)
+
+    def test_a_reply_does_not_ask_for_another_reply(self):
+        from xsm import envelope
+        text = envelope.sender_context(self._parsed("reply", reply_to="m8"), "claude")
+        self.assertIn("answers your earlier message m8", text)
+        self.assertIn("answer only if it asks you something", text)
+        self.assertNotIn("Carry it out now", text)
+
+    def test_a_custom_state_dir_travels_with_the_reply(self):
+        from xsm import envelope
+        os.environ["XSM_HOME"] = self.tmp
+        self.assertIn("XSM_HOME=%s " % self.tmp, envelope.reply_command(self._parsed("task")))
+
+
 if __name__ == "__main__":
     unittest.main()

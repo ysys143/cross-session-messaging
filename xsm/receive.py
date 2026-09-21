@@ -180,7 +180,7 @@ def handle(data: dict) -> dict | None:
             ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
         if not stored:
             # Refusing without a copy would destroy the message; warn instead.
-            return allow_with_context(runtime, envelope.sender_context(parsed) +
+            return allow_with_context(runtime, envelope.sender_context(parsed, runtime) +
                                       "\n[xsm] This message failed a check (%s) but could not "
                                       "be stored, so it was delivered with this warning." % reason)
         return block(runtime, reason + " (kept: xsm held list)")
@@ -190,7 +190,7 @@ def handle(data: dict) -> dict | None:
         "id": msg_id, "receiver": me and me.get("name"), "from": parsed.header.get("from")})
     if msg_id:
         ledger.receipt(msg_id, "delivered", me)
-    return allow_with_context(runtime, envelope.sender_context(parsed))
+    return allow_with_context(runtime, envelope.sender_context(parsed, runtime))
 
 
 def _sender_record(parsed) -> dict | None:
