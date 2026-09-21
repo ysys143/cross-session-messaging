@@ -530,5 +530,40 @@ class StatuslineTest(TempState):
         self.assertEqual(paths.read_json(os.path.join(home, "settings.json"))["statusLine"], mine)
 
 
+class CompactOutputTest(TempState):
+    """Slash commands have the model copy the CLI output back verbatim, so the
+    output is the cost: no alignment padding, home shortened, unregistered and
+    stopped sessions left out."""
+
+    def test_list_compact_is_short_and_unpadded(self):
+        from xsm import cli, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="worker")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["list", "--compact"])
+        line = out.getvalue().strip()
+        self.assertTrue(line.startswith("worker@codex ["), line)
+        self.assertNotIn("  ", line)
+
+    def test_ledger_compact_has_one_line_per_message(self):
+        from xsm import cli, ledger
+        a = {"name": "a", "alias": "h", "ref": "r1", "runtime": "claude"}
+        b = {"name": "b", "alias": "h", "ref": "r2", "runtime": "claude"}
+        ledger.queued("m1", a, b, "dir:x", "note", "hello\nworld")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["ledger", "--compact"])
+        self.assertEqual(out.getvalue().strip(), "queued a->b m1: hello world")
+
+    def test_display_commands_ask_for_a_verbatim_copy(self):
+        """The prompts must not contain conditions for the model to weigh."""
+        for name in ("xsm-list", "xsm-who", "xsm-inbox", "xsm-doctor"):
+            body = open(os.path.join(REPO, "commands", name + ".md")).read()
+            self.assertIn("copied exactly", body, name)
+            self.assertNotIn("unless", body, name)
+
+
 if __name__ == "__main__":
     unittest.main()

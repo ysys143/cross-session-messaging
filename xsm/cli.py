@@ -50,6 +50,22 @@ def cmd_list(args) -> int:
     if not rows:
         print("no sessions registered. Install the hooks first: xsm install --help")
         return OK
+    if args.compact:
+        # For a model to copy back verbatim: no alignment padding (every space
+        # is a token), home shortened to ~, and only the flags that change
+        # whether a message would arrive.
+        home = os.path.expanduser("~")
+        for r in rows:
+            flags = [f for f in (
+                "you" if me and r.get("ref") == me.get("ref") else "",
+                "" if r.get("registered") else "unregistered",
+                "out-of-scope" if me and not r.get("scope") and r.get("scope_reason") != "self" else "",
+                "would-be-held" if r.get("native") == "hold" else "",
+                r.get("state") if r.get("state") != "live" else "") if f]
+            cwd = (r.get("cwd") or "").replace(home, "~", 1)
+            print("%s@%s [%s] %s%s" % (r.get("name"), r.get("alias"), r.get("ref"), cwd,
+                                       (" (" + ", ".join(flags) + ")") if flags else ""))
+        return OK
     if not me:
         # Run from a plain terminal there is no "us" to be in scope with, and
         # saying "out-of-scope" about every row would read as a verdict.
@@ -137,6 +153,14 @@ def cmd_ledger(args) -> int:
     rows = ledger.recent(args.last)
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1))
+        return OK
+    if args.compact:
+        for row in rows:
+            print("%s %s->%s %s: %s" % (row.get("status"), (row.get("from") or {}).get("name"),
+                                        (row.get("to") or {}).get("name"), row.get("id"),
+                                        (row.get("preview") or "").replace("\n", " ")[:40]))
+        if not rows:
+            print("no messages")
         return OK
     for row in rows:
         print("%-16s %-17s %s -> %s  %s" % (
@@ -346,6 +370,7 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--runtime", choices=["claude", "codex"])
     ls.add_argument("--home", help="alias or path")
     ls.add_argument("--json", action="store_true")
+    ls.add_argument("--compact", action="store_true", help="short lines, no padding (for agents)")
     ls.set_defaults(func=cmd_list)
 
     who = sub.add_parser("who", help="identity of the session running this command")
@@ -384,6 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     lg = sub.add_parser("ledger", help="recent messages and their delivery state")
     lg.add_argument("--last", type=int, default=20)
     lg.add_argument("--json", action="store_true")
+    lg.add_argument("--compact", action="store_true")
     lg.set_defaults(func=cmd_ledger)
 
     hd = sub.add_parser("held", help="messages this machine refused and kept")

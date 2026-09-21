@@ -4,11 +4,13 @@ allowed-tools: Bash({{XSM}} list:*)
 disable-model-invocation: true
 ---
 
-Sessions registered with xsm:
+This is a display command. There is nothing to decide.
 
-!`{{XSM}} list --all`
+Reply with the block between the markers, copied exactly, inside one code block.
+Nothing before it, nothing after it. Do not translate, reword, summarise or
+explain it, and do not call any tool.
 
-The list above is the answer. Reply with nothing at all unless a row carries a
-flag that would stop a message arriving (`stale`, `unregistered`, `out-of-scope`,
-`would be held`) — then say only that, in one line.
+<<<
+!`{{XSM}} list --compact`
+>>>
 <!-- xsm-managed -->
