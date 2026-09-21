@@ -324,9 +324,11 @@ python3 tools/spike_s1_send.py send $B --mode prompting --probe raw --no-reply -
 기대: B 화면에 `UserPromptSubmit operation blocked by hook: xsm: peer message without an xsm header (kept: xsm held list)`가 뜨고 본문은 전달되지 않는다. 보관된 본문을 확인한다.
 
 ```bash
-xsm held list
-xsm held show <목록에 나온 id>
+xsm held list                      # id, 수신자, 이유, 본문 미리보기
+xsm held show <목록에 나온 id>      # 전체 기록. show다, how가 아니다
 ```
+
+주입된 메시지에는 xsm 헤더가 없으므로 `from`에는 봉투에 적힌 발신 주소(`uds:/tmp/…`)가 남는다. 그것마저 없으면 `unknown`이다.
 
 **4-3에서 보류 창이 뜨면** 두 세션의 권한 모드가 다르고 수신 홈의 `crossSessionInbound`가 `accept`가 아니라는 뜻이다. 1장으로 돌아가 설정을 확인하거나, 두 세션을 같은 모드로 띄운다. `xsm list`에 미리 `would be held`로 표시된다.
 

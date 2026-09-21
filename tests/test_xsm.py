@@ -392,5 +392,23 @@ class SuggestionTest(TempState):
         self.assertEqual(resolve.resolve("ref:zzzzzz").candidates[0]["name"], "worker")
 
 
+class HeldRecordTest(TempState):
+    """A refused message must say where it came from, even when it carried no
+    xsm header — an injection's only trace is the envelope's reply address."""
+
+    def test_injection_records_its_reply_address(self):
+        from xsm import envelope, paths, receive
+        receive.register = lambda data, runtime: None
+        prompt = ('<%s from="uds:/tmp/cc-socks/999.sock" from-mode="prompting">\nraw\n</%s>'
+                  % (envelope.TAG, envelope.TAG))
+        receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "r1",
+                        "cwd": self.tmp, "prompt": prompt, "session_title": "recv"})
+        held = os.listdir(paths.path(paths.HELD))
+        self.assertEqual(len(held), 1)
+        record = paths.read_json(paths.path(paths.HELD, held[0]))
+        self.assertEqual(record["from"], "uds:/tmp/cc-socks/999.sock")
+        self.assertEqual(record["body"], "raw")
+
+
 if __name__ == "__main__":
     unittest.main()

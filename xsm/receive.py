@@ -99,7 +99,12 @@ def hold(runtime: str, reason: str, data: dict, me: dict | None, parsed) -> bool
         paths.write_json(paths.path(paths.HELD, "%d.json" % int(time.time() * 1000)), {
             "t": time.time(), "reason": reason, "runtime": runtime,
             "receiver": me and me.get("name"), "id": parsed.header.get("id"),
-            "from": parsed.header.get("from") or parsed.attrs.get("from-name"),
+            # Whatever the sender revealed, in order of usefulness: our own
+            # header, the envelope's display name, then the raw reply address.
+            # An injected message has none of the first two (S8-g2), and the
+            # socket path is then the only trace of where it came from.
+            "from": (parsed.header.get("from") or parsed.attrs.get("from-name")
+                     or parsed.attrs.get("from") or "unknown"),
             "scope": parsed.header.get("scope"), "body": parsed.body[:4000]})
         return True
     except OSError:

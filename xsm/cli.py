@@ -157,8 +157,10 @@ def cmd_held(args) -> int:
         return OK
     for p in entries:
         entry = paths.read_json(p, {}) or {}
-        print("%-16s %-8s from %-20s %s" % (os.path.basename(p)[:-5], entry.get("runtime"),
-                                            entry.get("from"), entry.get("reason")))
+        body = (entry.get("body") or "").replace("\n", " ")
+        print("%-16s %-7s from %-28s %s\n%s%s" % (
+            os.path.basename(p)[:-5], entry.get("runtime"), entry.get("from") or "unknown",
+            entry.get("reason"), " " * 17, body[:70] + ("…" if len(body) > 70 else "")))
     if not entries:
         print("nothing held")
     return OK
