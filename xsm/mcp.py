@@ -41,6 +41,19 @@ TOOLS = [
          "tag": {"type": "string", "enum": list(channel.TAGS)},
          "limit": {"type": "integer", "default": 30},
          "channel": {"type": "string"}}}},
+    {"name": "xsm_grant",
+     "description": ("Ask your user for explicit permission to start a worker with dangerous "
+                     "options: full_access (no sandbox, no approvals) and/or trust_hooks (Codex: "
+                     "run hooks without trust review). Returns a one-time grant id for "
+                     "`xsm spawn ... --grant <id>`, valid 10 minutes, for this session, runtime "
+                     "and folder only. Say plainly why the worker needs it."),
+     "inputSchema": {"type": "object", "properties": {
+         "runtime": {"type": "string", "enum": ["claude", "codex"]},
+         "options": {"type": "array", "items": {"type": "string",
+                                                 "enum": ["full_access", "trust_hooks"]}},
+         "reason": {"type": "string"},
+         "dir": {"type": "string", "description": "the worker's folder; default this session's"}},
+         "required": ["runtime", "options", "reason"]}},
     {"name": "xsm_decide",
      "description": ("Ask your user to decide, and record their answer as a decision in the "
                      "channel. Your user sees the question and picks an option or writes an "
@@ -114,6 +127,8 @@ class Server:
             return text or "(no posts in %s)" % where[0]
         if name == "xsm_decide":
             return self.decide(where, me, args)
+        if name == "xsm_grant":
+            return self.grant(where, me, args)
         raise channel.ChannelError("unknown tool %s" % name)
 
     def decide(self, where: tuple, me: dict, args: dict) -> str:
@@ -146,6 +161,46 @@ class Server:
                            approved={"question": question, "answer": answer,
                                      "options": options or None})
         return "recorded decision %s in %s: %s" % (rec["id"], where[0], answer)
+
+    def grant(self, where: tuple, me: dict, args: dict) -> str:
+        from . import workers
+        options = sorted(set(o for o in (args.get("options") or []) if o in workers.DANGEROUS))
+        if not options:
+            raise channel.ChannelError("options must name full_access and/or trust_hooks")
+        runtime = args.get("runtime")
+        cwd = os.path.realpath(os.path.expanduser(args.get("dir") or me.get("cwd") or os.getcwd()))
+        reason = (args.get("reason") or "").strip() or "(no reason given)"
+        words = {"full_access": "FULL ACCESS: no sandbox and no approval prompts",
+                 "trust_hooks": "hooks run WITHOUT Codex's trust review, including any in that "
+                                "folder"}
+        question = ("%s@%s wants to start a %s worker in %s with %s.\nReason: %s\n"
+                    "Allow it once?" % (me.get("name"), me.get("alias"), runtime, cwd,
+                                        "; ".join(words[o] for o in options), reason))
+        allow, deny = "allow once", "deny"
+        reply = self.ask_client("elicitation/create", {
+            "message": question, "requestedSchema": {"type": "object", "properties": {
+                "answer": {"type": "string", "title": "Permission", "enum": [deny, allow]}},
+                "required": ["answer"]}}) if "elicitation" in (self.client_caps or {}) else None
+        if reply is None:
+            raise channel.ChannelError("this client cannot ask its user; a person can run the "
+                                       "spawn in a terminal instead")
+        result = reply.get("result") or {}
+        answer = (result.get("content") or {}).get("answer") if result.get("action") == "accept" \
+            else None
+        author = {"kind": "human", "name": os.environ.get("USER") or "person",
+                  "via": "mcp-elicitation", "asked_by": me.get("ref"), "runtime": me.get("runtime")}
+        verdict = "allowed" if answer == allow else "refused"
+        channel.post(where, author, "worker permission %s: %s %s in %s" % (
+            verdict, runtime, "+".join(options), cwd), "decision",
+            approved={"question": question, "answer": answer or result.get("action") or "none",
+                      "options": [deny, allow]})
+        if answer != allow:
+            return "your user did not allow it (%s); do not start that worker" % (
+                answer or result.get("action") or "no answer")
+        g = workers.create_grant(me.get("ref"), runtime, cwd, options, answer)
+        return ("granted %s: xsm spawn %s --dir %s %s --grant %s   (one use, %d minutes)" % (
+            g["id"], runtime, cwd, " ".join("--" + o.replace("_", "-") for o in options), g["id"],
+            workers.GRANT_TTL // 60))
 
     # -- loop -------------------------------------------------------------------------
     def serve(self) -> int:

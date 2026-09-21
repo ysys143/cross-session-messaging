@@ -150,6 +150,63 @@ def state(worker: dict) -> str:
     return "running"
 
 
+# --- explicit permission for dangerous workers ---------------------------------------
+#
+# --full-access (no sandbox, no approvals) and --trust-hooks (run hooks without
+# Codex's trust review) take away what protects the user, so an agent may use
+# them only with the user's explicit permission, asked for through the xsm MCP
+# tool `xsm_grant` (elicitation: the answer comes from the person, not the
+# model). A grant is for one spawn: bound to the asking session, runtime,
+# folder and options, and good for GRANT_TTL seconds. A person typing `spawn`
+# at a terminal needs no grant: that is the permission (user decision,
+# 2026-09-22).
+
+GRANTS = "grants"
+GRANT_TTL = 600
+DANGEROUS = ("full_access", "trust_hooks")
+
+
+def create_grant(asked_by: str, runtime: str, cwd: str, options: list, answer: str) -> dict:
+    grant = {"id": uuid.uuid4().hex[:8], "asked_by": asked_by, "runtime": runtime,
+             "cwd": os.path.realpath(cwd), "options": sorted(options), "t": time.time(),
+             "expires": time.time() + GRANT_TTL, "answer": answer}
+    os.makedirs(paths.path(GRANTS), mode=0o700, exist_ok=True)
+    paths.write_json(paths.path(GRANTS, grant["id"] + ".json"), grant)
+    return grant
+
+
+def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
+              options: list) -> dict:
+    """Consume a grant that covers exactly this spawn, or refuse."""
+    if not grant_id:
+        raise WorkerError("%s needs your user's explicit permission: ask with the xsm_grant MCP "
+                          "tool, then pass --grant <id>" % " and ".join(
+                              "--" + o.replace("_", "-") for o in options))
+    p = paths.path(GRANTS, grant_id + ".json")
+    claimed = p + ".used"
+    try:
+        os.rename(p, claimed)                 # one use: the rename is the claim
+    except OSError:
+        raise WorkerError("no unused grant %s" % grant_id)
+    grant = paths.read_json(claimed) or {}
+    problems = []
+    if time.time() > grant.get("expires", 0):
+        problems.append("it expired")
+    if grant.get("asked_by") != (caller or {}).get("ref"):
+        problems.append("another session asked for it")
+    if grant.get("runtime") != runtime:
+        problems.append("it is for %s" % grant.get("runtime"))
+    if grant.get("cwd") != os.path.realpath(cwd):
+        problems.append("it is for %s" % grant.get("cwd"))
+    if not set(options) <= set(grant.get("options") or []):
+        problems.append("it does not cover %s" % ", ".join(sorted(set(options) -
+                                                                  set(grant.get("options") or []))))
+    if problems:
+        raise WorkerError("grant %s does not cover this spawn: %s (it is used up now; ask again)"
+                          % (grant_id, "; ".join(problems)))
+    return grant
+
+
 # --- starting ------------------------------------------------------------------
 
 def _default_home(runtime: str, caller: dict | None) -> str:
@@ -178,7 +235,7 @@ def _claude_worker_settings(worker: dict) -> str:
     not held for a person by Claude's own mode check; the PermissionRequest hook
     so a headless worker's prompts reach a person through xsm."""
     settings = {"crossSessionInbound": "accept"}
-    if worker["mode"] == "headless":
+    if worker["mode"] == "headless" and not worker.get("full_access"):
         settings["hooks"] = {"PermissionRequest": [{"hooks": [{
             "type": "command", "command": _hook_command(),
             "timeout": int(worker["approval_timeout"]) + 30}]}]}
@@ -213,7 +270,7 @@ def _claude_argv(worker: dict, settings: str) -> list:
     # Default mode in both: a pane worker asks its person in the pane, a
     # headless one asks through xsm, whatever mode the user's config starts
     # sessions in (the same rule as Codex's explicit sandbox and approvals).
-    argv += ["--permission-mode", "default"]
+    argv += ["--permission-mode", "bypassPermissions" if worker.get("full_access") else "default"]
     if worker["mode"] == "headless":
         argv += ["-p", "--input-format", "stream-json", "--output-format", "stream-json",
                  "--verbose"]
@@ -287,10 +344,14 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
           effort: str | None = None, cwd: str | None = None, home: str | None = None,
           once: bool = False, headless: bool = False, approval_timeout: int = APPROVAL_TIMEOUT,
           wait: float = 90.0, caller: dict | None = None,
-          max_depth: int | None = None) -> dict:
+          max_depth: int | None = None, full_access: bool = False, trust_hooks: bool = False,
+          grant: str | None = None) -> dict:
     refuse_inside_framework()
     depth, limit = depth_budget(caller, max_depth)
     check_concurrency(caller)
+    dangerous = [o for o, on in (("full_access", full_access), ("trust_hooks", trust_hooks)) if on]
+    if trust_hooks and runtime != "codex":
+        raise WorkerError("--trust-hooks is a Codex option; Claude has no hook trust to bypass")
     if runtime not in ("claude", "codex"):
         raise WorkerError("runtime must be claude or codex")
     name = name or "w-%s" % uuid.uuid4().hex[:4]
@@ -308,11 +369,23 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
     _check_installed(home, runtime)
     cwd = os.path.realpath(os.path.expanduser(cwd or (caller or {}).get("cwd") or os.getcwd()))
     pane = None if headless else tmux_pane()
+    if trust_hooks and not pane:
+        raise WorkerError("--trust-hooks works only for a Codex worker in a tmux pane: the "
+                          "app-server that runs headless turns has no such option")
+    if runtime == "codex" and not trust_hooks:
+        trust = install.codex_trust(home)
+        if not trust or not all(trust.get(k) for k in ("SessionStart", "UserPromptSubmit")):
+            raise WorkerError("the xsm hooks are not trusted in %s, so the worker could not "
+                              "register; start codex there once and trust them" % home)
+    granted = None
+    if dangerous and not human_terminal():
+        granted = use_grant(grant, caller, runtime, cwd, dangerous)
     worker = {"name": name, "runtime": runtime, "home": home, "model": model, "effort": effort,
               "cwd": cwd, "mode": "pane" if pane else "headless", "once": bool(once),
               "approval_timeout": int(approval_timeout), "created": time.time(),
               "parent_ref": (caller or {}).get("ref"), "session_id": None,
-              "depth": depth, "max_depth": limit}
+              "depth": depth, "max_depth": limit, "full_access": full_access,
+              "trust_hooks": trust_hooks, "grant": (granted or {}).get("id")}
     if runtime == "codex" and not worker["model"]:
         worker["model"] = CODEX_MODEL
     if runtime == "codex":
@@ -351,8 +424,10 @@ def _start_in_pane(worker: dict, pane: str) -> None:
     else:
         # The pane is where a person answers, so the worker asks there even if
         # the user's own config runs Codex without approvals.
-        argv = ["codex"] + _codex_config_args(worker) + ["-s", "workspace-write",
-                                                        "-a", "on-request"]
+        argv = ["codex"] + _codex_config_args(worker) + (
+            ["--dangerously-bypass-approvals-and-sandbox"] if worker.get("full_access")
+            else ["-s", "workspace-write", "-a", "on-request"]) + (
+            ["--dangerously-bypass-hook-trust"] if worker.get("trust_hooks") else [])
     # exec all the way down, so the pane's pid is the worker's own pid.
     command = "exec env %s %s %s" % (unset, assignments, " ".join(shlex.quote(a) for a in argv))
     out = subprocess.run(["tmux", "split-window", "-t", pane, "-h", "-d", "-P", "-F",
@@ -498,7 +573,9 @@ def _codex_exec(worker: dict, prompt: str, resume: bool, timeout: float | None =
     user's config, which may be full access (measured: `exec resume` has no
     --sandbox option and resumed turns ran danger-full-access)."""
     d = _dir(worker["name"])
-    policy = {"approvalPolicy": "on-request", "sandbox": "workspace-write",
+    full = worker.get("full_access")
+    policy = {"approvalPolicy": "never" if full else "on-request",
+              "sandbox": "danger-full-access" if full else "workspace-write",
               "model": worker.get("model") or CODEX_MODEL, "cwd": worker["cwd"]}
     events, deadline = [], (time.time() + timeout) if timeout else None
     with open(os.path.join(d, "out.jsonl"), "a", encoding="utf-8") as log:
@@ -514,7 +591,7 @@ def _codex_exec(worker: dict, prompt: str, resume: bool, timeout: float | None =
                 thread = (started.get("thread") or {}).get("id")
                 events.append({"type": "thread.started", "thread_id": thread})
             turn = {"threadId": thread, "input": [{"type": "text", "text": prompt}],
-                    "approvalPolicy": "on-request"}
+                    "approvalPolicy": policy["approvalPolicy"]}
             if worker.get("effort"):
                 turn["effort"] = worker["effort"]
             server.request("turn/start", turn)

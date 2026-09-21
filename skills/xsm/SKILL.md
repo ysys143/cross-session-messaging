@@ -128,6 +128,11 @@ xsm stop <worker>           # stop it and remove its records
   saying what it is waiting for. **Never try to approve it yourself** —
   `xsm approve` works only from a person's terminal, and trying to get around
   that is permission laundering. Tell your user what is waiting and why.
+- `--full-access` and `--trust-hooks` remove your user's protections. Use them
+  only when the work needs it, and only with their explicit permission: call
+  the `xsm_grant` MCP tool with the reason, and pass the id it returns as
+  `--grant <id>`. If the grant is refused or blocked, stop and tell your user;
+  never look for another way to start the worker with those options.
 - Workers cannot start workers unless the depth limit allows it (`max_depth`,
   default 1), and one session runs at most `max_workers` (default 4) at once.
   If spawn refuses for either, report it; do not raise the limit. Workers stop

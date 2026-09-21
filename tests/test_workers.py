@@ -453,3 +453,119 @@ class SafetyTest(TempState):
         for mode in ("pane", "headless"):
             argv = workers._claude_argv({"name": "w", "mode": mode}, "/s.json")
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+
+
+class GrantTest(TempState):
+    """Dangerous worker options need the user's explicit permission, given
+    through the xsm_grant MCP tool, unless a person types the spawn."""
+    ME = {"ref": "pppppp", "name": "boss", "alias": "claude-4", "runtime": "claude"}
+
+    def test_a_grant_covers_one_matching_spawn(self):
+        from xsm import workers
+        g = workers.create_grant("pppppp", "codex", self.tmp, ["full_access"], "allow once")
+        workers.use_grant(g["id"], self.ME, "codex", self.tmp, ["full_access"])
+        with self.assertRaises(workers.WorkerError):
+            workers.use_grant(g["id"], self.ME, "codex", self.tmp, ["full_access"])
+
+    def test_a_grant_is_bound_to_its_session_runtime_folder_and_options(self):
+        from xsm import workers
+        cases = [({"ref": "other1"}, "codex", self.tmp, ["full_access"], "another session"),
+                 (self.ME, "claude", self.tmp, ["full_access"], "it is for codex"),
+                 (self.ME, "codex", "/", ["full_access"], "it is for"),
+                 (self.ME, "codex", self.tmp, ["full_access", "trust_hooks"], "does not cover")]
+        for caller, runtime, cwd, options, why in cases:
+            g = workers.create_grant("pppppp", "codex", self.tmp, ["full_access"], "allow once")
+            with self.assertRaises(workers.WorkerError) as cm:
+                workers.use_grant(g["id"], caller, runtime, cwd, options)
+            self.assertIn(why, str(cm.exception))
+
+    def test_an_expired_grant_is_refused(self):
+        from xsm import paths, workers
+        g = workers.create_grant("pppppp", "codex", self.tmp, ["full_access"], "allow once")
+        g["expires"] = 0
+        paths.write_json(paths.path(workers.GRANTS, g["id"] + ".json"), g)
+        with self.assertRaises(workers.WorkerError) as cm:
+            workers.use_grant(g["id"], self.ME, "codex", self.tmp, ["full_access"])
+        self.assertIn("expired", str(cm.exception))
+
+    def test_an_agent_spawn_without_a_grant_is_refused(self):
+        from unittest import mock
+        from xsm import workers
+        workers.human_terminal = lambda: False
+        workers._check_installed = lambda home, runtime: None
+        workers.check_concurrency = lambda caller: None
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_", "TMUX"))}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(workers.WorkerError) as cm:
+                workers.spawn("claude", cwd=self.tmp, full_access=True, caller=self.ME)
+        self.assertIn("xsm_grant", str(cm.exception))
+
+    def test_trust_hooks_is_for_codex_panes_only(self):
+        from unittest import mock
+        from xsm import workers
+        workers._check_installed = lambda home, runtime: None
+        workers.check_concurrency = lambda caller: None
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_", "TMUX"))}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(workers.WorkerError):
+                workers.spawn("claude", cwd=self.tmp, trust_hooks=True, caller=self.ME)
+            with self.assertRaises(workers.WorkerError) as cm:
+                workers.spawn("codex", cwd=self.tmp, trust_hooks=True, headless=True,
+                              caller=self.ME)
+        self.assertIn("tmux pane", str(cm.exception))
+
+    def test_mcp_grant_asks_and_records(self):
+        import io
+        from xsm import channel, mcp, workers
+        here = os.path.join(self.tmp, "proj")
+        os.makedirs(here)
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"capabilities": {"elicitation": {}}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                    "name": "xsm_grant", "arguments": {"runtime": "codex",
+                                                       "options": ["full_access"],
+                                                       "reason": "needs network"}}},
+                {"jsonrpc": "2.0", "id": "xsm-1",
+                 "result": {"action": "accept", "content": {"answer": "allow once"}}}]
+        out = io.StringIO()
+        server = mcp.Server(io.StringIO("".join(json.dumps(m) + "\n" for m in msgs)), out)
+        server.session = lambda: dict(self.ME, cwd=here)
+        server.serve()
+        replies = [json.loads(l) for l in out.getvalue().splitlines()]
+        ask = next(m for m in replies if m.get("method") == "elicitation/create")
+        self.assertIn("FULL ACCESS", ask["params"]["message"])
+        text = next(m for m in replies if m.get("id") == 2)["result"]["content"][0]["text"]
+        gid = text.split()[1].rstrip(":")
+        workers.use_grant(gid, self.ME, "codex", here, ["full_access"])
+        rec = channel.read(channel.resolve(here)[1])[-1]
+        self.assertEqual((rec["tag"], rec["author"]["via"]), ("decision", "mcp-elicitation"))
+
+
+class DangerousFlagsTest(TempState):
+    def test_pane_codex_flags(self):
+        import shlex
+        from unittest import mock
+        from xsm import workers
+        seen = []
+        def run(argv, **kw):
+            seen.append(argv)
+            return mock.Mock(returncode=0, stdout="%9 4242\n", stderr="")
+        w = {"name": "p", "runtime": "codex", "home": self.tmp, "cwd": self.tmp, "mode": "pane",
+             "model": "m", "full_access": True, "trust_hooks": True}
+        with mock.patch.object(workers.subprocess, "run", run), \
+                mock.patch.object(workers.time, "sleep", lambda s: None), \
+                mock.patch.object(workers, "_tmux_type", lambda *a: None):
+            workers._start_in_pane(w, "%1")
+        command = shlex.split(seen[0][-1])
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("--dangerously-bypass-hook-trust", command)
+        self.assertNotIn("on-request", command)
+
+    def test_full_access_claude_skips_the_approval_hook(self):
+        from xsm import workers
+        w = {"name": "c", "mode": "headless", "full_access": True, "approval_timeout": 5}
+        os.makedirs(os.path.join(self.tmp, "workers", "c"))
+        argv = workers._claude_argv(w, workers._claude_worker_settings(w))
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "bypassPermissions")
+        settings = json.load(open(os.path.join(self.tmp, "workers", "c", "settings.json")))
+        self.assertNotIn("hooks", settings)

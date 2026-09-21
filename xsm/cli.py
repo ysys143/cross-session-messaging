@@ -520,7 +520,9 @@ def cmd_spawn(args) -> int:
         worker = workers.spawn(args.runtime, name=args.name, model=args.model, effort=args.effort,
                                cwd=args.dir, home=args.home, once=args.once,
                                headless=args.headless, approval_timeout=args.approval_timeout,
-                               wait=args.wait, caller=caller, max_depth=args.max_depth)
+                               wait=args.wait, caller=caller, max_depth=args.max_depth,
+                               full_access=args.full_access, trust_hooks=args.trust_hooks,
+                               grant=args.grant)
     except workers.WorkerError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return REFUSED
@@ -567,10 +569,11 @@ def cmd_workers(args) -> int:
         print("no workers")
         return OK
     for w in rows:
-        print("%s [%s] %s %s %s %s depth %s/%s%s" % (
+        print("%s [%s] %s %s %s %s depth %s/%s%s%s%s" % (
             w["name"], w.get("ref"), w["runtime"], w["mode"], workers.state(w),
             w.get("model") or "-", w.get("depth", 1), w.get("max_depth", 1),
-            "  once" if w.get("once") else ""))
+            "  once" if w.get("once") else "", "  FULL-ACCESS" if w.get("full_access") else "",
+            "  hooks-untrusted" if w.get("trust_hooks") else ""))
     return OK
 
 
@@ -735,6 +738,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--headless", action="store_true", help="headless even inside tmux")
     sp.add_argument("--approval-timeout", type=int, default=workers.APPROVAL_TIMEOUT)
     sp.add_argument("--wait", type=float, default=90.0, help="seconds to wait for it to register")
+    sp.add_argument("--full-access", action="store_true",
+                    help="no sandbox, no approvals (Codex --dangerously-bypass-approvals-and-sandbox, "
+                         "Claude bypassPermissions); needs --grant from an agent")
+    sp.add_argument("--trust-hooks", action="store_true",
+                    help="Codex pane worker: --dangerously-bypass-hook-trust; needs --grant from an agent")
+    sp.add_argument("--grant", help="the id xsm_grant returned after your user allowed it")
     sp.add_argument("--max-depth", type=int, help="worker levels this worker's subtree may use "
                     "(default: XSM_MAX_DEPTH or config max_depth, 1; a worker can only lower it)")
     sp.set_defaults(func=cmd_spawn)
