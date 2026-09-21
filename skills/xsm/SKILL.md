@@ -114,6 +114,15 @@ question. Do not phrase your own proposal as a decision — post it as
 
 In a sandboxed Codex, use the MCP tools: the shell cannot write the channel.
 
+## Shared documents: add nodes, never edit the file
+
+A research document written by several sessions is a set of immutable nodes
+(`xsm doc add <doc> --tag result|insight|hypothesis|verification|report
+--text … [--parent <id>]`); the document is rendered from them (`xsm doc
+render <doc>`). Do not edit the rendered file or another session's node — to
+revise, add a node with `--parent`. `endorsed` is your user's: ask with the
+`xsm_doc_endorse` MCP tool.
+
 ## Workers: starting a session to hand work to
 
 ```bash

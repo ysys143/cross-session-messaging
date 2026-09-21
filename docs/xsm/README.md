@@ -157,6 +157,23 @@ xsm channel list
 - **MCP 서버.** 설치할 때 각 홈에 `xsm`이라는 이름으로 등록된다(`claude mcp add --scope user`, `codex mcp add`). 도구는 `xsm_post`, `xsm_channel`, `xsm_decide` 셋이다. 세션이 띄우고 세션과 함께 끝난다. Codex가 띄운 MCP 서버는 샌드박스 밖에서 돌기 때문에, 샌드박스 Codex도 채널에 쓸 수 있다(실측). Codex는 MCP 도구마다 호출 허용을 묻는다. 등록을 원하지 않으면 `xsm install --no-mcp`.
 - **한계.** 같은 사용자 권한의 에이전트는 파일을 직접 고쳐 작성자나 결정을 위조할 수 있다.
 
+## 공동 문서
+
+여러 세션이 함께 쓰는 조사 문서는 파일을 직접 고치지 않고 **노드**를 쌓는다(ADR-0006, agora 방식).
+
+```
+xsm doc add docs/research/cache.md --tag result --text "redis is 2x faster"
+xsm doc add docs/research/cache.md --tag report --file draft.md --parent <id>
+xsm doc render docs/research/cache.md        # 노드에서 문서를 만든다
+xsm doc log|leaves docs/research/cache.md
+xsm doc show docs/research/cache.md <id>
+```
+
+- **노드.** 기여 하나가 `<문서>.nodes/<id>.md` 한 파일이다. 한 번 쓰면 바꾸지 않는다. 고칠 때는 `--parent`로 이전 노드를 가리키는 새 노드를 쓴다. 노드마다 파일 이름이 다르므로, 여러 세션이 동시에 써도 git 병합에서 충돌하지 않는다(실측).
+- **태그.** `setup`, `result`, `insight`, `hypothesis`, `verification`, `report`, `wip`, `endorsed`. `endorsed`는 사람만 단다. 세션은 MCP 도구 `xsm_doc_endorse`로 사용자에게 양식으로 묻는다.
+- **문서는 만들어진다.** `render`는 가장 최근의 `endorsed` 노드, 없으면 가장 최근의 `report` 노드 본문을 문서로 쓴다. 그 아래에 아직 이어지지 않은 노드와 검증되지 않은 가설을 붙인다. 문서 머리에 "생성된 파일"이라고 적히므로 손으로 고치지 않는다. 병합에서 문서가 충돌하면 다시 `render`한다.
+- 작성자는 채널과 같은 규칙으로 xsm이 정한다. 사람이 아니고 등록된 세션도 아닌 셸에서는 거부한다.
+
 ## 워커
 
 세션이 작업을 맡길 새 세션을 직접 띄우고, 끝나면 종료한다.

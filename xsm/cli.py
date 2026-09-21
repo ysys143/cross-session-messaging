@@ -742,6 +742,33 @@ def cmd_channel(args) -> int:
     return OK
 
 
+def cmd_doc(args) -> int:
+    from . import channel, doc
+    try:
+        if args.action == "add":
+            body = open(args.file, encoding="utf-8").read() if args.file else (args.text or "")
+            author = channel.author_here(registry.me())
+            node = doc.add(args.doc, author, body, args.tag or ["result"], args.parent or [])
+            print("added node %s [%s] to %s" % (node["id"], ", ".join(node["tags"]),
+                                                 os.path.basename(doc.nodes_dir(args.doc))))
+        elif args.action == "render":
+            doc.render(args.doc)
+            print("rendered %s from %d node(s)" % (args.doc, len(doc.read(args.doc))))
+        elif args.action == "log":
+            print(doc.log(doc.read(args.doc)) or "(no nodes)")
+        elif args.action == "leaves":
+            print("\n".join(doc._one_line(n) for n in doc.leaves(doc.read(args.doc))) or "(no nodes)")
+        elif args.action == "show":
+            node = next((n for n in doc.read(args.doc) if n["id"] == args.node), None)
+            if not node:
+                raise doc.DocError("no node %s" % args.node)
+            print(doc._serialize(node))
+    except (doc.DocError, channel.ChannelError, OSError) as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    return OK
+
+
 def cmd_mcp(args) -> int:
     from . import mcp
     return mcp.main()
@@ -837,6 +864,16 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--out", help="export: write the markdown here")
     ch.add_argument("--dir")
     ch.set_defaults(func=cmd_channel)
+    dc = sub.add_parser("doc", help="shared documents as immutable nodes (add, render, log, leaves, show)")
+    dc.add_argument("action", choices=["add", "render", "log", "leaves", "show"])
+    dc.add_argument("doc", help="the document, e.g. docs/research/cache.md")
+    dc.add_argument("node", nargs="?", help="show: the node id")
+    dc.add_argument("--tag", action="append", help="setup, result, insight, hypothesis, "
+                    "verification, report, wip; endorsed is a person's")
+    dc.add_argument("--parent", action="append", help="a node this builds on or revises")
+    dc.add_argument("--text")
+    dc.add_argument("--file")
+    dc.set_defaults(func=cmd_doc)
     mc = sub.add_parser("mcp", help=argparse.SUPPRESS)
     mc.set_defaults(func=cmd_mcp)
     ap = sub.add_parser("approvals", help="permission requests waiting for a person")

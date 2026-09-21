@@ -25,9 +25,12 @@ class TempState(unittest.TestCase):
         os.environ["XSM_HOME"] = self.tmp
         for mod in [m for m in list(sys.modules) if m.startswith("xsm")]:
             del sys.modules[mod]
-        from xsm import paths
+        from xsm import paths, registry
         paths.HOME = self.tmp
         paths.ensure_home()
+        # Never scan this machine's real processes from a test: it made runs
+        # depend on whatever Codex happened to be open (and lsof was slow).
+        registry._running_codex = lambda: []
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)

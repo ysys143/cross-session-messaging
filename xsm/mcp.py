@@ -62,6 +62,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "project": {"type": "string"}, "leave": {"type": "boolean", "default": False},
          "reason": {"type": "string"}}, "required": ["project"]}},
+    {"name": "xsm_doc_endorse",
+     "description": ("Ask your user to endorse a node of a shared document (xsm doc), making it "
+                     "the document's canonical text when rendered. They see the node and decide."),
+     "inputSchema": {"type": "object", "properties": {
+         "doc": {"type": "string", "description": "path of the document, e.g. docs/x.md"},
+         "node": {"type": "string"}}, "required": ["doc", "node"]}},
     {"name": "xsm_approve",
      "description": ("Show your user a permission request from a worker you started, and pass "
                      "on their answer. Call it as soon as you are told a worker is waiting; the "
@@ -147,6 +153,8 @@ class Server:
             return self.approve(me, args)
         if name == "xsm_join":
             return self.join(me, args)
+        if name == "xsm_doc_endorse":
+            return self.endorse(me, args)
         raise channel.ChannelError("unknown tool %s" % name)
 
     def decide(self, where: tuple, me: dict, args: dict) -> str:
@@ -179,6 +187,34 @@ class Server:
                            approved={"question": question, "answer": answer,
                                      "options": options or None})
         return "recorded decision %s in %s: %s" % (rec["id"], where[0], answer)
+
+    def endorse(self, me: dict, args: dict) -> str:
+        from . import doc
+        if "elicitation" not in (self.client_caps or {}):
+            raise channel.ChannelError("this client cannot ask its user; they can run "
+                                       "`xsm doc add … --tag endorsed` in a terminal")
+        path = args.get("doc") or ""
+        if not os.path.isabs(path):
+            path = os.path.join(me.get("cwd") or os.getcwd(), path)
+        node = next((n for n in doc.read(path) if n["id"] == args.get("node")), None)
+        if not node:
+            raise channel.ChannelError("no node %s in %s" % (args.get("node"), path))
+        preview = node["body"] if len(node["body"]) < 1500 else node["body"][:1500] + " …"
+        reply = self.ask_client("elicitation/create", {
+            "message": "Endorse this node of %s as the document's text?\n[%s] by %s\n\n%s" % (
+                os.path.basename(path), ", ".join(node["tags"]), node["author"], preview),
+            "requestedSchema": {"type": "object", "properties": {"answer": {
+                "type": "string", "title": "Endorse", "enum": ["endorse", "not now"]}},
+                "required": ["answer"]}})
+        result = reply.get("result") or {}
+        if result.get("action") != "accept" or (result.get("content") or {}).get("answer") != "endorse":
+            return "your user did not endorse it; nothing was added"
+        author = {"kind": "human", "name": os.environ.get("USER") or "person",
+                  "via": "mcp-elicitation"}
+        new = doc.add(path, author, node["body"], ["endorsed"], [node["id"]],
+                      approved="asked by %s" % me.get("ref"))
+        return "endorsed: node %s now carries %s; run `xsm doc render %s`" % (
+            new["id"], node["id"], args.get("doc"))
 
     def join(self, me: dict, args: dict) -> str:
         from . import config

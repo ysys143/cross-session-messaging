@@ -330,6 +330,10 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
   - **`xsm_decide`의 흐름.** 서버가 `elicitation/create`를 보낸다. 요청 내용은 `message`와 `requestedSchema.properties.answer`(선택지가 있으면 `enum`)다. `action: accept`와 빈 값이 아닌 답이 돌아와야만 레코드를 쓴다. 이때 작성자는 `{"kind": "human", "via": "mcp-elicitation", "asked_by": <세션 ref>}`다. 거절, 취소, elicitation 미지원이면 아무것도 쓰지 않는다.
 - **등록.** 설치기가 `claude mcp add --scope user xsm -- <고정 인터프리터> <repo>/hooks/xsm-mcp.py`(Codex는 `codex mcp add xsm -- …`)를 실행한다. `mcp get`으로 확인해, 명령이 같으면 건너뛰고 다르면 지우고 다시 등록한다. `uninstall`은 `mcp remove`를 실행한다.
 
+### 5.7 공동 문서(노드)
+
+문서 `<path>`의 노드는 `<path>.nodes/<id>.md`다. 머리는 `---`로 감싼 `key: value` 줄이다(`id`, `t`, `author`, `author_kind`, `tags`, `parents`, 선택적으로 `approved`). 본문은 그 아래에 온다. `id`는 `sha256("t|author|tags|parents|body")`의 앞 12자다. 노드는 `O_CREAT|O_EXCL`로 만들므로 이미 있는 노드를 덮어쓰지 않는다. 부모는 이미 있는 노드여야 한다. `endorsed`는 `author_kind: human`일 때만 쓸 수 있다. 사람 판정은 채널과 같고, MCP `xsm_doc_endorse`의 elicitation도 사람으로 인정한다. `render`의 기준 노드는 가장 최근의 `endorsed`, 없으면 가장 최근의 `report`다. 여기에 끝 노드(자식이 없는 노드)와, `verification` 자식이 없는 `hypothesis`를 덧붙인다.
+
 ## 6. 결과값과 종료 코드
 
 | 결과 | 뜻 | 종료 코드 |
