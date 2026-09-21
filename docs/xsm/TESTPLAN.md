@@ -194,7 +194,7 @@ which xsm && xsm list
 **훅을 먼저 설치했는지 확인한다.** 훅은 세션이 시작할 때 읽히므로, 2장 전에 띄워 둔 세션은 등록되지 않는다. 이미 열려 있으면 닫고 다시 띄운다.
 
 ```bash
-grep -c '#xsm-hook' ~/.claude-4/settings.json ~/.claude-5/settings.json   # 각 2가 나와야 한다
+grep -c '#xsm-hook' ~/.claude-4/settings.json ~/.claude-5/settings.json   # 각 3이 나와야 한다(SessionStart, UserPromptSubmit, SessionEnd)
 ```
 
 터미널 두 개를 연다. 두 세션의 **작업 폴더는 같은 git 저장소 안**이어야 한다(기본 범위 규칙). 테스트용 저장소를 하나 만든다.
@@ -405,7 +405,7 @@ builder가 메시지를 보내면 그 스크립트를 읽고 직접 실행해서
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
-| `xsm list`가 비어 있다 | 훅이 설치되지 않았거나, 세션이 설치 전에 떠 있었다 | `grep -c '#xsm-hook' <홈>/settings.json`으로 설치를 확인하고(2가 나와야 한다), 세션을 다시 띄운다 |
+| `xsm list`가 비어 있다 | 훅이 설치되지 않았거나, 세션이 설치 전에 떠 있었다 | `grep -c '#xsm-hook' <홈>/settings.json`으로 설치를 확인하고(3이 나와야 한다), 세션을 다시 띄운다 |
 | 턴이 끝날 때마다 "can't open file …" | 그 홈에 있던 다른 훅이 상대 경로를 쓴다. xsm과 무관하다 | 무시해도 된다. 1장 4번 참고 |
 | `this session is not registered` | CLI를 세션 밖에서 실행했다 | 세션 안의 셸에서 실행하거나 `xsm list`로 대상 ref를 확인한다 |
 | 수신 화면에 보류 창 | 권한 모드 부류가 다르고 `crossSessionInbound`가 `accept`가 아니다 | 1.1절 (a) 또는 (b)로 켠다. 프로젝트 설정으로는 안 된다 |

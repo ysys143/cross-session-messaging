@@ -84,11 +84,25 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
     usable = live or (pool if include_offline else [])
     if not usable:
         return Resolution("offline-only", candidates=pool,
-                          reason="only stopped sessions match %r" % name)
+                          reason="only stopped sessions match %r\n%s" % (
+                              name, "\n".join(resume_hint(r) for r in pool)))
     if len(usable) > 1:
         return Resolution("ambiguous", candidates=usable,
                           reason="%d sessions match %r" % (len(usable), name))
     return Resolution("resolved", usable[0])
+
+
+def resume_hint(record: dict) -> str:
+    """How a stopped session could take messages again. Resuming keeps the
+    session id, so the address and ref come back unchanged."""
+    how = "exited cleanly (%s)" % record.get("end_reason") if record.get("state") == "ended" \
+        else "stopped without saying goodbye"
+    if record.get("runtime") == "codex":
+        cmd = "CODEX_HOME=%s codex resume %s" % (record.get("home"), record.get("session_id"))
+    else:
+        cmd = "CLAUDE_CONFIG_DIR=%s claude --resume %s" % (record.get("home"), record.get("session_id"))
+    return "  %s@%s [%s] %s; resume it with: %s" % (
+        record.get("name"), record.get("alias"), record.get("ref"), how, cmd)
 
 
 def describe(candidates) -> str:

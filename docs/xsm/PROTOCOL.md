@@ -92,10 +92,10 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 
 | 경로 | 스키마 |
 |---|---|
-| `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?}]}]}` |
+| `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?}]}]}` |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |
-| `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?}` |
+| `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?, "ended_at"?, "end_reason"?}` |
 | `ledger/<msg-id>.json` | `{"id", "status": "queued", "t", "kind", "scope", "from": {...}, "to": {...}, "preview"}` |
 | `ledger/<msg-id>.recv.json` | `{"id", "decision": "delivered"\|"held"\|"blocked", "reason", "t", "receiver": {...}}` |
 | `held/<밀리초>.json` | `{"t", "reason", "runtime", "receiver", "id"?, "from"?, "scope"?, "body"}` |
@@ -147,6 +147,38 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 - 수신 세션은 자기 pid를 `CLAUDE_CODE_MESSAGING_SOCKET`(경로에 pid가 들어 있다)이나 조상 프로세스 탐색으로 얻고, 둘 다 실패하면 같은 `session_id`로 이미 남아 있는 포인터에서 되찾는다. 그래도 알 수 없으면 5.1절 3번 규칙이 적용된다.
 - 종료 훅에 의존하지 않는다. 강제 종료 시 `SessionEnd`는 실행되지 않는다(S3).
 - **주의:** Claude가 자기 레코드에 쓰는 `procStart`는 UTC이고 `ps lstart`는 로컬 시간이다. 두 값을 직접 비교하면 안 된다. 우리가 등록한 포인터의 `lstart`만 `ps` 출력과 비교한다.
+
+### 4.4 세션 수명 주기
+
+| 상태 | 뜻 | 어떻게 정해지나 |
+|---|---|---|
+| `live` | 메시지를 받을 수 있다 | pid 생존 + `ps lstart` 일치 + (Claude) 소켓 연결 |
+| `ended` | 정상 종료했다 | `SessionEnd` 훅이 `ended_at`과 `end_reason`을 기록했고 프로세스가 없다 |
+| `stale` | 인사 없이 사라졌다 | 프로세스가 없는데 종료 기록이 없다. 강제 종료, 터미널 닫힘, 충돌 |
+| `unknown` | 판단할 근거가 없다 | pid를 모르는 Codex 세션. 죽은 것으로 취급하지 않는다 |
+
+Codex에는 `SessionEnd`가 없으므로 멈춘 Codex 세션은 항상 `stale`이다.
+
+**재개.** `claude --resume <세션 id>`는 **같은 세션 id**로 돌아온다(2026-09-21 실측: pid는 바뀌고 ref와 이름은 그대로). 그래서 SessionStart 훅이 같은 포인터를 다시 쓰고, 이때 종료 기록을 지워 `live`로 되돌린다. 주소와 ref가 끊기지 않는다.
+
+**멈춘 상대에게 보내기.** 보내지 않고 거부한다(Claude는 받을 소켓이 없다). 거부 이유에 어떻게 멈췄는지와 재개 명령을 싣는다.
+
+```
+refused: only stopped sessions match 'life-b'
+  life-b@claude-4 [ac63ed] exited cleanly (prompt_input_exit); resume it with: CLAUDE_CONFIG_DIR=… claude --resume <id>
+```
+
+**원장.** `queued`로 남은 메시지의 대상이 더 이상 `live`가 아니면 `undelivered`로 표시한다. 원장 파일은 고치지 않고 표시할 때 판단한다.
+
+**보관 기간.** 상주 프로세스가 없으므로, 세션이 시작할 때(`SessionStart` 훅)와 CLI를 실행할 때 기회가 되면 정리한다. 최대 한 시간에 한 번이다(`<XSM_HOME>/last-prune`의 수정 시각).
+
+| 대상 | 기본 보관 | 설정 키 | 이유 |
+|---|---|---|---|
+| 멈춘 세션의 포인터 | 7일 | `retention_days` | 재개하면 같은 주소가 돌아오므로 바로 지우지 않는다. 기준 시각은 `ended_at`, 없으면 마지막 `updated` |
+| 원장과 영수증 | 30일 | `ledger_retention_days` | "그 메시지가 도착했나"에 답할 만큼 |
+| 보류된 본문 | 30일 | `ledger_retention_days` | 같음 |
+
+`live`인 포인터는 기간과 무관하게 지우지 않는다. `xsm prune --dry-run`으로 무엇이 지워질지 먼저 볼 수 있다.
 
 ## 5. 판정
 

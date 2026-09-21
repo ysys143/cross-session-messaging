@@ -25,7 +25,9 @@ from . import config, paths
 MARKER = "#xsm-hook"
 FILE_MARKER = "<!-- xsm-managed -->"        # commands we wrote, and may remove
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit")
+# SessionEnd lets a clean exit read as `ended` rather than `stale`. Codex has
+# no SessionEnd event, so a stopped Codex session always reads as stale.
+CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "SessionEnd")
 CODEX_EVENTS = ("SessionStart", "UserPromptSubmit")
 
 

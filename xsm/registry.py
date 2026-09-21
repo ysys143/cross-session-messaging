@@ -39,6 +39,10 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
         "ref": identity.ref_of(runtime, home, session_id),
         "updated": time.time(),
     })
+    # A session that registers again is alive again: `claude --resume` comes
+    # back with the same session id, so an earlier goodbye no longer applies.
+    record.pop("ended_at", None)
+    record.pop("end_reason", None)
     if permission_mode:
         record["permission_mode"] = permission_mode
     if name:
@@ -134,6 +138,19 @@ def unregistered() -> list:
     return out
 
 
+def mark_ended(runtime: str, session_id: str, reason: str | None) -> dict | None:
+    """Record a clean exit. Only the SessionEnd hook calls this; a crash never
+    does, which is exactly how `ended` and `stale` come apart."""
+    p = _record_path(runtime, session_id)
+    rec = paths.read_json(p)
+    if not rec:
+        return None
+    rec["ended_at"] = time.time()
+    rec["end_reason"] = reason or "unknown"
+    paths.write_json(p, rec)
+    return rec
+
+
 def cheap_records() -> list:
     """Pointers whose process is still alive, without the expensive checks.
 
@@ -152,24 +169,6 @@ def cheap_records() -> list:
 def by_session(runtime: str, session_id: str) -> dict | None:
     rec = paths.read_json(_record_path(runtime, session_id))
     return _enrich(rec) if rec else None
-
-
-def prune(max_age_days: float = 14.0) -> int:
-    """Drop pointers whose session is gone and whose record is old. Liveness is
-    checked at lookup, so pruning is housekeeping, not correctness."""
-    cutoff = time.time() - max_age_days * 86400
-    removed = 0
-    for p in glob.glob(paths.path(paths.SESSIONS, "*.json")):
-        rec = paths.read_json(p)
-        if not rec:
-            continue
-        if identity.state_of(_enrich(rec)) == "stale" and rec.get("updated", 0) < cutoff:
-            try:
-                os.unlink(p)
-                removed += 1
-            except OSError:
-                pass
-    return removed
 
 
 def me(session_id: str | None = None, cwd: str | None = None):

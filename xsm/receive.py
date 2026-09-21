@@ -19,20 +19,33 @@ import os
 import sys
 import time
 
-from . import config, envelope, identity, ledger, paths, registry
+from . import config, envelope, housekeeping, identity, ledger, paths, registry
 
 CLAUDE_FIELDS = ("scratchpad_dir", "session_title", "prompt_id")
 CODEX_FIELDS = ("turn_id",)
 
 
 def detect_runtime(data: dict) -> str:
-    if any(f in data for f in CLAUDE_FIELDS) or os.environ.get("CLAUDE_CODE_SESSION_ID"):
+    """The hook input says who is calling; the environment only guesses.
+
+    Environment variables are inherited: a Codex started from a Claude
+    session's terminal carries CLAUDE_CODE_SESSION_ID, so trusting env first
+    would register that Codex session as Claude. Order: input fields, then the
+    transcript's location, then the environment as a last resort.
+    """
+    if any(f in data for f in CLAUDE_FIELDS):
         return "claude"
-    if any(f in data for f in CODEX_FIELDS) or os.environ.get("CODEX_HOME"):
+    if any(f in data for f in CODEX_FIELDS):
         return "codex"
-    # SessionStart on Claude carries neither marker; its transcript sits under
-    # <CONFIG_DIR>/projects/, while Codex writes <CODEX_HOME>/sessions/.
-    return "codex" if "/sessions/" in (data.get("transcript_path") or "") else "claude"
+    # Claude writes <CONFIG_DIR>/projects/…, Codex writes <CODEX_HOME>/sessions/….
+    tp = data.get("transcript_path") or ""
+    if "/projects/" in tp:
+        return "claude"
+    if "/sessions/" in tp:
+        return "codex"
+    if os.environ.get("CODEX_HOME") and not os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "codex"
+    return "claude"
 
 
 def home_of(runtime: str, data: dict) -> str | None:
@@ -121,7 +134,15 @@ def block(runtime: str, reason: str) -> dict:
 
 def handle(data: dict) -> dict | None:
     runtime = detect_runtime(data)
+    if data.get("hook_event_name") == "SessionEnd":
+        # Do not re-register on the way out; just note the goodbye.
+        if data.get("session_id"):
+            registry.mark_ended(runtime, data["session_id"], data.get("reason"))
+        return None
     me = register(data, runtime)
+    if data.get("hook_event_name") == "SessionStart":
+        housekeeping.maybe_prune()
+        return None
     if data.get("hook_event_name") != "UserPromptSubmit":
         return None
     parsed = envelope.parse(data.get("prompt") or "")

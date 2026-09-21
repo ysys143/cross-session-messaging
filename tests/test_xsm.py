@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -547,15 +548,29 @@ class CompactOutputTest(TempState):
         self.assertTrue(line.startswith("worker@codex ["), line)
         self.assertNotIn("  ", line)
 
-    def test_ledger_compact_has_one_line_per_message(self):
-        from xsm import cli, ledger
-        a = {"name": "a", "alias": "h", "ref": "r1", "runtime": "claude"}
-        b = {"name": "b", "alias": "h", "ref": "r2", "runtime": "claude"}
-        ledger.queued("m1", a, b, "dir:x", "note", "hello\nworld")
+    def _ledger_line(self):
+        from xsm import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.main(["ledger", "--compact"])
-        self.assertEqual(out.getvalue().strip(), "queued a->b m1: hello world")
+        return out.getvalue().strip()
+
+    def test_ledger_compact_has_one_line_per_message(self):
+        from xsm import ledger, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        b = registry.upsert("codex", home, "t-b", os.getpid(), self.tmp, name="b")   # live target
+        a = {"name": "a", "alias": "h", "ref": "r1", "runtime": "claude"}
+        ledger.queued("m1", a, b, "dir:x", "note", "hello\nworld")
+        self.assertEqual(self._ledger_line(), "queued a->b m1: hello world")
+
+    def test_queued_to_a_stopped_target_reads_undelivered(self):
+        """It will never be recorded as delivered; do not leave it looking pending."""
+        from xsm import ledger
+        a = {"name": "a", "alias": "h", "ref": "r1", "runtime": "claude"}
+        gone = {"name": "b", "alias": "h", "ref": "r2", "runtime": "claude"}
+        ledger.queued("m1", a, gone, "dir:x", "note", "hello")
+        self.assertTrue(self._ledger_line().startswith("undelivered a->b m1"))
 
     def test_display_commands_ask_for_a_verbatim_copy(self):
         """The prompts must not contain conditions for the model to weigh."""
@@ -563,6 +578,106 @@ class CompactOutputTest(TempState):
             body = open(os.path.join(REPO, "commands", name + ".md")).read()
             self.assertIn("copied exactly", body, name)
             self.assertNotIn("unless", body, name)
+
+
+class LifecycleTest(TempState):
+    """What happens to a session after it stops (ADR-0001 addendum)."""
+
+    def _register(self, name="s", runtime="codex", pid=None):
+        from xsm import registry
+        home = os.path.join(self.tmp, "homes", runtime)
+        os.makedirs(home, exist_ok=True)
+        return registry.upsert(runtime, home, "sid-" + name, pid or os.getpid(), self.tmp, name=name)
+
+    def _dead_pid(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    def test_clean_exit_reads_ended_and_a_crash_reads_stale(self):
+        from xsm import identity, registry
+        clean = self._register("clean", pid=self._dead_pid())
+        registry.mark_ended("codex", clean["session_id"], "prompt_input_exit")
+        crashed = self._register("crashed", pid=self._dead_pid())
+        self.assertEqual(identity.state_of(registry.by_session("codex", clean["session_id"])), "ended")
+        self.assertEqual(identity.state_of(registry.by_session("codex", crashed["session_id"])), "stale")
+
+    def test_resuming_clears_the_goodbye(self):
+        """claude --resume comes back with the same session id (measured)."""
+        from xsm import identity, registry
+        rec = self._register("resumable", pid=self._dead_pid())
+        registry.mark_ended("codex", rec["session_id"], "prompt_input_exit")
+        again = self._register("resumable")                     # same id, live pid
+        self.assertNotIn("ended_at", again)
+        self.assertEqual(identity.state_of(again), "live")
+        self.assertEqual(again["ref"], rec["ref"])
+
+    def test_sessionend_hook_marks_the_pointer(self):
+        from xsm import receive, registry
+        rec = self._register("leaving")
+        receive.handle({"hook_event_name": "SessionEnd", "session_id": rec["session_id"],
+                        "reason": "prompt_input_exit", "turn_id": "x"})
+        self.assertEqual(registry.by_session("codex", rec["session_id"])["end_reason"],
+                         "prompt_input_exit")
+
+    def test_prune_keeps_recent_stopped_pointers_and_drops_old_ones(self):
+        from xsm import housekeeping, paths, registry
+        live = self._register("live")
+        recent = self._register("recent", pid=self._dead_pid())
+        old = self._register("old", pid=self._dead_pid())
+        p = os.path.join(self.tmp, "sessions", "codex-%s.json" % old["session_id"])
+        rec = paths.read_json(p)
+        rec["updated"] = time.time() - 30 * 86400
+        paths.write_json(p, rec)
+        removed = housekeeping.prune()
+        self.assertEqual(removed["sessions"], ["old"])
+        names = {r["name"] for r in registry.records()}
+        self.assertEqual(names, {"live", "recent"})
+
+    def test_prune_ages_out_ledger_and_held(self):
+        from xsm import housekeeping, paths
+        now = time.time()
+        paths.write_json(paths.path(paths.LEDGER, "fresh.json"), {"t": now})
+        paths.write_json(paths.path(paths.LEDGER, "ancient.json"), {"t": now - 90 * 86400})
+        paths.write_json(paths.path(paths.HELD, "ancient.json"), {"t": now - 90 * 86400})
+        removed = housekeeping.prune()
+        self.assertEqual(removed["ledger"], ["ancient.json"])
+        self.assertEqual(removed["held"], ["ancient.json"])
+        self.assertTrue(os.path.exists(paths.path(paths.LEDGER, "fresh.json")))
+
+    def test_opportunistic_prune_runs_at_most_hourly(self):
+        from xsm import housekeeping
+        self.assertIsNotNone(housekeeping.maybe_prune())
+        self.assertIsNone(housekeeping.maybe_prune())
+
+    def test_a_stopped_target_comes_with_a_resume_command(self):
+        from xsm import registry, resolve
+        rec = self._register("sleeper", pid=self._dead_pid())
+        registry.mark_ended("codex", rec["session_id"], "prompt_input_exit")
+        found = resolve.resolve("sleeper")
+        self.assertEqual(found.status, "offline-only")
+        self.assertIn("codex resume sid-sleeper", found.reason)
+        self.assertIn("exited cleanly", found.reason)
+
+
+class RuntimeDetectionTest(TempState):
+    """Input fields decide, not inherited environment."""
+
+    def test_codex_input_is_codex_even_inside_a_claude_terminal(self):
+        from xsm import receive
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "leaked-from-a-parent-claude"
+        try:
+            self.assertEqual(receive.detect_runtime({"turn_id": "t", "session_id": "x"}), "codex")
+            self.assertEqual(receive.detect_runtime(
+                {"session_id": "x", "transcript_path": "/h/.codex/sessions/2026/x.jsonl"}), "codex")
+        finally:
+            del os.environ["CLAUDE_CODE_SESSION_ID"]
+
+    def test_claude_fields_win(self):
+        from xsm import receive
+        self.assertEqual(receive.detect_runtime({"scratchpad_dir": "/x", "session_id": "s"}), "claude")
+        self.assertEqual(receive.detect_runtime(
+            {"session_id": "s", "transcript_path": "/h/.claude-4/projects/p/s.jsonl"}), "claude")
 
 
 if __name__ == "__main__":

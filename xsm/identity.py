@@ -59,18 +59,26 @@ def normalize(name: str) -> str:
 
 
 def state_of(record: dict) -> str:
-    """live | stale | unknown. `unknown` is deliberate for a Codex session whose
-    pid we could not confirm: unknown must not read as dead (ADR-0001)."""
+    """live | ended | stale | unknown.
+
+    `ended` means the session said goodbye (its SessionEnd hook ran) and its
+    process is gone; `stale` means the process is gone without a goodbye — a
+    crash, a kill -9, a closed terminal. Both can come back: `claude --resume`
+    reuses the session id, so the same pointer turns live again. `unknown` is
+    deliberate for a Codex session whose pid we could not confirm: unknown must
+    not read as dead (ADR-0001).
+    """
     pid = record.get("pid")
     if not pid:
         return "unknown"
+    gone = "ended" if record.get("ended_at") else "stale"
     if not pid_alive(pid):
-        return "stale"
+        return gone
     recorded = record.get("lstart")
     if recorded and lstart(pid) != recorded:
-        return "stale"          # pid reused by a different process
+        return gone             # pid reused by a different process
     if record.get("runtime") == "claude":
-        return "live" if socket_live(record.get("socket") or "") else "stale"
+        return "live" if socket_live(record.get("socket") or "") else gone
     return "live"
 
 

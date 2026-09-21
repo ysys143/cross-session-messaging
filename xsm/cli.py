@@ -12,7 +12,7 @@ import json
 import os
 import sys
 
-from . import config, envelope, install, ledger, paths, registry, resolve, send
+from . import config, envelope, housekeeping, install, ledger, paths, registry, resolve, send
 
 OK, REFUSED, UNCONFIRMED, USAGE = 0, 2, 3, 4
 
@@ -130,7 +130,7 @@ def cmd_send(args) -> int:
         print(json.dumps(result.as_dict(), ensure_ascii=False))
     else:
         print("%s: %s" % (result.status, result.reason or result.msg_id or ""))
-        if result.candidates:
+        if result.candidates and "resume it with" not in (result.reason or ""):
             print("registered sessions right now:" if "no session" in (result.reason or "")
                   else "candidates:")
             print(resolve.describe(result.candidates))
@@ -149,8 +149,19 @@ def cmd_status(args) -> int:
     return OK if state.get("status") == "delivered" else UNCONFIRMED
 
 
+def _mark_undelivered(rows: list) -> list:
+    """A message still `queued` whose target has since stopped will never be
+    recorded as delivered. Say so instead of leaving it looking pending."""
+    live = {r.get("ref") for r in registry.records() if r.get("state") == "live"}
+    for row in rows:
+        if row.get("status") == "queued" and (row.get("to") or {}).get("ref") not in live:
+            row["status"] = "undelivered"
+            row["note"] = "target stopped before recording it"
+    return rows
+
+
 def cmd_ledger(args) -> int:
-    rows = ledger.recent(args.last)
+    rows = _mark_undelivered(ledger.recent(args.last))
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1))
         return OK
@@ -356,7 +367,12 @@ def cmd_statusline(args) -> int:
 
 
 def cmd_prune(args) -> int:
-    print("removed %d stale pointer(s)" % registry.prune(args.days))
+    removed = housekeeping.prune(dry_run=args.dry_run)
+    verb = "would remove" if args.dry_run else "removed"
+    print("%s %d session pointer(s), %d ledger record(s), %d held message(s)" % (
+        verb, len(removed["sessions"]), len(removed["ledger"]), len(removed["held"])))
+    for name in removed["sessions"]:
+        print("  session %s" % name)
     return OK
 
 
@@ -384,8 +400,9 @@ def build_parser() -> argparse.ArgumentParser:
     homes.add_argument("--alias")
     homes.set_defaults(func=cmd_homes)
 
-    prune = sub.add_parser("prune", help="drop old pointers of sessions that are gone")
-    prune.add_argument("--days", type=float, default=14.0)
+    prune = sub.add_parser("prune", help="remove what has outlived its retention window "
+                                          "(also runs on its own at most hourly)")
+    prune.add_argument("--dry-run", action="store_true")
     prune.set_defaults(func=cmd_prune)
 
     snd = sub.add_parser("send", help="send a message to another session")
@@ -452,4 +469,6 @@ def main(argv=None) -> int:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
     paths.ensure_home()
+    if args.command not in ("hook", "statusline", "prune"):
+        housekeeping.maybe_prune()
     return args.func(args)
