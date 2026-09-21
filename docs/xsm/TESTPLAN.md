@@ -609,7 +609,12 @@ A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은
 
 `--once` 없이 띄운 워커는 `xsm stop <이름>`으로 끝낸다. 대기 중인 승인은 거부로 닫히고 워커의 기록이 지워진다. 헤드리스 워커의 진행은 `xsm attach <이름>`으로 본다. 입력한 줄은 사람의 메시지로 워커에 들어가고, Ctrl-C로 빠져나와도 워커는 계속 돈다.
 
-**헤드리스 Codex 워커는 승인을 묻지 않는다.** `codex exec`는 승인 정책을 무엇으로 주든 `never`로 돈다. 그래서 전달할 승인 요청이 없고, 대신 모든 턴이 작업 폴더 쓰기만 허용하는 샌드박스로 돈다. 확인: `! xsm spawn codex --headless --name ca --once --task '셸 명령으로 $HOME/xsm-probe.txt에 hi를 써. 한 줄로 결과를 보고해'`. 답장이 `operation not permitted`를 보고하고, 파일은 생기지 않아야 한다.
+**Codex 워커의 승인.** 헤드리스 Codex 워커도 승인을 묻는다(10-4a). 패널 Codex는 패널에서 묻는다.
+
+| # | 항목 | A에서 | 기대 |
+|---|---|---|---|
+| 10-4a | 헤드리스 Codex 승인 | `! xsm spawn codex --headless --name ap --once --task '셸 명령으로 $HOME/xsm-probe.txt에 hi를 써. 작업 폴더 밖이니 권한 상승을 요청해. 한 줄로 보고해'` | `xsm approvals`에 `ap asks: shell: … (이유)`가 뜨고, A에 알림이 온다. 승인 전에는 파일이 없다. 터미널에서 `xsm approve <id>`, `yes`를 입력하면 파일이 생기고 답장이 온다. `deny`로 답하면 파일이 생기지 않고 거부됐다고 보고한다 |
+| 10-5a | 패널 Codex 권한 | 10-5 워커의 프로세스 인자 `ps -p <pid> -o args=` | `codex -m … -s workspace-write -a on-request`. 사용자 설정이 YOLO여도 헤더에 `permissions: YOLO mode`가 없다 |
 
 실측(2026-09-21, Orca 밖의 별도 tmux 서버에서 부모 `boss`로):
 
@@ -620,4 +625,4 @@ A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은
 - 10-5: 첫 시도에서 워커가 앞 워커(cw1)의 스레드로 잘못 등록되어 과제가 도착하지 않았다. 같은 폴더의 가장 최근 스레드로 추정한 탓이었다. 이름과 생성 시각으로 찾도록 고친 뒤 다시 해서 통과했다(새 ref, 답장 42, 패널 닫힘).
 - 10-6: 부모 에이전트가 스스로 워커를 띄우고 144를 전했다.
 - 10-7: 기본 한도에서 패널 워커 안의 spawn이 거부됐다. `--max-depth 2`로 띄운 워커는 헤드리스 워커를 하나 더 띄웠고(`depth 2/2`), 그 워커 명의의 spawn은 depth 3으로 거부됐다.
-- Codex 워커의 승인 전달: 사용자가 Codex에 xsm `PermissionRequest` 그룹을 설치하고 신뢰한 뒤 실측했다. 작업 폴더 밖 쓰기를 시켰는데 승인 요청 없이 파일이 생겼다. 원인은 둘이었다. 재개 턴(`exec resume`)에 샌드박스가 걸리지 않아 사용자 설정인 `danger-full-access`로 돌았고, `codex exec`는 `approval_policy`를 주어도 `never`로 돌았다. 모든 턴에 `sandbox_mode`를 주도록 고친 뒤에는 같은 과제가 `operation not permitted`로 거부되고 답장만 왔다. Codex 쪽 승인 전달은 불가능하다고 판단해 그 훅 그룹을 설치 목록에서 뺐다.
+- Codex 워커의 승인 전달: 사용자가 Codex에 xsm `PermissionRequest` 그룹을 설치하고 신뢰한 뒤 실측했다. 작업 폴더 밖 쓰기를 시켰는데 승인 요청 없이 파일이 생겼다. 원인은 둘이었다. 재개 턴(`exec resume`)에 샌드박스가 걸리지 않아 사용자 설정인 `danger-full-access`로 돌았고, `codex exec`는 `approval_policy`를 주어도 `never`로 돌았다. 모든 턴에 `sandbox_mode`를 주도록 고친 뒤에는 같은 과제가 `operation not permitted`로 거부되고 답장만 왔다. 그 훅 그룹은 설치 목록에서 뺐다. 이후 Codex app-server(IDE 클라이언트가 쓰는 JSON-RPC 인터페이스)가 승인 요청을 클라이언트로 보낸다는 것을 확인했고, 헤드리스 Codex 턴을 app-server로 옮겼다. 직접 시험에서 decline은 실행되지 않았고 accept는 실행됐다. 10-4a 실측에서는 승인 요청이 명령과 이유를 담아 xsm으로 왔고, 부모 에이전트는 승인하지 않았다. 터미널에서 승인하자 파일이 생기고 답장이 왔으며 워커가 스스로 정리됐다. 10-5a: 패널 Codex의 인자가 `-s workspace-write -a on-request`였고 YOLO 표시가 사라졌다.

@@ -287,9 +287,6 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
     if runtime == "codex" and not worker["model"]:
         worker["model"] = CODEX_MODEL
     if runtime == "codex":
-        # Codex's hook must be allowed to outlast the wait (install.TIMEOUTS).
-        worker["approval_timeout"] = min(worker["approval_timeout"],
-                                         install.TIMEOUTS["PermissionRequest"] - 30)
         worker["env"] = {k: os.environ[k] for k in PUMP_ENV if k in os.environ}
     os.makedirs(_dir(name), mode=0o700, exist_ok=True)
     try:
@@ -323,7 +320,10 @@ def _start_in_pane(worker: dict, pane: str) -> None:
     if worker["runtime"] == "claude":
         argv = _claude_argv(worker, _claude_worker_settings(worker))
     else:
-        argv = ["codex"] + _codex_config_args(worker)
+        # The pane is where a person answers, so the worker asks there even if
+        # the user's own config runs Codex without approvals.
+        argv = ["codex"] + _codex_config_args(worker) + ["-s", "workspace-write",
+                                                        "-a", "on-request"]
     # exec all the way down, so the pane's pid is the worker's own pid.
     command = "exec env %s %s %s" % (unset, assignments, " ".join(shlex.quote(a) for a in argv))
     out = subprocess.run(["tmux", "split-window", "-t", pane, "-h", "-d", "-P", "-F",
@@ -365,40 +365,145 @@ def _start_claude_headless(worker: dict) -> None:
     worker.update({"pid": proc.pid, "lstart": identity.lstart(proc.pid)})
 
 
-def _codex_exec(worker: dict, prompt: str, resume: bool, timeout: float | None = None) -> list:
-    """One headless Codex turn. Returns the JSON events it printed. Work turns
-    have no limit; the start-up turn does, so a network outage fails a spawn
-    instead of hanging it (measured: exec retries an unreachable endpoint)."""
-    d = _dir(worker["name"])
-    argv = ["codex", "exec"] + (["resume"] if resume else []) + [
-        "--json", "--skip-git-repo-check"] + _codex_config_args(worker)
-    # Every turn, not only the first: `exec resume` has no --sandbox option and
-    # otherwise falls back to the user's config, which may be full access
-    # (measured: resume turns ran danger-full-access and wrote outside the
-    # folder). `codex exec` never asks for approval whatever approval_policy
-    # says (measured: turn_context approval_policy "never"), so a headless
-    # Codex worker simply cannot escalate; work that needs more runs in a pane.
-    argv += ["-c", 'sandbox_mode="workspace-write"']
-    if resume:
-        argv.append(worker["session_id"])
-    argv.append(prompt)
-    env = _env(worker) if not resume else _pump_env(worker)
-    with open(os.path.join(d, "err.log"), "ab") as err:
+# How to answer each kind of approval request the Codex app-server sends.
+# Measured 2026-09-21: `codex exec` never asks (approval_policy is forced to
+# "never"), but the app-server — the interface IDE clients use — sends these
+# requests to its client and waits, so a headless worker driven through it
+# can ask a person.
+APPROVAL_ANSWERS = {
+    "item/commandExecution/requestApproval": ({"decision": "accept"}, {"decision": "decline"}),
+    "item/fileChange/requestApproval": ({"decision": "accept"}, {"decision": "decline"}),
+    "execCommandApproval": ({"decision": "approved"}, {"decision": "denied"}),
+    "applyPatchApproval": ({"decision": "approved"}, {"decision": "denied"}),
+}
+
+
+def _approval_summary(method: str, params: dict) -> tuple:
+    if "commandExecution" in method or method == "execCommandApproval":
+        command = params.get("command")
+        tool, detail = "shell", " ".join(command) if isinstance(command, list) else command
+    elif "fileChange" in method or method == "applyPatchApproval":
+        tool = "file change"
+        detail = params.get("grantRoot") or ", ".join(sorted((params.get("fileChanges") or {})))
+    else:
+        tool, detail = "permissions", json.dumps(params.get("permissions"), ensure_ascii=False)
+    if params.get("reason"):
+        detail = "%s (%s)" % (detail, params["reason"])
+    return tool, detail or "?"
+
+
+class _AppServer:
+    """One `codex app-server` process speaking newline-delimited JSON-RPC over
+    stdio. It lives for one turn: started by the pump, closed when the turn
+    completes, so nothing stays behind between turns."""
+
+    def __init__(self, worker: dict, log):
+        self.worker, self.log, self.next_id = worker, log, 0
+        d = _dir(worker["name"])
+        self.proc = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE,
+                                     stderr=open(os.path.join(d, "err.log"), "ab"),
+                                     cwd=worker["cwd"], env=_pump_env(worker), text=True,
+                                     bufsize=1)
+
+    def send(self, obj: dict) -> None:
+        self.proc.stdin.write(json.dumps(obj) + "\n")
+        self.proc.stdin.flush()
+
+    def request(self, method: str, params: dict) -> dict:
+        self.next_id += 1
+        rid = self.next_id
+        self.send({"id": rid, "method": method, "params": params})
+        while True:
+            msg = self.read()
+            if msg.get("id") == rid and "method" not in msg:
+                if "error" in msg:
+                    raise WorkerError("codex app-server %s failed: %s" % (method, msg["error"]))
+                return msg.get("result") or {}
+            self.handle(msg)
+
+    def read(self) -> dict:
+        line = self.proc.stdout.readline()
+        if not line:
+            raise WorkerError("codex app-server exited; see %s"
+                              % os.path.join(_dir(self.worker["name"]), "err.log"))
+        self.log.write(line if line.endswith("\n") else line + "\n")
+        self.log.flush()
+        return json.loads(line)
+
+    def handle(self, msg: dict) -> None:
+        method = msg.get("method")
+        if not method or "id" not in msg:
+            return                                   # a notification; the caller reads those
+        if method in APPROVAL_ANSWERS:
+            tool, detail = _approval_summary(method, msg.get("params") or {})
+            allow, _ = _await_person(self.worker, "codex", tool, detail)
+            self.send({"id": msg["id"], "result": APPROVAL_ANSWERS[method][0 if allow else 1]})
+        elif method == "item/permissions/requestApproval":
+            params = msg.get("params") or {}
+            allow, _ = _await_person(self.worker, "codex", *_approval_summary(method, params))
+            self.send({"id": msg["id"], "result": {
+                "permissions": params.get("permissions") if allow else {}}})
+        elif method == "mcpServer/elicitation/request":
+            self.send({"id": msg["id"], "result": {"action": "decline"}})
+        elif method == "item/tool/requestUserInput":
+            self.send({"id": msg["id"], "result": {"answers": {}}})
+        else:
+            self.send({"id": msg["id"], "error": {"code": -32601,
+                                                  "message": "xsm cannot answer %s" % method}})
+
+    def close(self) -> None:
         try:
-            proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                  stderr=err, cwd=worker["cwd"], env=env, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise WorkerError("codex did not finish its first turn within %ds; see %s"
-                              % (timeout, os.path.join(d, "err.log")))
-    events = []
-    with open(os.path.join(d, "out.jsonl"), "ab") as out:
-        for line in proc.stdout.splitlines():
-            out.write(line + b"\n")
-            try:
-                events.append(json.loads(line))
-            except ValueError:
-                pass
-    return events
+            self.proc.stdin.close()
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            self.proc.kill()
+
+
+def _codex_exec(worker: dict, prompt: str, resume: bool, timeout: float | None = None) -> list:
+    """One headless Codex turn through the app-server. Returns the items it
+    completed, as {"type": "item.completed", "item": {...}} events.
+
+    Every turn states its sandbox and approval policy: nothing falls back to the
+    user's config, which may be full access (measured: `exec resume` has no
+    --sandbox option and resumed turns ran danger-full-access)."""
+    d = _dir(worker["name"])
+    policy = {"approvalPolicy": "on-request", "sandbox": "workspace-write",
+              "model": worker.get("model") or CODEX_MODEL, "cwd": worker["cwd"]}
+    events, deadline = [], (time.time() + timeout) if timeout else None
+    with open(os.path.join(d, "out.jsonl"), "a", encoding="utf-8") as log:
+        server = _AppServer(worker, log)
+        try:
+            server.request("initialize", {"clientInfo": {"name": "xsm", "version": "1"}})
+            server.send({"method": "initialized"})
+            if resume:
+                server.request("thread/resume", dict(policy, threadId=worker["session_id"]))
+                thread = worker["session_id"]
+            else:
+                started = server.request("thread/start", policy)
+                thread = (started.get("thread") or {}).get("id")
+                events.append({"type": "thread.started", "thread_id": thread})
+            turn = {"threadId": thread, "input": [{"type": "text", "text": prompt}],
+                    "approvalPolicy": "on-request"}
+            if worker.get("effort"):
+                turn["effort"] = worker["effort"]
+            server.request("turn/start", turn)
+            while True:
+                if deadline and time.time() > deadline:
+                    raise WorkerError("codex did not finish its first turn within %ds; see %s"
+                                      % (timeout, os.path.join(d, "err.log")))
+                msg = server.read()
+                server.handle(msg)
+                if msg.get("method") == "item/completed":
+                    item = (msg.get("params") or {}).get("item") or {}
+                    if item.get("type") == "agentMessage":
+                        events.append({"type": "item.completed",
+                                       "item": {"type": "agent_message", "text": item.get("text")}})
+                if msg.get("method") == "turn/completed":
+                    return events
+        finally:
+            server.close()
 
 
 def _start_codex_headless(worker: dict, wait: float) -> None:
@@ -621,15 +726,25 @@ def summarize(tool: str, tool_input) -> str:
 
 
 def permission_request(data: dict, runtime: str) -> dict | None:
-    """The PermissionRequest hook. Silent for anything that is not an xsm worker,
-    so installing it changes nothing for ordinary sessions."""
+    """The PermissionRequest hook of a headless Claude worker. Silent for
+    anything else, so it changes nothing for ordinary sessions."""
     name = os.environ.get("XSM_WORKER")
     worker = load(name) if name else None
     if not worker or worker.get("mode") != "headless":
         return None                     # a pane worker's person answers in the pane
-    req = {"id": uuid.uuid4().hex[:8], "worker": name, "runtime": runtime, "t": time.time(),
-           "tool": data.get("tool_name"), "input": data.get("tool_input"), "status": "pending",
-           "summary": summarize(data.get("tool_name") or "?", data.get("tool_input"))}
+    allow, reason = _await_person(worker, runtime, data.get("tool_name") or "?",
+                                  data.get("tool_input"))
+    return _decision(allow, reason)
+
+
+def _await_person(worker: dict, runtime: str, tool: str, tool_input) -> tuple:
+    """Record a request, tell the parent, and wait for a person's answer.
+    Returns (allowed, reason)."""
+    summary = summarize(tool, tool_input) if not isinstance(tool_input, str) \
+        else "%s: %s" % (tool, tool_input)
+    req = {"id": uuid.uuid4().hex[:8], "worker": worker["name"], "runtime": runtime,
+           "t": time.time(), "tool": tool, "input": tool_input, "status": "pending",
+           "summary": summary}
     os.makedirs(paths.path(APPROVALS), mode=0o700, exist_ok=True)
     paths.write_json(_approval_path(req["id"]), req)
     _notify_parent(worker, req)
@@ -637,12 +752,12 @@ def permission_request(data: dict, runtime: str) -> dict | None:
     while time.time() < deadline:
         cur = paths.read_json(_approval_path(req["id"])) or {}
         if cur.get("status") in ("approved", "denied"):
-            return _decision(cur["status"] == "approved", cur.get("reason"))
+            return cur["status"] == "approved", cur.get("reason")
         time.sleep(1)
     req.update({"status": "denied", "reason": "nobody answered within %ds" %
                 (deadline - req["t"])})
     paths.write_json(_approval_path(req["id"]), req)
-    return _decision(False, req["reason"])
+    return False, req["reason"]
 
 
 def _decision(allow: bool, reason: str | None) -> dict:
@@ -805,6 +920,16 @@ def render(event: dict) -> str | None:
         if item.get("type") == "command_execution":
             return "[shell: %s -> %s]" % (item.get("command"), item.get("exit_code"))
     if t == "turn.completed":
+        return "-- turn done --"
+    method = event.get("method")                            # Codex app-server
+    if method == "item/completed":
+        item = (event.get("params") or {}).get("item") or {}
+        if item.get("type") == "agentMessage":
+            return item.get("text")
+        if item.get("type") == "commandExecution":
+            return "[shell: %s -> %s]" % (item.get("command"), item.get("exitCode")
+                                          if item.get("exitCode") is not None else item.get("status"))
+    if method == "turn/completed":
         return "-- turn done --"
     return None
 

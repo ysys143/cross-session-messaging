@@ -244,24 +244,80 @@ class CodexInstallTest(TempState):
         self.assertTrue(install.apply(home, "codex").get("unchanged"))
 
 
-class CodexSandboxTest(TempState):
-    """Every headless Codex turn runs sandboxed, the resumed ones included."""
+FAKE_APP_SERVER = r"""#!/usr/bin/env python3
+import json, os, sys
+log = open(os.environ["FAKE_LOG"], "a")
+def out(obj):
+    sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
+for line in sys.stdin:
+    msg = json.loads(line)
+    log.write(json.dumps(msg) + "\n"); log.flush()
+    m = msg.get("method")
+    if m == "initialize":
+        out({"id": msg["id"], "result": {}})
+    elif m in ("thread/start", "thread/resume"):
+        out({"id": msg["id"], "result": {"thread": {"id": "t-new"}}})
+    elif m == "turn/start":
+        out({"id": msg["id"], "result": {}})
+        out({"id": "srv-1", "method": "item/commandExecution/requestApproval",
+             "params": {"command": "touch /outside", "reason": "outside the workspace"}})
+    elif "result" in msg and msg.get("id") == "srv-1":
+        text = "done" if msg["result"]["decision"] == "accept" else "declined"
+        out({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": text}}})
+        out({"method": "turn/completed", "params": {}})
+"""
 
-    def test_resume_turns_carry_the_sandbox(self):
-        from unittest import mock
+
+class CodexAppServerTest(TempState):
+    """Headless Codex turns go through the app-server: each states its sandbox
+    and approval policy, and its approval requests wait for a person."""
+
+    def _setup(self):
         from xsm import workers
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        fake = os.path.join(bindir, "codex")
+        with open(fake, "w") as fh:
+            fh.write(FAKE_APP_SERVER.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
+        os.chmod(fake, 0o755)
         w = {"name": "cx", "runtime": "codex", "mode": "headless", "session_id": "t1",
-             "home": self.tmp, "cwd": self.tmp, "model": "m"}
-        os.makedirs(os.path.join(self.tmp, "workers", "cx"))
-        seen = []
-        def run(argv, **kw):
-            seen.append(argv)
-            return mock.Mock(stdout=b"")
-        with mock.patch.object(workers.subprocess, "run", run):
-            workers._codex_exec(w, "hi", resume=False)
-            workers._codex_exec(w, "hi", resume=True)
-        for argv in seen:
-            self.assertIn('sandbox_mode="workspace-write"', argv)
+             "home": self.tmp, "cwd": self.tmp, "model": "m", "approval_timeout": 10,
+             "env": {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""),
+                     "FAKE_LOG": os.path.join(self.tmp, "fake.log")}}
+        workers.save(w)
+        os.makedirs(os.path.join(self.tmp, "workers", "cx"), exist_ok=True)
+        workers.PUMP_ENV = workers.PUMP_ENV + ("FAKE_LOG",)
+        return workers, w
+
+    def _answer(self, workers, approve):
+        def run():
+            for _ in range(100):
+                rows = workers.approvals()
+                if rows:
+                    workers.human_terminal = lambda: True
+                    workers.answer(rows[0]["id"], approve)
+                    return
+                time.sleep(0.1)
+        threading.Thread(target=run).start()
+
+    def test_every_turn_states_its_policy_and_asks_a_person(self):
+        workers, w = self._setup()
+        self._answer(workers, False)
+        events = workers._codex_exec(w, "hi", resume=True)
+        self.assertEqual([e["item"]["text"] for e in events], ["declined"])
+        sent = [json.loads(l) for l in open(os.path.join(self.tmp, "fake.log"))]
+        resume = next(m for m in sent if m.get("method") == "thread/resume")["params"]
+        self.assertEqual((resume["approvalPolicy"], resume["sandbox"]),
+                         ("on-request", "workspace-write"))
+        answer = next(m for m in sent if m.get("id") == "srv-1")
+        self.assertEqual(answer["result"], {"decision": "decline"})
+
+    def test_an_approved_request_is_accepted(self):
+        workers, w = self._setup()
+        self._answer(workers, True)
+        events = workers._codex_exec(w, "hi", resume=False)
+        self.assertEqual(events[0], {"type": "thread.started", "thread_id": "t-new"})
+        self.assertEqual(events[-1]["item"]["text"], "done")
 
 
 class FreshTuiAdoptionTest(TempState):
