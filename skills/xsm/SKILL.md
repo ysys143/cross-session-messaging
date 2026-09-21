@@ -22,6 +22,11 @@ Each row reads `name@home [ref] runtime state mode cwd`. A session marked
 two of you are not in the same repository and no scope in `~/.xsm/config.json`
 joins you — that is a decision for the user, not something to work around.
 
+Names belong to the runtime. To change this session's name use the runtime's
+own `/rename`; xsm reads names fresh on every lookup, so the new name works at
+once and the `[ref]` stays the same. There is no xsm rename command on purpose —
+a second name kept by xsm would drift from the one the runtime shows.
+
 ## Sending
 
 ```bash
