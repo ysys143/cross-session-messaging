@@ -167,6 +167,23 @@ def handle(data: dict) -> dict | None:
         # Without knowing which session we are, scope cannot be checked at all.
         # Passing here would turn an unidentifiable session into an open door.
         decision, reason = "block", "cannot identify this session, so scope was not checked"
+    elif parsed.header.get("origin"):
+        # From a paired machine (ADR-0007): trusted only if this machine's own
+        # receiver recorded the id for that peer, and only into its project.
+        from . import remote
+        peer = parsed.header["origin"]
+        pairing = remote.pairing_for(peer)
+        msg = parsed.header.get("id") or ""
+        if not pairing or not remote.recorded_inbound(msg, peer):
+            decision, reason = "block", "remote message from %s was not received by this " \
+                                        "machine's xsm" % peer
+        elif parsed.header.get("scope") != "remote:%s" % peer:
+            decision, reason = "block", "remote message carries the wrong scope"
+        elif not remote._project_members(pairing["local_project"], me.get("cwd") or "/"):
+            decision, reason = "block", "this session is not in %s, the project paired with %s" % (
+                pairing["local_project"], peer)
+        elif me.get("ref") in config.blocked():
+            decision, reason = "block", "a blocked session is on this message"
     else:
         sender = _sender_record(parsed)
         if sender is None:

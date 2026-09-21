@@ -42,6 +42,17 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
     if not sender:
         return SendResult("refused", "this session is not registered; run `xsm doctor`")
 
+    from . import remote
+    local_spec, peer = remote.split_target(target_spec)
+    if peer:
+        if sender.get("ref") in config.blocked():
+            return SendResult("refused", "this session is blocked (xsm block)")
+        reply = remote.send(sender, local_spec, peer, body, kind, reply_to, wait, msg_id)
+        status = reply.get("status") or ("queued" if reply.get("ok") else "error")
+        status = {"queued": "sent-unconfirmed"}.get(status, status)
+        return SendResult(status, reply.get("error") or ("on %s" % peer), reply.get("id"),
+                          reply.get("target"))
+
     registry.adopt_open_codex()             # an unprompted Codex thread can still be addressed
     found = resolve.resolve(target_spec)
     if not found.ok:

@@ -123,6 +123,14 @@ render <doc>`). Do not edit the rendered file or another session's node — to
 revise, add a node with `--parent`. `endorsed` is your user's: ask with the
 `xsm_doc_endorse` MCP tool.
 
+## Other machines
+
+If your user paired this project with another machine (`xsm remote list`),
+`xsm remote sessions <peer>` shows its live sessions and
+`xsm send <name>@<home>@<peer>` reaches them over SSH; replies come back the
+same way. Pairing a machine is your user's decision (`xsm_grant`, option
+`remote`).
+
 ## Workers: starting a session to hand work to
 
 ```bash

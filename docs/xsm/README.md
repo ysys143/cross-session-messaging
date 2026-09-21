@@ -174,6 +174,23 @@ xsm doc show docs/research/cache.md <id>
 - **문서는 만들어진다.** `render`는 가장 최근의 `endorsed` 노드, 없으면 가장 최근의 `report` 노드 본문을 문서로 쓴다. 그 아래에 아직 이어지지 않은 노드와 검증되지 않은 가설을 붙인다. 문서 머리에 "생성된 파일"이라고 적히므로 손으로 고치지 않는다. 병합에서 문서가 충돌하면 다시 `render`한다.
 - 작성자는 채널과 같은 규칙으로 xsm이 정한다. 사람이 아니고 등록된 세션도 아닌 셸에서는 거부한다.
 
+## 다른 기계의 세션
+
+두 기계가 서로 SSH로 들어갈 수 있으면, 한 프로젝트끼리 짝지어 주고받는다(ADR-0007).
+
+```
+xsm remote add jaesol-macmini --project demo [--remote-project demo] [--reach-me-as jaesol-macbookpro] [--remote-xsm /path/to/bin/xsm]
+xsm remote sessions jaesol-macmini            # 그쪽 짝 프로젝트의 살아 있는 세션
+xsm send agent@claude@jaesol-macmini --text "…"
+xsm remote list | remove jaesol-macmini
+```
+
+- **짝짓기.** `add`는 사용자의 SSH로 한 번 들어가서 xsm 전용 키(`~/.xsm/remote/id_ed25519`)를 서로 교환한다. 각 기계의 `authorized_keys`에는 상대 키가 xsm 수신기만 실행하도록 제한된 채로 들어간다(`command="… xsm-remote.py <상대>"`, `no-pty` 등). 그 뒤 반대 방향으로도 들어가는지 확인하고, 안 되면 짝짓기를 되돌린다. 사람이 해야 한다. 터미널이거나, 에이전트라면 `xsm_grant`의 `remote` 허가가 있어야 한다.
+- **신원.** 받는 쪽은 어느 키로 들어왔는지로 상대를 안다. 메시지에 적힌 주장은 쓰지 않는다. 신뢰 단위는 세션이 아니라 기계와 키다.
+- **범위.** 짝지은 프로젝트에 속한 세션끼리만 주고받는다. 이름이 같다고 열리지 않는다.
+- **검문.** 받는 쪽 게이트는 자기 수신기가 기록한 메시지 id만 통과시킨다. 봉투에는 `uds:` 회신 주소가 없고 `origin`이 붙는다. 답장 명령은 `ref:xxxx@<상대>` 형식이라 그대로 되돌아간다.
+- **넣지 않은 것.** `xsm list`에 원격 세션을 합치는 것, 채널·문서 공유, 원격 워커. 원격 대상은 이미 떠 있는 세션뿐이다. macOS에서는 비대화식 SSH로 새 Claude 세션을 띄울 수 없다.
+
 ## 워커
 
 세션이 작업을 맡길 새 세션을 직접 띄우고, 끝나면 종료한다.

@@ -769,6 +769,48 @@ def cmd_doc(args) -> int:
     return OK
 
 
+def cmd_remote(args) -> int:
+    from . import remote
+    try:
+        if args.action == "add":
+            if not workers.human_terminal():
+                g = workers.use_grant(args.grant, registry.me(), "remote:%s" % args.host,
+                                      _here(args), ["remote"])
+            if not args.host or not args.project:
+                raise remote.RemoteError("usage: xsm remote add <ssh host> --project <name> "
+                                         "[--remote-project <name>] [--reach-me-as <name>]")
+            entry = remote.add(args.host, args.project, args.remote_project, args.reach_me_as,
+                               args.remote_xsm)
+            print("paired %s: project %s here <-> %s there; both directions reach"
+                  % (entry["peer"], entry["local_project"], entry["remote_project"]))
+        elif args.action == "accept":
+            if not os.environ.get("SSH_CONNECTION"):
+                raise remote.RemoteError("accept runs on the far side of `xsm remote add`, over SSH")
+            print(json.dumps(remote.accept(args.peer, args.reach_as, args.project,
+                                           args.remote_project, args.key)))
+        elif args.action == "list":
+            rows = remote.pairings()
+            for p in rows:
+                print("%s (ssh %s): %s here <-> %s there" % (p["peer"], p["host"],
+                                                           p["local_project"], p["remote_project"]))
+            if not rows:
+                print("no paired remotes")
+        elif args.action == "remove":
+            done = remote.remove(args.host)
+            print("removed %s: pairing %s, key %s, told peer %s" % (
+                args.host, done["pairing"], done["key"], done["told_peer"]))
+        elif args.action == "sessions":
+            reply = remote.call(args.host, {"op": "sessions"})
+            for s in reply.get("sessions") or []:
+                print("%s@%s@%s [%s] %s" % (s["name"], s["alias"], args.host, s["ref"], s["runtime"]))
+            if not reply.get("sessions"):
+                print("no live sessions in the paired project on %s" % args.host)
+    except (remote.RemoteError, workers.WorkerError) as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    return OK
+
+
 def cmd_mcp(args) -> int:
     from . import mcp
     return mcp.main()
@@ -874,6 +916,19 @@ def build_parser() -> argparse.ArgumentParser:
     dc.add_argument("--text")
     dc.add_argument("--file")
     dc.set_defaults(func=cmd_doc)
+    rm = sub.add_parser("remote", help="pair with another machine over two-way SSH (add, list, "
+                        "remove, sessions)")
+    rm.add_argument("action", choices=["add", "accept", "list", "remove", "sessions"])
+    rm.add_argument("host", nargs="?", help="ssh host (add), or the paired peer (remove, sessions)")
+    rm.add_argument("--project", help="the project here to pair")
+    rm.add_argument("--remote-project", help="the project there (default: same name)")
+    rm.add_argument("--reach-me-as", help="the name the other machine uses to ssh back here")
+    rm.add_argument("--remote-xsm", help="path of bin/xsm on the other machine (default: same as here)")
+    rm.add_argument("--grant", help="from an agent: the id xsm_grant returned")
+    rm.add_argument("--peer")
+    rm.add_argument("--reach-as")
+    rm.add_argument("--key")
+    rm.set_defaults(func=cmd_remote)
     mc = sub.add_parser("mcp", help=argparse.SUPPRESS)
     mc.set_defaults(func=cmd_mcp)
     ap = sub.add_parser("approvals", help="permission requests waiting for a person")

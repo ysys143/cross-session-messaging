@@ -334,6 +334,14 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 
 문서 `<path>`의 노드는 `<path>.nodes/<id>.md`다. 머리는 `---`로 감싼 `key: value` 줄이다(`id`, `t`, `author`, `author_kind`, `tags`, `parents`, 선택적으로 `approved`). 본문은 그 아래에 온다. `id`는 `sha256("t|author|tags|parents|body")`의 앞 12자다. 노드는 `O_CREAT|O_EXCL`로 만들므로 이미 있는 노드를 덮어쓰지 않는다. 부모는 이미 있는 노드여야 한다. `endorsed`는 `author_kind: human`일 때만 쓸 수 있다. 사람 판정은 채널과 같고, MCP `xsm_doc_endorse`의 elicitation도 사람으로 인정한다. `render`의 기준 노드는 가장 최근의 `endorsed`, 없으면 가장 최근의 `report`다. 여기에 끝 노드(자식이 없는 노드)와, `verification` 자식이 없는 `hypothesis`를 덧붙인다.
 
+### 5.8 원격(두 방향 SSH)
+
+- **짝.** `config.json`의 `remotes`에 `{peer, host, local_project, remote_project}`를 둔다. `peer`는 상대가 스스로 알린 호스트 이름(`XSM_HOSTNAME`, 기본 `hostname`의 첫 부분)이다. `host`는 SSH로 닿는 이름이다.
+- **키.** 각 기계는 `remote/id_ed25519`를 가진다. 상대의 공개키는 `authorized_keys`에 `command="<고정 인터프리터> <repo>/hooks/xsm-remote.py <peer>",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding <키> xsm-remote:<peer>`로 들어간다. `remote remove`는 `xsm-remote:<peer>`로 끝나는 줄만 지운다.
+- **요청.** 표준 입력의 JSON 한 줄이다. `op`는 `ping`, `ping-back`, `sessions`, `send`, `unpair` 중 하나다. `send`는 `{id, target, body, kind, reply_to, wait, project, sender}`를 싣는다. 받는 쪽은 네 가지를 확인한 뒤 로컬 경로로 전달한다. `project == 짝의 remote_project`인지, 대상이 해석되는지, 대상이 짝의 `local_project`에 속하는지, 차단되지 않았는지다. 봉투는 `origin=<peer>`, `scope="remote:<peer>"`, 회신 주소 없음으로 다시 만든다. 이때 `remote/inbound-<id>.json`에 `{id, peer}`를 남기고, `wait`가 있으면 영수증을 기다려 상태를 돌려준다.
+- **게이트.** 헤더에 `origin`이 있으면 5.1의 4~8번 대신 다음을 본다. 짝이 있는지, 이 기계의 수신기가 그 id를 그 peer로 기록했는지, scope가 `remote:<peer>`인지, 수신 세션이 짝의 `local_project`에 속하는지, 차단되지 않았는지다.
+- **주소.** `…@<peer>`의 마지막 `@` 뒤가 짝지은 peer면 원격으로 보낸다. 답장 명령은 `ref:<ref>@<origin>`이다.
+
 ## 6. 결과값과 종료 코드
 
 | 결과 | 뜻 | 종료 코드 |

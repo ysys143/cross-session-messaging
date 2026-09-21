@@ -48,10 +48,11 @@ TOOLS = [
                      "`xsm spawn ... --grant <id>`, valid 10 minutes, for this session, runtime "
                      "and folder only. Say plainly why the worker needs it."),
      "inputSchema": {"type": "object", "properties": {
-         "runtime": {"type": "string", "enum": ["claude", "codex"]},
+         "runtime": {"type": "string", "description": "claude or codex for a worker; "
+                     "remote:<host> for a remote pairing"},
          "options": {"type": "array", "items": {"type": "string",
                                                  "enum": ["full_access", "trust_hooks",
-                                                          "outside_scope"]}},
+                                                          "outside_scope", "remote"]}},
          "reason": {"type": "string"},
          "dir": {"type": "string", "description": "the worker's folder; default this session's"}},
          "required": ["runtime", "options", "reason"]}},
@@ -283,7 +284,9 @@ class Server:
         runtime = args.get("runtime")
         cwd = os.path.realpath(os.path.expanduser(args.get("dir") or me.get("cwd") or os.getcwd()))
         reason = (args.get("reason") or "").strip() or "(no reason given)"
-        words = {"outside_scope": "a folder OUTSIDE this session's project: the worker will be "
+        words = {"remote": "PAIRING with another machine over SSH: sessions there in the paired "
+                           "project can message this project",
+                 "outside_scope": "a folder OUTSIDE this session's project: the worker will be "
                                   "able to talk to the sessions there",
                  "full_access": "FULL ACCESS: no sandbox and no approval prompts",
                  "trust_hooks": "hooks run WITHOUT Codex's trust review, including any in that "

@@ -48,7 +48,7 @@ def _fields(text: str) -> dict:
 
 
 def build(body: str, *, msg_id: str, sender: dict, scope: str, kind: str = "note",
-          reply_to: str | None = None) -> str:
+          reply_to: str | None = None, origin: str | None = None) -> str:
     """Wrap a body for delivery. `sender` is a registry record, so from-mode is
     the mode that session actually reported, not a self-claim."""
     if kind not in KINDS:
@@ -57,6 +57,10 @@ def build(body: str, *, msg_id: str, sender: dict, scope: str, kind: str = "note
               'ref=%s' % sender.get("ref"), 'scope="%s"' % scope, 'kind=%s' % kind]
     if reply_to:
         header.append("reply-to=%s" % reply_to)
+    if origin:
+        # Written by the receiving machine's xsm from the SSH key, never by
+        # the sender (ADR-0007).
+        header.append("origin=%s" % origin)
     head = " ".join(header) + "]"
     mode = sender.get("permission_mode")
     mode = "bypass" if mode == "bypassPermissions" else "prompting" if mode else None
@@ -104,6 +108,8 @@ def reply_command(parsed: Parsed) -> str | None:
     if not header.get("id"):
         return None
     target = "ref:%s" % header["ref"] if header.get("ref") else '"%s"' % header.get("from")
+    if header.get("origin") and header.get("ref"):
+        target = "ref:%s@%s" % (header["ref"], header["origin"])
     # The answer has to land in the same state directory this hook used, or the
     # sender's receipt and the reply end up in two different registries.
     state = os.environ.get("XSM_HOME")

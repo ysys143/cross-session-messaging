@@ -678,3 +678,19 @@ ADR-0006의 노드 방식을 확인한다. 같은 저장소의 두 세션 A와 B
 | 12-6 | 병합 | A와 B가 각자 브랜치에서 노드를 추가하고 병합 | 노드 파일은 충돌하지 않는다. 문서가 충돌하면 `render`를 다시 한다 |
 
 단위 테스트(2026-09-22): 두 브랜치가 각자 노드를 추가한 git 병합이 충돌 없이 끝났고, 두 노드가 모두 남았다.
+
+
+## 13. 다른 기계
+
+두 기계 X, Y가 서로 SSH로 들어갈 수 있어야 한다(예: tailnet). 두 기계 모두 xsm이 설치돼 있고, 같은 이름의 프로젝트 `demo`에 가입한 폴더에서 세션이 떠 있다.
+
+| # | 항목 | 어디서 | 기대 |
+|---|---|---|---|
+| 13-1 | 짝짓기 | X의 터미널에서 `xsm remote add Y --project demo --reach-me-as <Y가 X를 부르는 이름>` | `paired Y: project demo here <-> demo there; both directions reach`. 양쪽 `authorized_keys`에 `xsm-remote:`로 끝나는 제한된 줄이 한 줄씩 생긴다 |
+| 13-2 | 세션 보기 | X에서 `xsm remote sessions Y` | Y의 `demo` 세션이 `이름@홈@Y [ref]`로 보인다 |
+| 13-3 | 보내기 | X의 세션에게: `xsm send <이름>@<홈>@Y --kind task --text "…" --wait 20` | Y 세션 화면에 메시지가 뜨고, 헤더에 `origin=X`가 있다. 결과는 `delivered` |
+| 13-4 | 답장 | Y 세션이 붙어 온 답장 명령(`ref:…@X`)으로 답한다 | X 세션에 도착하고, 헤더에 `origin=Y`가 있다 |
+| 13-5 | 짝 밖 | Y에서 `demo`를 탈퇴한 뒤 13-3 | `refused: … is not in project demo here` |
+| 13-6 | 풀기 | X에서 `xsm remote remove Y` | 양쪽 짝과 `authorized_keys` 줄이 지워진다 |
+
+한 기계 안 시뮬레이션(2026-09-22, `tests/test_remote.py`): 두 개의 `XSM_HOME`과 `authorized_keys`, 강제 명령을 흉내 내는 가짜 ssh로 13-1, 13-3, 13-4, 13-5를 통과했다. 기록하지 않은 id로 위조한 메시지는 게이트에서 막혔다. 실제 두 기계(이 기계와 jaesol-macmini)는 양방향 SSH가 되는 것까지만 확인했다.

@@ -163,7 +163,7 @@ def state(worker: dict) -> str:
 
 GRANTS = "grants"
 GRANT_TTL = 600
-DANGEROUS = ("full_access", "trust_hooks", "outside_scope")
+DANGEROUS = ("full_access", "trust_hooks", "outside_scope", "remote")
 
 
 def create_grant(asked_by: str, runtime: str, cwd: str, options: list, answer: str) -> dict:
