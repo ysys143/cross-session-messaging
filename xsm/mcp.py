@@ -56,6 +56,16 @@ TOOLS = [
          "reason": {"type": "string"},
          "dir": {"type": "string", "description": "the worker's folder; default this session's"}},
          "required": ["runtime", "options", "reason"]}},
+    {"name": "xsm_send",
+     "description": ("Send a message to another session through xsm, the same as `xsm send`. Use "
+                     "it when your shell cannot run xsm (a sandboxed Codex cannot: xsm needs the "
+                     "process table, and a remote needs the network). Targets: name, "
+                     "name@home, ref:xxxxxx, and …@<paired machine>."),
+     "inputSchema": {"type": "object", "properties": {
+         "target": {"type": "string"}, "text": {"type": "string"},
+         "kind": {"type": "string", "enum": ["note", "task", "reply"], "default": "note"},
+         "reply_to": {"type": "string"},
+         "wait": {"type": "number", "default": 15}}, "required": ["target", "text"]}},
     {"name": "xsm_join",
      "description": ("Ask your user to let this session's folder join (or leave) a named xsm "
                      "project, so sessions in other repositories that also joined it can talk "
@@ -154,6 +164,12 @@ class Server:
             return self.approve(me, args)
         if name == "xsm_join":
             return self.join(me, args)
+        if name == "xsm_send":
+            from . import send as send_mod
+            r = send_mod.send(args.get("target") or "", args.get("text") or "", sender=me,
+                              kind=args.get("kind") or "note", reply_to=args.get("reply_to"),
+                              wait=float(args.get("wait") or 0))
+            return "%s: %s" % (r.status, r.reason or "")
         if name == "xsm_doc_endorse":
             return self.endorse(me, args)
         raise channel.ChannelError("unknown tool %s" % name)

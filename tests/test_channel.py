@@ -149,3 +149,22 @@ class McpServerTest(TempState):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class McpSendTest(TempState):
+    def test_xsm_send_sends_as_the_session(self):
+        import json as _json
+        from xsm import mcp, registry, send
+        seen = []
+        send.send = lambda target, text, **kw: seen.append((target, text, kw["sender"]["ref"],
+                                                            kw["kind"], kw["reply_to"])) or \
+            type("R", (), {"status": "delivered", "reason": "ok"})()
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                    "name": "xsm_send", "arguments": {"target": "ref:abcdef@peer", "text": "56",
+                                                      "kind": "reply", "reply_to": "m1"}}}]
+        out = io.StringIO()
+        server = mcp.Server(io.StringIO("".join(_json.dumps(m) + "\n" for m in msgs)), out)
+        server.session = lambda: dict(AGENT, cwd=self.tmp)
+        server.serve()
+        self.assertEqual(seen, [("ref:abcdef@peer", "56", "aaaaaa", "reply", "m1")])

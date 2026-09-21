@@ -112,7 +112,7 @@ print(json.dumps({"status": r.status, "reason": r.reason, "id": r.msg_id}))
     def test_pair_send_gate_and_reply_across_machines(self):
         paired = self.py("hostA", """
 from xsm import remote
-print(remote.add("hostB", "demo")["peer"])""")
+print(remote.add("hostB", "demo", here=%r)["peer"])""" % self.m["hostA"]["proj"])
         self.assertEqual(paired, "hostB")
         # Both sides trust the other's xsm key, for the forced command only.
         for name in self.m:
@@ -146,7 +146,7 @@ print(remote.add("hostB", "demo")["peer"])""")
         refused = self.send("hostA", "agent@claude@hostB", "x")
         self.assertNotIn(refused["status"], ("sent-unconfirmed", "delivered"),
                          "not paired: the @hostB is not a remote, so nothing goes out")
-        self.py("hostA", 'from xsm import remote; remote.add("hostB", "demo")')
+        self.py("hostA", 'from xsm import remote; remote.add("hostB", "demo", here=%r)' % self.m["hostA"]["proj"])
         self.py("hostB", 'from xsm import config; config.leave("demo", %r)' % self.m["hostB"]["proj"])
         out = self.send("hostA", "agent@claude@hostB", "x")
         self.assertEqual(out["status"], "refused")

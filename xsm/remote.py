@@ -63,9 +63,30 @@ def authorized_keys_path() -> str:
     return os.environ.get("XSM_AUTHORIZED_KEYS") or os.path.expanduser("~/.ssh/authorized_keys")
 
 
+def install_receiver() -> str:
+    """Copy the receiver out of the repository, under ~/.xsm, and return its
+    entry. On macOS a process started by sshd may not read ~/Documents and the
+    like (privacy protection, measured: "Operation not permitted"), and a
+    repository usually lives there."""
+    import shutil
+    dest = paths.path(REMOTE, "pkg")
+    tmp = dest + ".new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(os.path.join(install.REPO, "xsm"), os.path.join(tmp, "xsm"),
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    os.makedirs(os.path.join(tmp, "hooks"))
+    shutil.copy2(os.path.join(install.REPO, "hooks", "xsm-remote.py"),
+                 os.path.join(tmp, "hooks", "xsm-remote.py"))
+    shutil.rmtree(dest, ignore_errors=True)
+    os.replace(tmp, dest)
+    return os.path.join(dest, "hooks", "xsm-remote.py")
+
+
 def forced_line(peer: str, pubkey: str) -> str:
-    command = "%s %s %s" % (install.pinned_python(),
-                            os.path.join(install.REPO, "hooks", "xsm-remote.py"), peer)
+    entry = os.path.join(paths.path(REMOTE, "pkg"), "hooks", "xsm-remote.py")
+    if not os.path.exists(entry):
+        entry = install_receiver()
+    command = "%s %s %s" % (install.pinned_python(), entry, peer)
     if os.environ.get("XSM_HOME") and not install._is_default_home(os.environ["XSM_HOME"]):
         command = "XSM_HOME=%s %s" % (os.environ["XSM_HOME"], command)
     opts = 'command="%s",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding' % command
@@ -74,6 +95,7 @@ def forced_line(peer: str, pubkey: str) -> str:
 
 
 def install_peer_key(peer: str, pubkey: str) -> None:
+    install_receiver()                    # the forced command runs this copy
     path = authorized_keys_path()
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
@@ -127,10 +149,33 @@ def _drop_pairing(peer: str) -> bool:
     return len(kept) != len(rows)
 
 
+def _resolved(host: str) -> list:
+    """The host's real address from the user's ssh config, as options that
+    survive `-F /dev/null`."""
+    ssh = os.environ.get("XSM_SSH") or "ssh"
+    try:
+        out = subprocess.run([ssh, "-G", host], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    opts = []
+    for line in out.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key in ("hostname", "user", "port", "proxyjump", "proxycommand") and value \
+                and value != "none":
+            opts += ["-o", "%s=%s" % (key, value)]
+    return opts
+
+
 def ssh_argv(host: str, use_xsm_key: bool = True) -> list:
     argv = [os.environ.get("XSM_SSH") or "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
     if use_xsm_key:
-        argv += ["-i", key_path(), "-o", "IdentitiesOnly=yes"]
+        # Offer the xsm key and nothing else. A host entry's IdentityFile or a
+        # key agent would otherwise log in with the user's own key, and the
+        # far side would open a shell instead of the xsm forced command
+        # (measured against a real ~/.ssh/config).
+        argv = argv[:1] + ["-F", "/dev/null"] + _resolved(host) + argv[1:] + [
+            "-T", "-i", key_path(), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+            "-o", "StrictHostKeyChecking=accept-new"]
     return argv + [host]
 
 
@@ -154,10 +199,12 @@ def call(peer: str, request: dict, timeout: float = 60) -> dict:
 
 
 def add(host: str, local_project: str, remote_project: str | None = None,
-        reach_me_as: str | None = None, remote_xsm: str | None = None) -> dict:
+        reach_me_as: str | None = None, remote_xsm: str | None = None,
+        here: str | None = None) -> dict:
     """Pair this machine with `host` for one project on each side, both ways.
     Uses the user's own SSH access to `host` once, to exchange xsm keys."""
     remote_project = remote_project or local_project
+    _require_named(local_project, os.path.realpath(here or os.getcwd()))
     me_as = reach_me_as or this_host()
     pub = ensure_key()
     accept = ("%s remote accept --peer %s --reach-as %s --project %s --remote-project %s --key %s" % (
@@ -178,7 +225,10 @@ def add(host: str, local_project: str, remote_project: str | None = None,
              "remote_project": remote_project, "added": time.time()}
     _save_pairing(entry)
     # Both directions must reach (ADR-0007): ask the other side to call back.
-    back = call(peer, {"op": "ping-back"})
+    try:
+        back = call(peer, {"op": "ping-back"})
+    except RemoteError as exc:
+        back = {"ok": False, "error": str(exc)}
     if not back.get("ok"):
         _drop_pairing(peer)
         remove_peer_key(peer)
@@ -211,8 +261,23 @@ def remove(peer: str) -> dict:
 # --- the receiving side (forced command) ---------------------------------------------
 
 def _project_members(project: str, here: str) -> bool:
-    from . import channel
-    return any(name == project for name, _ in channel.memberships(here))
+    """Whether a folder is in a named project, by the recorded paths alone.
+    The receiver may run where it cannot touch the folder itself (see
+    install_receiver), so this reads no file system."""
+    for scope in config.projects():
+        if scope.get("id") != project:
+            continue
+        for m in scope.get("members", []):
+            root = (m.get("root") or "").rstrip("/")
+            if root and (here == root or here.startswith(root + "/")):
+                return True
+    return False
+
+
+def _require_named(project: str, here: str) -> None:
+    if not _project_members(project, here):
+        raise RemoteError("%s is not a named project this folder joined; pair a project joined "
+                          "with `xsm join` on both machines" % project)
 
 
 def serve(peer: str, request: dict) -> dict:

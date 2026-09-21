@@ -693,4 +693,15 @@ ADR-0006의 노드 방식을 확인한다. 같은 저장소의 두 세션 A와 B
 | 13-5 | 짝 밖 | Y에서 `demo`를 탈퇴한 뒤 13-3 | `refused: … is not in project demo here` |
 | 13-6 | 풀기 | X에서 `xsm remote remove Y` | 양쪽 짝과 `authorized_keys` 줄이 지워진다 |
 
-한 기계 안 시뮬레이션(2026-09-22, `tests/test_remote.py`): 두 개의 `XSM_HOME`과 `authorized_keys`, 강제 명령을 흉내 내는 가짜 ssh로 13-1, 13-3, 13-4, 13-5를 통과했다. 기록하지 않은 id로 위조한 메시지는 게이트에서 막혔다. 실제 두 기계(이 기계와 jaesol-macmini)는 양방향 SSH가 되는 것까지만 확인했다.
+한 기계 안 시뮬레이션(2026-09-22, `tests/test_remote.py`): 두 개의 `XSM_HOME`과 `authorized_keys`, 강제 명령을 흉내 내는 가짜 ssh로 13-1, 13-3, 13-4, 13-5를 통과했다. 기록하지 않은 id로 위조한 메시지는 게이트에서 막혔다. 실제 두 기계(2026-09-22, 이 맥북 Jaesolui-MacBookPro와 jaesol-macmini, tailnet):
+- 13-1: `paired Jaesolui-Macmini: … both directions reach`. 양쪽 `authorized_keys`에 제한된 줄이 한 줄씩 생겼다.
+- 13-2: 0.44초 안에 mac mini의 세션이 나왔다.
+- 13-3: 이쪽 Claude 세션의 task가 `delivered: on Jaesolui-Macmini`로 전달됐다. mac mini의 Codex TUI 화면에 `origin=Jaesolui-MacBookPro`가 붙은 봉투가 떴다.
+- 13-4: mac mini의 헤드리스 Codex 워커가 답 "54"를 이쪽 세션으로 보냈다(`scope="remote:Jaesolui-Macmini"`, 12초).
+- 13-6: 양쪽 짝과 키 줄이 지워졌다(`told peer True`).
+- 13-5는 시뮬레이션으로 대신했다.
+
+실제 기계에서 드러나 고친 것은 셋이다.
+1. SSH 설정의 `IdentityFile`과 키 에이전트 때문에 사용자의 원래 키로 로그인되어, 강제 명령 대신 셸이 열렸다. 그래서 xsm 호출은 이제 `-F /dev/null`에 `ssh -G`로 얻은 주소를 쓰고, `IdentitiesOnly=yes`와 `IdentityAgent=none`으로 xsm 키만 내민다.
+2. macOS에서 sshd가 띄운 프로세스는 `~/Documents`를 읽지 못해(TCC), 저장소 안의 수신기를 실행할 수 없었다. 그래서 수신기를 짝지을 때 `~/.xsm/remote/pkg`로 복사하고, 소속 확인은 기록된 경로 문자열로만 한다. 원격 짝은 이름 붙인 프로젝트로만 맺는다.
+3. 샌드박스(`workspace-write`) Codex는 셸에서 xsm으로 답하지 못했다. `ps`가 막혀 자기 세션을 확인하지 못하고, 원격이면 네트워크도 막힌다. 그래서 MCP 도구 `xsm_send`를 추가했고, Codex에게 붙는 답장 안내가 이 도구를 가리킨다. 오래 떠 있는 Codex 백그라운드 서비스(app-server daemon)는 새 MCP 등록을 다시 시작해야 읽는다. 사용자의 다른 작업을 끊을 수 있어서 이번에는 다시 시작하지 않고 헤드리스 워커로 답장 방향을 확인했다.

@@ -780,7 +780,7 @@ def cmd_remote(args) -> int:
                 raise remote.RemoteError("usage: xsm remote add <ssh host> --project <name> "
                                          "[--remote-project <name>] [--reach-me-as <name>]")
             entry = remote.add(args.host, args.project, args.remote_project, args.reach_me_as,
-                               args.remote_xsm)
+                               args.remote_xsm, here=_here(args))
             print("paired %s: project %s here <-> %s there; both directions reach"
                   % (entry["peer"], entry["local_project"], entry["remote_project"]))
         elif args.action == "accept":

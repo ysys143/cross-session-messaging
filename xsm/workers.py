@@ -807,7 +807,10 @@ def _auto_reply(worker: dict, content: str, events: list) -> None:
     if not me:
         return
     from . import send as send_mod
-    send_mod.send("ref:%s" % header["ref"], texts[-1] if texts else "(the worker gave no answer)",
+    target = "ref:%s" % header["ref"]
+    if header.get("origin"):
+        target += "@%s" % header["origin"]         # the task came from a paired machine
+    send_mod.send(target, texts[-1] if texts else "(the worker gave no answer)",
                   sender=me, kind="reply", reply_to=header["id"])
 
 

@@ -9,14 +9,18 @@ the way the user's own SSH access would."""
 import json, os, shlex, subprocess, sys
 
 args = sys.argv[1:]
+if "-G" in args:                      # config lookup: echo the host as its own address
+    print("hostname %s" % args[-1]); sys.exit(0)
 key, host, rest = None, None, []
 i = 0
 while i < len(args):
     a = args[i]
     if a == "-i":
         key = args[i + 1]; i += 2; continue
-    if a == "-o":
+    if a in ("-o", "-F"):
         i += 2; continue
+    if a == "-T":
+        i += 1; continue
     host = a
     rest = args[i + 1:]
     break

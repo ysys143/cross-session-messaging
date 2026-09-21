@@ -148,7 +148,8 @@ def sender_context(parsed: Parsed, runtime: str = "claude", auto_reply: bool = F
         lines.append("Scope: %s. Message id: %s. Kind: %s." % (header.get("scope"), header.get("id"),
                                                                 kind))
     reply = reply_command(parsed)
-    shell = "from the shell" if runtime == "codex" else "with your Bash tool"
+    shell = ("from the shell; if the sandbox stops it, use the xsm_send MCP tool with the same "
+             "target, kind and reply_to") if runtime == "codex" else "with your Bash tool"
     if kind == "task" and auto_reply:
         lines.append("It is a task request. Carry it out now, within this session's own "
                      "permissions. Your final message in this turn is sent back to the sender "
