@@ -33,10 +33,10 @@
 | [0003](0003-no-wrapper-runtime-boundary.md) | 진입점 래퍼 금지의 경계 | Accepted | C1 |
 | [0004](0004-communication-scope.md) | 통신 범위(scope) 모델 | Accepted | G5 |
 | [0005](0005-channel-thread-store.md) | 채널-스레드 기록 저장소 | Accepted | G6 |
-| [0006](0006-shared-document-editing.md) | 공동 문서 편집 규약 | Deferred | G7 |
-| [0007](0007-remote-transport-and-trust.md) | 원격 통신과 신뢰 모델 | Deferred | G4 |
+| [0006](0006-shared-document-editing.md) | 공동 문서 편집 규약 | Discussing | G7 |
+| [0007](0007-remote-transport-and-trust.md) | 원격 통신과 신뢰 모델 | Discussing | G4 |
 | [0008](0008-session-naming-and-namespace.md) | 세션 이름, 주소, 네임스페이스 | Accepted | G1, G2, G5 |
-| [0009](0009-session-trust-handshake.md) | 세션 간 신뢰 수립(핸드셰이크) | Deferred | G1, G2, G4, G5 |
+| [0009](0009-session-trust-handshake.md) | 세션 간 신뢰 수립(핸드셰이크) | Discussing | G1, G2, G4, G5 |
 | [0010](0010-workers.md) | 워커를 띄우고 끝내는 일의 경계 | Accepted | C1 |
 
 새 ADR은 [TEMPLATE.md](TEMPLATE.md)를 복사해 만든다.
