@@ -64,6 +64,11 @@ def register(data: dict, runtime: str) -> dict | None:
     session_id = data.get("session_id")
     home = home_of(runtime, data)
     pid = pid_of(runtime)
+    if session_id and not pid:
+        # The session env vars are missing (an older runtime, an odd launcher).
+        # If this session registered before, its own pointer still knows the pid.
+        known = registry.by_session(runtime, session_id)
+        pid = known and known.get("pid")
     if not (session_id and home and pid):
         paths.append_jsonl("decisions.jsonl", {
             "event": data.get("hook_event_name"), "runtime": runtime,
@@ -124,7 +129,11 @@ def handle(data: dict) -> dict | None:
     if not parsed.header:
         decision, reason = ("block", "peer message without an xsm header") \
             if cfg.get("strict_peers", True) else ("pass", "unheadered peer message allowed")
-    elif me:
+    elif not me:
+        # Without knowing which session we are, scope cannot be checked at all.
+        # Passing here would turn an unidentifiable session into an open door.
+        decision, reason = "block", "cannot identify this session, so scope was not checked"
+    else:
         sender = _sender_record(parsed)
         if sender is None:
             decision, reason = "block", "sender %r is not registered" % parsed.header.get("from")

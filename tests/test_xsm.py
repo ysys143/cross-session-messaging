@@ -200,5 +200,35 @@ class ForecastTest(TempState):
         self.assertEqual(send.native_forecast({"runtime": "claude"}, {"runtime": "codex"})[0], "n/a")
 
 
+
+class UnknownSelfTest(TempState):
+    """A hook that cannot tell which session it guards must refuse peer
+    messages: scope is unchecked, so passing would make that session an open
+    door. Driven through handle() directly because whether the process tree
+    happens to contain a real `claude` ancestor is environment-dependent.
+    """
+
+    def _message(self):
+        from xsm import envelope
+        sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa",
+                  "session_id": "s1", "permission_mode": "auto"}
+        return envelope.build("hi", msg_id="m1", sender=sender, scope="dir:x")
+
+    def _handle(self, prompt):
+        from xsm import receive
+        receive.register = lambda data, runtime: None        # identity unknown
+        return receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "r1",
+                               "cwd": self.tmp, "prompt": prompt, "session_title": "recv"})
+
+    def test_peer_message_is_refused(self):
+        out = self._handle(self._message())
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("cannot identify this session", out["reason"])
+        self.assertTrue(os.listdir(os.path.join(self.tmp, "held")), "body must be kept")
+
+    def test_human_prompt_is_untouched(self):
+        self.assertIsNone(self._handle("my own prompt"))
+
+
 if __name__ == "__main__":
     unittest.main()

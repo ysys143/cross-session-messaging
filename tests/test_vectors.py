@@ -177,8 +177,13 @@ def _gate_case(case):
                    "session_id": receiver["session_id"], "cwd": receiver["cwd"],
                    "prompt": prompt, "prompt_id": "p", "session_title": receiver["name"],
                    "permission_mode": receiver.get("permission_mode") or "auto"}
-        env = dict(os.environ, XSM_HOME=self.tmp,
-                   CLAUDE_CONFIG_DIR=receiver["home"], CLAUDE_CODE_SESSION_ID=receiver["session_id"])
+        # Start from a clean slate: inheriting this terminal's own session
+        # variables would let the hook identify the wrong session, which is
+        # exactly the bug these vectors exist to catch.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+        env.update({"XSM_HOME": self.tmp, "CLAUDE_CONFIG_DIR": receiver["home"],
+                    "CLAUDE_CODE_SESSION_ID": receiver["session_id"],
+                    "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/cc-socks/%d.sock" % receiver["pid"]})
         if case.get("force_error"):
             env["XSM_FORCE_ERROR"] = "1"
         else:

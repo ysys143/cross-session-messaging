@@ -124,6 +124,11 @@ def unregistered() -> list:
     return out
 
 
+def by_session(runtime: str, session_id: str) -> dict | None:
+    rec = paths.read_json(_record_path(runtime, session_id))
+    return _enrich(rec) if rec else None
+
+
 def prune(max_age_days: float = 14.0) -> int:
     """Drop pointers whose session is gone and whose record is old. Liveness is
     checked at lookup, so pruning is housekeeping, not correctness."""

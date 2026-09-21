@@ -3,7 +3,7 @@
 다른 언어로 다시 구현하더라도 같은 동작이 나오도록, 와이어 형식과 상태 파일과 판정 규칙을 여기에 고정한다. 적합성 기준은 문장이 아니라 `tests/vectors.json`이다. 어떤 구현이든 그 벡터를 통과하면 xsm v1 구현이다.
 
 ```bash
-python3 -m unittest discover -s tests      # 테스트 51건(벡터 35건 포함)
+python3 -m unittest discover -s tests      # 테스트 53건(벡터 35건 포함)
 ```
 
 동작을 바꿀 때는 **코드와 벡터를 같은 커밋에서 함께** 바꾼다. 코드만 바꾸면 벡터가 깨지며, 그것이 이 파일의 목적이다.
@@ -93,6 +93,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 | 경로 | 스키마 |
 |---|---|
 | `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?}]}]}` |
+| `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |
 | `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?}` |
 | `ledger/<msg-id>.json` | `{"id", "status": "queued", "t", "kind", "scope", "from": {...}, "to": {...}, "preview"}` |
@@ -132,6 +133,7 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 | Claude | pid 생존 + `ps lstart` 일치 + inbox 소켓 연결 성공 |
 | Codex | pid 생존 + `ps lstart` 일치 |
 
+- 수신 세션은 자기 pid를 `CLAUDE_CODE_MESSAGING_SOCKET`(경로에 pid가 들어 있다)이나 조상 프로세스 탐색으로 얻고, 둘 다 실패하면 같은 `session_id`로 이미 남아 있는 포인터에서 되찾는다. 그래도 알 수 없으면 5.1절 3번 규칙이 적용된다.
 - 종료 훅에 의존하지 않는다. 강제 종료 시 `SessionEnd`는 실행되지 않는다(S3).
 - **주의:** Claude가 자기 레코드에 쓰는 `procStart`는 UTC이고 `ps lstart`는 로컬 시간이다. 두 값을 직접 비교하면 안 된다. 우리가 등록한 포인터의 `lstart`만 `ps` 출력과 비교한다.
 
@@ -143,10 +145,11 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 
 1. 봉투도 헤더도 없다 → **아무것도 출력하지 않는다**(사람 입력).
 2. 헤더가 없다 → `strict_peers`가 참이면 **차단**, 거짓이면 통과.
-3. 발신자 `ref`가 레지스트리에 없다 → **차단**.
-4. 발신자와 수신자가 공통 scope에 없다 → **차단**.
-5. 지금 계산한 scope가 헤더의 `scope`와 다르다 → **차단**(보낸 뒤 정책이 바뀐 경우).
-6. 그 밖에는 **통과**시키고 발신 표시 문맥을 붙인다.
+3. 수신 세션이 자기 자신을 식별하지 못한다(세션 환경변수가 없고 기존 포인터도 없다) → **차단**. 범위를 검사할 수 없는 상태에서 통과시키면 그 세션이 열린 문이 된다.
+4. 발신자 `ref`가 레지스트리에 없다 → **차단**.
+5. 발신자와 수신자가 공통 scope에 없다 → **차단**.
+6. 지금 계산한 scope가 헤더의 `scope`와 다르다 → **차단**(보낸 뒤 정책이 바뀐 경우).
+7. 그 밖에는 **통과**시키고 발신 표시 문맥을 붙인다.
 
 차단할 때는 **본문을 `held/`에 먼저 저장한 뒤** 차단한다. Codex는 차단하면 큐 항목이 사라지기 때문이다(S6). 저장에 실패하면 차단하지 않고 경고 문맥을 붙여 통과시킨다. 차단·통과 모두 `id`가 있으면 영수증을 쓴다.
 
