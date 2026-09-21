@@ -136,6 +136,7 @@ def cmd_join(args) -> int:
     root = config.project_root(here)
     print("%s project %s: %s" % ("joined" if added else "already in", args.project,
                                  _home_tilde(root)))
+    print("this folder is in: %s" % ", ".join(_memberships(here)))
     print("members:")
     _print_members(scope, root)
     others = [m for m in scope["members"] if os.path.realpath(m["root"]) != root]
@@ -163,14 +164,27 @@ def cmd_leave(args) -> int:
     return REFUSED
 
 
+def _memberships(here: str) -> list:
+    """Every project a session started in `here` belongs to: the default one
+    first, then the named ones its folder has joined."""
+    default, _ = config.default_project(here)
+    root = config.project_root(here)
+    named = [s.get("id") for s in config.projects()
+             if any(os.path.realpath(m.get("root", "")) == root for m in s.get("members", []))]
+    return ["%s (default)" % default] + named
+
+
 def cmd_projects(args) -> int:
-    root = config.project_root(_here(args))
+    here = _here(args)
+    root = config.project_root(here)
+    print("this folder (%s) is in: %s" % (_home_tilde(root), ", ".join(_memberships(here))))
     rows = config.projects()
     if not rows:
-        print("no projects. Join one with: /xsm-join <name>  (or xsm join <name>)")
+        print("no named projects. Join one with: /xsm-join <name>  (or xsm join <name>)")
         return OK
+    print("named projects:")
     for scope in rows:
-        print(scope.get("id"))
+        print("%s" % scope.get("id"))
         _print_members(scope, root)
     return OK
 

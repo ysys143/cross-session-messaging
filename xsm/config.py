@@ -132,21 +132,36 @@ def _half_joined(a: dict, b: dict, cfg: dict) -> str:
     return "; " + "; ".join(notes) if notes else ""
 
 
+def default_project(cwd: str):
+    """The project every session belongs to without joining anything: the git
+    repository it started in, or that folder when there is none. Returns
+    (scope_id, root)."""
+    root = git_root(cwd)
+    if root:
+        return "repo:" + os.path.basename(root), root
+    folder = os.path.realpath(cwd)
+    return "dir:" + os.path.basename(folder), folder
+
+
 def _scope_for(a: dict, b: dict, cfg: dict):
+    # The default project comes first. Named projects are joined *in addition*
+    # to it, so two sessions of one repository keep talking under their
+    # repository's scope even after that repository joins a named project.
+    default = cfg.get("same_repo_scope", True)
+    ra, rb = git_root(a.get("cwd") or ""), git_root(b.get("cwd") or "")
+    ca, cb = os.path.realpath(a.get("cwd") or "a"), os.path.realpath(b.get("cwd") or "b")
+    if default and ra and ra == rb:
+        return "repo:" + os.path.basename(ra), "same git repository"
+    if default and not ra and not rb and ca == cb:
+        return "dir:" + os.path.basename(ca), "same directory"
     for scope in cfg.get("scopes", []):
         members = scope.get("members", [])
         if any(member_matches(m, a) for m in members) and \
            any(member_matches(m, b) for m in members):
             return scope.get("id", "unnamed"), "explicit scope"
-    if not cfg.get("same_repo_scope", True):
+    if not default:
         return None, "no explicit scope and the same-repo default is off"
-    ra, rb = git_root(a.get("cwd") or ""), git_root(b.get("cwd") or "")
-    if ra and ra == rb:
-        return "repo:" + os.path.basename(ra), "same git repository"
-    ca, cb = os.path.realpath(a.get("cwd") or "a"), os.path.realpath(b.get("cwd") or "b")
     if not ra and not rb:
-        if ca == cb:
-            return "dir:" + os.path.basename(ca), "same directory"
         return None, "different directories, neither in a git repository, and no explicit scope"
     if ra and rb:
         return None, "different git repositories and no explicit scope"

@@ -460,6 +460,20 @@ class ProjectJoinTest(TempState):
         config.join("demo", b)
         self.assertEqual(config.scope_for(sa, sb)[0], "demo")
 
+    def test_named_project_is_joined_in_addition_to_the_default(self):
+        from xsm import config
+        import subprocess
+        repo = os.path.join(self.tmp, "repo")
+        os.makedirs(os.path.join(repo, "sub"))
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        _, other = self._dirs()
+        config.join("demo", repo)
+        config.join("demo", other)
+        inside = config.scope_for({"cwd": repo}, {"cwd": os.path.join(repo, "sub")})
+        self.assertEqual(inside[0], "repo:repo", "joining must not change the default scope")
+        self.assertEqual(config.scope_for({"cwd": repo}, {"cwd": other})[0], "demo")
+        self.assertEqual(config.default_project(other), ("dir:proj-b", os.path.realpath(other)))
+
     def test_join_is_idempotent_and_leave_closes_it(self):
         from xsm import config
         a, b = self._dirs()

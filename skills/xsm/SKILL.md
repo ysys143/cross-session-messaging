@@ -31,9 +31,11 @@ joins you — that is a decision for the user, not something to work around.
 
 ## Projects: talking across repositories
 
-Sessions in the same git repository can talk by default. Sessions in different
-repositories talk once **both** repositories have joined the same named xsm
-project:
+Every session belongs to the project of the directory it started in
+(`repo:<name>`, or `dir:<name>` outside a repository), so sessions in the same
+repository can talk by default. A named project is joined in addition to that
+one, never instead of it. Sessions in different repositories talk once **both**
+repositories have joined the same named project:
 
 ```bash
 xsm join demo        # this repository (its git root) joins project "demo"
