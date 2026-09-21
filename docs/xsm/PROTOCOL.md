@@ -105,6 +105,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 
 - 포인터는 **훅만** 쓴다. 홈 목록을 glob으로 추측하지 않는다. 대상 목록은 `homes.json`과 포인터에 적힌 홈의 합집합이다.
 - 이름과 소켓은 포인터에 캐시하지 않고 조회 시 런타임의 원본에서 읽는다. Claude는 `<홈>/sessions/<pid>.json`, Codex는 `<홈>/state_5.sqlite`의 `threads` 표다.
+- **열려 있지만 등록되지 않은 Codex 스레드.** Codex는 첫 프롬프트 때 훅을 돌리므로, 띄우고 `/rename`만 한 세션은 레지스트리에 없다. 구현은 실행 중인 `codex` 프로세스(작업 폴더, 시작 시각, `resume <id>` 인자)와 `<CODEX_HOME>/state_5.sqlite`의 `threads`를 맞춰 프로세스마다 열린 스레드 하나를 찾고, 대상 이름이 그것과 맞으면 "없다" 대신 "열려 있지만 등록되지 않았다"와 이유를 돌려준다. 이유는 둘 중 하나다. 훅이 신뢰되지 않았다(`config.toml`의 `[hooks.state."<hooks.json 절대 경로>:<이벤트>:<그룹>:<훅>"]`에 `trusted_hash`가 없다), 또는 아직 프롬프트가 없다(스레드의 `rollout_path`가 없다).
 - `decisions.jsonl`에 줄이 없다는 것은 곧 훅이 실행되지 않았다는 뜻이다. 판정은 성공·실패·예외를 가리지 않고 한 줄씩 남긴다.
 
 ### 3.1 설치의 멱등성

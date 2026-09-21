@@ -76,12 +76,26 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
         pool = [r for r in pool if r.get("alias") == alias]
     if ref:
         pool = [r for r in pool if r.get("ref") == ref]
+    live = [r for r in pool if r.get("state") == "live"]
+    usable = live or (pool if include_offline else [])
+    if not usable:
+        # No live registered match. A session that is open but never registered
+        # (a Codex thread that has not had its first prompt) is the likelier
+        # intent than one that stopped, so it is reported first.
+        waiting = [r for r in registry.unregistered()
+                   if identity.normalize(r.get("name") or "") == wanted
+                   and (not alias or r.get("alias") == alias)]
+        if waiting:
+            reason = "%s is open but has not registered with xsm: %s" % (
+                ", ".join("%s@%s" % (w.get("name"), w.get("alias")) for w in waiting),
+                waiting[0].get("why") or "its hook has not run")
+            if pool:
+                reason += "\nstopped sessions with the same name:\n" + \
+                          "\n".join(resume_hint(r) for r in pool)
+            return Resolution("unregistered", candidates=waiting, reason=reason)
     if not pool:
         return Resolution("not-found", reason="no session named %r" % name,
                           candidates=_live_addresses())
-
-    live = [r for r in pool if r.get("state") == "live"]
-    usable = live or (pool if include_offline else [])
     if not usable:
         return Resolution("offline-only", candidates=pool,
                           reason="only stopped sessions match %r\n%s" % (

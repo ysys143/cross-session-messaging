@@ -713,5 +713,51 @@ class TaskContextTest(TempState):
         self.assertIn("XSM_HOME=%s " % self.tmp, envelope.reply_command(self._parsed("task")))
 
 
+class CodexVisibilityTest(TempState):
+    """A Codex thread that is open but never prompted has not run its hook, so
+    it is not in the registry. The sender must be told that, not "no such
+    session" — found when a /rename'd, unprompted Codex reviewer went unseen."""
+
+    def _codex_home(self, trusted=True):
+        from xsm import config, install, paths
+        home = os.path.join(self.tmp, "codex-home")
+        os.makedirs(home, exist_ok=True)
+        paths.write_json(os.path.join(home, "hooks.json"), {"hooks": {}}, mode=0o644)
+        install.apply(home, "codex")
+        hooks_file = os.path.realpath(os.path.join(home, "hooks.json"))
+        body = ""
+        if trusted:
+            for key in ("session_start", "user_prompt_submit"):
+                body += '[hooks.state."%s:%s:0:0"]\ntrusted_hash = "sha256:x"\n\n' % (hooks_file, key)
+        open(os.path.join(home, "config.toml"), "w").write(body)
+        config.add_home(home, "codex")
+        return home
+
+    def test_trust_is_read_from_config_toml(self):
+        from xsm import install
+        self.assertEqual(install.codex_trust(self._codex_home(trusted=True)),
+                         {"SessionStart": True, "UserPromptSubmit": True})
+        self.assertEqual(install.codex_trust(self._codex_home(trusted=False)),
+                         {"SessionStart": False, "UserPromptSubmit": False})
+
+    def _with_open_thread(self, home, rollout=None):
+        from xsm import registry
+        registry._open_codex_threads = lambda h: [("t-open", "reviewer", self.tmp, rollout, 0, 0)]
+
+    def test_unprompted_thread_is_reported_with_the_reason(self):
+        from xsm import resolve
+        home = self._codex_home(trusted=True)
+        self._with_open_thread(home)
+        found = resolve.resolve("reviewer")
+        self.assertEqual(found.status, "unregistered")
+        self.assertIn("no prompt yet", found.reason)
+
+    def test_untrusted_hooks_are_named_as_the_cause(self):
+        from xsm import resolve
+        home = self._codex_home(trusted=False)
+        self._with_open_thread(home)
+        self.assertIn("not trusted", resolve.resolve("reviewer").reason)
+
+
 if __name__ == "__main__":
     unittest.main()

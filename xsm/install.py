@@ -183,6 +183,30 @@ def install_skill(home: str) -> tuple:
     return "linked", target
 
 
+def codex_trust(home: str) -> dict:
+    """Whether Codex has trusted the xsm hook groups in this home.
+
+    Codex records trust in config.toml as
+    [hooks.state."<abs path to hooks.json>:<event>:<group>:<hook>"] trusted_hash = …
+    (found by reading real configs). An untrusted hook simply never runs, which
+    from the outside looks exactly like a session that never registered.
+    Returns {event: True/False} for the events that carry our groups.
+    """
+    home = os.path.realpath(os.path.expanduser(home))
+    hooks_file = os.path.join(home, "hooks.json")
+    data = paths.read_json(hooks_file, {}) or {}
+    config_text = _read_text(os.path.join(home, "config.toml")) or ""
+    snake = {"SessionStart": "session_start", "UserPromptSubmit": "user_prompt_submit"}
+    out = {}
+    for event, key in snake.items():
+        for index, group in enumerate((data.get("hooks") or {}).get(event, [])):
+            if _is_ours(group):
+                marker = '[hooks.state."%s:%s:%d:0"]' % (hooks_file, key, index)
+                at = config_text.find(marker)
+                out[event] = at >= 0 and "trusted_hash" in config_text[at:at + 400].split("[", 2)[1]
+    return out
+
+
 def statusline_command() -> str:
     return "%s statusline %s" % (launcher(), MARKER)
 
@@ -346,6 +370,8 @@ def doctor() -> dict:
         "codex_binary": adapters.codex_bin(),
         "homes": config.homes(),
         "installs": [plan(h["path"], h["runtime"]) for h in config.homes()],
+        "codex_trust": {h["path"]: codex_trust(h["path"]) for h in config.homes()
+                        if h.get("runtime") == "codex"},
         "sessions": {"registered": len(registry.records()),
                      "live": len([r for r in registry.records() if r["state"] == "live"]),
                      "unregistered": len(registry.unregistered())},

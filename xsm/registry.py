@@ -110,6 +110,86 @@ def records() -> list:
     return sorted(out, key=lambda r: r.get("updated", 0), reverse=True)
 
 
+def _codex_recent_threads(home: str, within: float = 86400.0) -> list:
+    """Threads touched recently in a Codex home. A Codex session only runs its
+    hook at the first prompt, so a thread that exists but never prompted — say,
+    only /rename'd — is invisible to the registry. Listing it lets the sender be
+    told why instead of "no such session"."""
+    db = os.path.join(home, "state_5.sqlite")
+    if not os.path.exists(db):
+        return []
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = con.execute(
+            "select id, name, cwd, rollout_path, created_at, updated_at from threads "
+            "where archived = 0 and updated_at >= ?", (int(time.time() - within),)).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        con.close()
+    return rows
+
+
+def _running_codex() -> list:
+    """Codex TUIs running right now: (cwd, start_epoch, resumed_thread_id).
+
+    Without a hook there is no pid in any record, so the process table is the
+    only way to tell a thread someone has open from one touched earlier today.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, args = parts
+        argv = args.split()
+        if not argv or os.path.basename(argv[0]) != "codex":
+            continue
+        if len(argv) > 1 and argv[1] in ("app-server", "mcp", "mcp-server", "exec", "queue"):
+            continue
+        resumed = argv[2] if len(argv) > 2 and argv[1] == "resume" else None
+        try:
+            res = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        cwd = next((row[1:] for row in res.splitlines() if row.startswith("n")), None)
+        if not cwd:
+            continue
+        started = identity.lstart(int(pid))
+        try:
+            epoch = time.mktime(time.strptime(started, "%a %b %d %H:%M:%S %Y")) if started else 0
+        except ValueError:
+            epoch = 0
+        found.append((os.path.realpath(cwd), epoch, resumed))
+    return found
+
+
+def _open_codex_threads(home: str) -> list:
+    """The one thread each running Codex TUI has open: the one it resumed, or
+    the most recently touched thread in its folder since it started."""
+    threads = _codex_recent_threads(home, within=7 * 86400)
+    chosen = []
+    for cwd, epoch, resumed in _running_codex():
+        if resumed:
+            chosen += [t for t in threads if t[0] == resumed]
+            continue
+        here = [t for t in threads if os.path.realpath(t[2] or "") == cwd]
+        since = [t for t in here if t[4] >= epoch - 5] or here
+        if since:
+            chosen.append(max(since, key=lambda t: t[5]))
+    return chosen
+
+
 def unregistered() -> list:
     """Sessions visible in a declared home that never ran the hook. Shown for
     diagnosis only — they have no pointer, so they are not addressable."""
@@ -117,6 +197,24 @@ def unregistered() -> list:
     known_pids = {(r["runtime"], str(r.get("pid"))) for r in records()}
     out = []
     for home in config.homes():
+        if home.get("runtime") == "codex":
+            from . import install                         # lazy: keeps hook imports small
+            trust = install.codex_trust(home["path"])
+            for thread_id, name, cwd, rollout, _created, _updated in _open_codex_threads(home["path"]):
+                if ("codex", str(thread_id)) in known:
+                    continue
+                if trust and not all(trust.values()):
+                    why = "the xsm hooks are not trusted in %s; start codex and choose " \
+                          "'Trust all and continue'" % home["path"]
+                elif not rollout or not os.path.exists(rollout):
+                    why = "no prompt yet; Codex registers a session at its first prompt"
+                else:
+                    why = "its hook has not run since it started"
+                out.append({"runtime": "codex", "home": home["path"], "alias": home.get("alias"),
+                            "session_id": thread_id, "name": name or "codex-%s" % thread_id[:8],
+                            "cwd": cwd, "registered": False, "state": "unknown", "why": why,
+                            "ref": identity.ref_of("codex", home["path"], thread_id)})
+            continue
         if home.get("runtime") != "claude":
             continue
         for p in glob.glob(os.path.join(home["path"], "sessions", "*.json")):

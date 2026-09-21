@@ -63,6 +63,8 @@ def cmd_list(args) -> int:
                 "would-be-held" if r.get("native") == "hold" else "",
                 r.get("state") if r.get("state") != "live" else "") if f]
             cwd = (r.get("cwd") or "").replace(home, "~", 1)
+            if r.get("why"):
+                flags.append(r["why"])
             print("%s@%s [%s] %s%s" % (r.get("name"), r.get("alias"), r.get("ref"), cwd,
                                        (" (" + ", ".join(flags) + ")") if flags else ""))
         return OK
@@ -130,7 +132,8 @@ def cmd_send(args) -> int:
         print(json.dumps(result.as_dict(), ensure_ascii=False))
     else:
         print("%s: %s" % (result.status, result.reason or result.msg_id or ""))
-        if result.candidates and "resume it with" not in (result.reason or ""):
+        if result.candidates and "resume it with" not in (result.reason or "") \
+                and "has not registered" not in (result.reason or ""):
             print("registered sessions right now:" if "no session" in (result.reason or "")
                   else "candidates:")
             print(resolve.describe(result.candidates))
@@ -318,6 +321,14 @@ def cmd_doctor(args) -> int:
             continue
         states = ", ".join("%s:%s" % (a["event"], a["action"]) for a in plan["actions"])
         print("install    %-45s %s" % (plan["file"], states))
+    for home, trust in (report.get("codex_trust") or {}).items():
+        if not trust:
+            print("codex      %s: xsm hooks not installed" % home)
+            continue
+        missing = [e for e, ok in trust.items() if not ok]
+        print("codex      %s: hooks %s" % (home, "trusted" if not missing else
+              "NOT trusted for %s — start codex there and choose 'Trust all and continue'"
+              % ", ".join(missing)))
     for note in report["limits"]:
         print("limit      %s" % note)
     return OK

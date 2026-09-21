@@ -454,7 +454,13 @@ CODEX_HOME=~/.codex codex
 xsm list
 ```
 
-`cx-reviewer@codex [ref]`가 보여야 한다. 안 보이면 8장의 Codex 항목을 본다.
+`cx-reviewer@codex [ref]`가 보여야 한다. **프롬프트를 넣기 전에는 보이지 않는다** — `/rename`만 해서는 등록되지 않는다. 그 상태에서 보내면 xsm이 이렇게 알려 준다.
+
+```
+refused: cx-reviewer@codex is open but has not registered with xsm: no prompt yet; Codex registers a session at its first prompt
+```
+
+훅 신뢰가 빠졌으면 이유가 "the xsm hooks are not trusted …"로 나온다. `xsm doctor`의 `codex … hooks trusted` 줄로도 확인한다.
 
 ### 6.3 통신 확인
 
@@ -522,7 +528,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 | `sent-unconfirmed`가 계속된다 | 수신 세션이 꺼졌거나 훅이 없다 | `xsm list`로 상태 확인. Codex면 턴이 끝날 때까지 기다린다 |
 | 훅 오류가 `doctor`에 보인다 | 인터프리터나 경로 문제 | `xsm install`을 다시 실행해 인터프리터를 다시 고정한다 |
 | Codex에서 훅이 안 돈다 | 훅 신뢰를 아직 승인하지 않았다("Continue without trusting"을 골랐다) | Codex를 다시 띄워 훅 검토에서 신뢰한다 |
-| `xsm list`에 Codex가 없다 | 아직 프롬프트를 넣지 않았다. Codex는 첫 프롬프트 때 등록된다 | 프롬프트를 한 번 넣는다 |
+| `xsm list`에 Codex가 없다 | 아직 프롬프트를 넣지 않았다(`/rename`만으로는 등록되지 않는다). Codex는 첫 프롬프트 때 등록된다 | 프롬프트를 한 번 넣는다. `xsm list --all`에는 열려 있는 미등록 스레드가 이유와 함께 보인다 |
 | Codex 이름이 첫 메시지 문장이다 | 이름을 붙이지 않았다 | Codex에서 `/rename cx-reviewer`. 이미 쓴 ref는 그대로다 |
 | Codex에서 보내면 `sandbox-blocked` | 샌드박스 안에서 실행됐다 | `--sandbox danger-full-access`로 띄우거나 명령 승인 요청을 허용한다 |
 | Codex가 메시지를 계속 안 받는다 | 턴이 진행 중이거나, 중단(Interrupted) 상태라 사람 입력을 기다린다 | 턴이 끝나길 기다리거나 Codex에 아무 입력이나 한 번 넣는다 |
