@@ -28,10 +28,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # SessionEnd lets a clean exit read as `ended` rather than `stale`. Codex has
 # no SessionEnd event, so a stopped Codex session always reads as stale.
 CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "SessionEnd")
-# PermissionRequest carries headless workers' approvals to a person. It is
-# silent for every session that is not an xsm worker, and it has to be allowed
-# to wait as long as a person might take.
-CODEX_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest")
+# No PermissionRequest for Codex: `codex exec` never asks for approval, so a
+# headless Codex worker has no request to relay (measured 2026-09-21), and a
+# hook that can never fire should not cost the user a trust prompt. Headless
+# Claude workers get theirs from their own --settings.
+CODEX_EVENTS = ("SessionStart", "UserPromptSubmit")
 TIMEOUTS = {"PermissionRequest": 660}
 
 
@@ -315,6 +316,11 @@ def plan(home: str, runtime: str) -> dict:
         actions.append({"event": event, "others": len(groups) - len(ours),
                         "action": "keep" if have else ("replace" if ours else "add"),
                         "command": want})
+    # Our groups on events we no longer install (an earlier version's) go.
+    for event, groups in hooks.items():
+        if event not in events and any(_is_ours(g) for g in groups):
+            actions.append({"event": event, "others": len([g for g in groups if not _is_ours(g)]),
+                            "action": "remove", "command": None})
     return {"home": home, "runtime": runtime, "file": target, "exists": os.path.exists(target),
             "actions": actions}
 
@@ -335,6 +341,12 @@ def apply(home: str, runtime: str) -> dict:
     for action in result["actions"]:
         event = action["event"]
         groups = [g for g in hooks.get(event, []) if not _is_ours(g)]
+        if action["action"] == "remove":
+            if groups:
+                hooks[event] = groups
+            else:
+                hooks.pop(event, None)
+            continue
         groups.append({"hooks": [{"type": "command", "command": action["command"],
                                   "timeout": TIMEOUTS.get(event, 10)}]})
         hooks[event] = groups
@@ -377,7 +389,9 @@ def diff(home: str, runtime: str) -> str:
     for action in result["actions"]:
         lines.append("  %-16s %-7s (untouched groups: %d)" %
                      (action["event"], action["action"], action["others"]))
-        if action["action"] != "keep":
+        if action["action"] == "remove":
+            lines.append("    - the xsm group (no longer installed for this event)")
+        elif action["action"] != "keep":
             lines.append("    + %s" % action["command"])
     return "\n".join(lines)
 

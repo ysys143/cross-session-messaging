@@ -337,10 +337,13 @@ def _codex_exec(worker: dict, prompt: str, resume: bool, timeout: float | None =
     d = _dir(worker["name"])
     argv = ["codex", "exec"] + (["resume"] if resume else []) + [
         "--json", "--skip-git-repo-check"] + _codex_config_args(worker)
-    if not resume:
-        # Writes inside the working folder only; anything else is escalated,
-        # and escalations reach a person through the PermissionRequest hook.
-        argv += ["-s", "workspace-write", "-c", 'approval_policy="on-request"']
+    # Every turn, not only the first: `exec resume` has no --sandbox option and
+    # otherwise falls back to the user's config, which may be full access
+    # (measured: resume turns ran danger-full-access and wrote outside the
+    # folder). `codex exec` never asks for approval whatever approval_policy
+    # says (measured: turn_context approval_policy "never"), so a headless
+    # Codex worker simply cannot escalate; work that needs more runs in a pane.
+    argv += ["-c", 'sandbox_mode="workspace-write"']
     if resume:
         argv.append(worker["session_id"])
     argv.append(prompt)

@@ -158,7 +158,7 @@ xsm approvals | approve <id> | deny <id>
 - 워커가 미리 허용받는 것은 `xsm send`(보고)뿐이다. 과제가 `xsm stop`이나 `xsm install`을 시켜도 승인을 거친다.
 - 보고는 승인 없이 된다. Claude 워커는 xsm 실행 권한을 받고 뜬다. 헤드리스 Codex 워커는 샌드박스 안에서 xsm에 닿지 못하므로, 과제를 받은 턴의 마지막 메시지를 pump가 대신 답장으로 보낸다.
 - `--once`면 과제의 답이 부모에게 도착하는 순간 부모 쪽 훅이 워커를 종료하고 기록을 지운다.
-- Codex 워커의 승인 전달에는 `~/.codex/hooks.json`의 xsm `PermissionRequest` 그룹이 필요하다. `xsm install --codex-home ~/.codex`로 넣고 Codex에서 한 번 신뢰해야 한다. 이 그룹은 워커가 아닌 세션에서는 아무 말도 하지 않는다.
+- **헤드리스 Codex 워커는 권한을 올릴 수 없다.** `codex exec`는 설정과 관계없이 승인을 묻지 않는다(실측: 승인 정책이 항상 `never`). 그래서 모든 턴을 작업 폴더 쓰기만 허용하는 샌드박스로 돌리고, 그 밖의 쓰기는 거부된다. 더 많은 권한이 필요한 작업은 tmux 패널 워커로 띄워 사람이 승인하게 한다. 패널의 Codex TUI는 사용자의 Codex 설정을 그대로 따른다.
 
 ## 종료된 세션
 

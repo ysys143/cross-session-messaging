@@ -104,7 +104,10 @@ xsm stop <worker>           # stop it and remove its records
 - `--task` sends the task as `--kind task` once the worker is up; the answer
   comes back to you as a reply. `--once` stops the worker when that answer
   arrives. Put everything the worker needs in the task.
-- A headless worker's permission prompts go to your user: you get a note
+- A headless Codex worker cannot ask for more permission at all: it runs
+  sandboxed to its working folder. Give work that needs more to a worker in a
+  tmux pane, where a person approves it.
+- A headless Claude worker's permission prompts go to your user: you get a note
   saying what it is waiting for. **Never try to approve it yourself** —
   `xsm approve` works only from a person's terminal, and trying to get around
   that is permission laundering. Tell your user what is waiting and why.

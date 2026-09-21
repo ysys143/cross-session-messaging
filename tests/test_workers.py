@@ -229,20 +229,39 @@ class HeadlessCodexTest(TempState):
 
 
 class CodexInstallTest(TempState):
-    def test_permission_request_group_waits_long_enough(self):
+    def test_an_earlier_permission_request_group_is_removed(self):
         from xsm import install, paths
         home = os.path.join(self.tmp, "codex-h")
         os.makedirs(home)
-        paths.write_json(os.path.join(home, "hooks.json"), {"hooks": {}}, mode=0o644)
+        paths.write_json(os.path.join(home, "hooks.json"), {"hooks": {"PermissionRequest": [
+            {"hooks": [{"type": "command", "command": "other-tool"}]},
+            {"hooks": [{"type": "command", "command": "py hook.py " + install.MARKER}]}]}},
+            mode=0o644)
         install.apply(home, "codex")
         data = paths.read_json(os.path.join(home, "hooks.json"))
-        group = data["hooks"]["PermissionRequest"][0]["hooks"][0]
-        self.assertEqual(group["timeout"], install.TIMEOUTS["PermissionRequest"])
+        self.assertEqual([g["hooks"][0]["command"] for g in data["hooks"]["PermissionRequest"]],
+                         ["other-tool"], "only our group goes")
         self.assertTrue(install.apply(home, "codex").get("unchanged"))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class CodexSandboxTest(TempState):
+    """Every headless Codex turn runs sandboxed, the resumed ones included."""
+
+    def test_resume_turns_carry_the_sandbox(self):
+        from unittest import mock
+        from xsm import workers
+        w = {"name": "cx", "runtime": "codex", "mode": "headless", "session_id": "t1",
+             "home": self.tmp, "cwd": self.tmp, "model": "m"}
+        os.makedirs(os.path.join(self.tmp, "workers", "cx"))
+        seen = []
+        def run(argv, **kw):
+            seen.append(argv)
+            return mock.Mock(stdout=b"")
+        with mock.patch.object(workers.subprocess, "run", run):
+            workers._codex_exec(w, "hi", resume=False)
+            workers._codex_exec(w, "hi", resume=True)
+        for argv in seen:
+            self.assertIn('sandbox_mode="workspace-write"', argv)
 
 
 class FreshTuiAdoptionTest(TempState):
