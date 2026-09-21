@@ -136,6 +136,25 @@ xsm은 이름을 캐시하지 않고 조회할 때마다 런타임의 원본에�
 - 수신자가 꺼져 있으면 `sent-unconfirmed`로 끝난다. 이 상태를 전달로 읽지 않는다.
 - Codex는 진행 중인 턴에 끼어들지 않는다. 전달 시점은 현재 턴이 끝난 뒤이거나, 스레드가 유휴 상태면 약 10초 안이다.
 
+## 채널
+
+사람과 세션이 함께 남기는 기록이다(ADR-0005). 즉시 전달(`xsm send`)과는 따로다. 게시는 기록만 하고 누구도 깨우지 않는다.
+
+```
+xsm post "Which queue should the importer use?" --tag question
+xsm post "retries: 3" --tag decision            # 사람만. 터미널에서
+xsm channel show [--tag decision] [--channel demo]
+xsm channel export --out docs/DECISIONS.md      # 사람이 검토하고 직접 커밋한다
+xsm channel list
+```
+
+- **채널은 범위다.** 이 폴더의 기본 프로젝트, 또는 가입한 이름 붙인 프로젝트의 채널에만 쓰고 읽는다. 원본은 `~/.xsm/channels/`에 있고 자동 정리하지 않는다. 저장소에는 `export`로 만든 요약만 들어간다.
+- **태그.** `note`, `question`, `proposal`, `result`, `hypothesis`, `decision`. 스레드는 `--reply-to <id>`로 잇는다.
+- **작성자는 xsm이 정한다.** 에이전트 표식이 없는 터미널이면 사람이고, 등록된 세션이면 그 세션이다.
+- **`decision`은 사람의 것이다.** 에이전트는 CLI나 `xsm_post`로 결정을 올릴 수 없다. 대신 MCP 도구 `xsm_decide`로 사용자에게 묻는다. 사용자 화면에 질문과 선택지 양식이 뜨고, 사용자가 고른 답은 모델을 거치지 않고 xsm에 도착한다. xsm은 그 답을 질문 원문과 함께 결정으로 기록한다. Claude Code와 Codex 모두 된다(실측). 작성자는 `사람 via mcp-elicitation`으로 남는다.
+- **MCP 서버.** 설치할 때 각 홈에 `xsm`이라는 이름으로 등록된다(`claude mcp add --scope user`, `codex mcp add`). 도구는 `xsm_post`, `xsm_channel`, `xsm_decide` 셋이다. 세션이 띄우고 세션과 함께 끝난다. Codex가 띄운 MCP 서버는 샌드박스 밖에서 돌기 때문에, 샌드박스 Codex도 채널에 쓸 수 있다(실측). Codex는 MCP 도구마다 호출 허용을 묻는다. 등록을 원하지 않으면 `xsm install --no-mcp`.
+- **한계.** 같은 사용자 권한의 에이전트는 파일을 직접 고쳐 작성자나 결정을 위조할 수 있다.
+
 ## 워커
 
 세션이 작업을 맡길 새 세션을 직접 띄우고, 끝나면 종료한다.

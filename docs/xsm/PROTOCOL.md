@@ -307,6 +307,19 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 - **남은 워커.** 워커의 `parent_ref`에 해당하는 레코드가 없거나 `ended`/`stale`이면 그 워커는 남은 것이다. 만든 지 120초가 지났는데 자기 프로세스가 없는 워커도 같다. 이런 워커는 `stop`으로 정리한다. 확인 시점은 셋이다. (1) 부모의 SessionEnd 훅: 부모 프로세스가 아직 살아 있으므로, 분리된 `xsm reap --after-pid <부모 pid>`가 그 프로세스가 끝나길(최대 120초) 기다렸다가 정리한다. (2) `workers`와 `spawn`. (3) 매시간 정리. 훅 경로에서는 늘 분리된 프로세스로 한다.
 - **종료.** `stop`은 pid와 시작 시각이 기록과 같을 때만 신호를 보낸다(프로세스 그룹에 SIGTERM, 5초 뒤 SIGKILL). 패널 워커는 `tmux kill-pane`. 대기 중인 승인은 `denied`로 닫고, 워커 기록·폴더·세션 포인터를 지운다. 원장은 보존 기간 규칙을 따른다. `once`는 `--task`가 있어야 쓸 수 있다. 과제 id는 보내기 전에 워커 기록에 저장한다. 그 과제(`task_id`)에 대한 `reply`가 부모(`parent_ref`)의 훅을 통과하면, 훅이 분리된 프로세스로 `xsm stop --internal`을 띄운다. 훅 안에서 종료를 기다리지 않기 위해서다. `task_id`가 없으면 어떤 답장으로도 멈추지 않는다.
 
+### 5.6 채널과 MCP 서버
+
+채널 레코드는 `channels/<key>/<YYYY-MM>.jsonl`에 한 줄씩 저장된다. 한 레코드는 `O_APPEND`로 연 파일에 `write()` 한 번으로 쓴다. 16개 프로세스가 동시에 60KB까지 써도 섞이거나 사라지지 않았다(실측). 그래서 잠금은 쓰지 않는다. 채널 파일은 정리 대상이 아니다.
+
+- **key.** 기본 프로젝트면 `<범위 id의 안전한 형태>-<루트 경로 sha256 앞 6자>`다. 이름이 같은 두 저장소가 채널을 공유하지 않게 하기 위해서다. 이름 붙인 프로젝트면 `project-<이름>`이다.
+- **레코드.** `{"id", "t", "channel", "author", "tag", "text", "reply_to", "root", "approved"?}`. `author`는 `{"kind": "human", "name", "via"?, "asked_by"?}` 또는 `{"kind": "agent", "name", "alias", "ref", "runtime"}`이다. `approved`는 `{"question", "answer", "options"}`이다. 본문은 최대 32,000자다.
+- **작성자 판정.** `workers.human_terminal()`(에이전트 표식 없음, 표준 입력이 TTY, `/dev/tty` 열림)이 참이면 사람이다. 아니면 등록된 세션이다. 둘 다 아니면 거부한다.
+- **`decision`.** 사람만 쓸 수 있다. 에이전트는 MCP `xsm_decide`로만 기록한다.
+- **MCP 서버**(`hooks/xsm-mcp.py`, 줄 단위 JSON-RPC over stdio). 초기화 때 클라이언트의 `capabilities.elicitation`을 기록한다. 서버가 섬기는 세션은 가장 가까운 `claude`/`codex` 조상 프로세스의 살아 있는 레지스트리 기록이다.
+  - **도구.** `xsm_post`(`decision` 태그는 받지 않음), `xsm_channel`, `xsm_decide`.
+  - **`xsm_decide`의 흐름.** 서버가 `elicitation/create`를 보낸다. 요청 내용은 `message`와 `requestedSchema.properties.answer`(선택지가 있으면 `enum`)다. `action: accept`와 빈 값이 아닌 답이 돌아와야만 레코드를 쓴다. 이때 작성자는 `{"kind": "human", "via": "mcp-elicitation", "asked_by": <세션 ref>}`다. 거절, 취소, elicitation 미지원이면 아무것도 쓰지 않는다.
+- **등록.** 설치기가 `claude mcp add --scope user xsm -- <고정 인터프리터> <repo>/hooks/xsm-mcp.py`(Codex는 `codex mcp add xsm -- …`)를 실행한다. `mcp get`으로 확인해, 명령이 같으면 건너뛰고 다르면 지우고 다시 등록한다. `uninstall`은 `mcp remove`를 실행한다.
+
 ## 6. 결과값과 종료 코드
 
 | 결과 | 뜻 | 종료 코드 |

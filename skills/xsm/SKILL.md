@@ -89,6 +89,25 @@ A Codex session picks up a queued message within about ten seconds when its
 thread is loaded and idle, otherwise at its user's next input. It cannot be
 interrupted mid-turn. Never report `sent-unconfirmed` as delivered.
 
+## The channel: the record you keep with your user and other sessions
+
+```bash
+xsm post "Benchmark: kafka 2x faster" --tag result      # or the xsm_post MCP tool
+xsm channel show [--tag decision]                       # or xsm_channel
+```
+
+Posting records; it wakes nobody (use `xsm send` to call a session). Tags:
+note, question, proposal, result, hypothesis, decision. Reply with
+`--reply-to <id>` to keep a thread.
+
+**A decision is your user's, not yours.** You cannot post one. When a choice
+should be on record, call the `xsm_decide` MCP tool with the question and the
+options: your user sees a form and picks; their answer is recorded with the
+question. Do not phrase your own proposal as a decision — post it as
+`proposal` and ask.
+
+In a sandboxed Codex, use the MCP tools: the shell cannot write the channel.
+
 ## Workers: starting a session to hand work to
 
 ```bash

@@ -375,6 +375,13 @@ def cmd_install(args) -> int:
                 "already": "already set",
                 "kept-existing": "left alone: this home already has its own statusLine",
             }[outcome])
+        if not args.no_mcp:
+            outcome = install.install_mcp(home, runtime)
+            print("  MCP server: %s" % {
+                "added": "registered (xsm_post, xsm_channel, xsm_decide)",
+                "current": "already registered",
+                "replaced": "re-registered with the current command",
+            }.get(outcome, outcome))
         if runtime == "codex":
             if not args.no_commands:
                 state, _ = install.install_skill(home)
@@ -395,6 +402,8 @@ def cmd_uninstall(args) -> int:
               [(h, "codex") for h in (args.codex_home or [])]
     for home, runtime in targets or [(h["path"], h["runtime"]) for h in config.homes()]:
         result = install.remove(home, runtime)
+        if install.remove_mcp(home, runtime):
+            print("%s: removed the MCP server" % home)
         if runtime == "codex" and install.remove_skill(home):
             print("%s: unlinked the skill" % home)
         if runtime == "claude":
@@ -622,6 +631,60 @@ def cmd_pump(args) -> int:
     return workers.pump(args.name)
 
 
+def cmd_post(args) -> int:
+    from . import channel
+    me = registry.me()
+    here = _here(args, me)
+    try:
+        where = channel.resolve(here, args.channel)
+        author = channel.author_here(me)
+        rec = channel.post(where, author, args.text, args.tag, args.reply_to)
+    except channel.ChannelError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    print("posted %s to %s as %s" % (rec["id"], where[0], channel.label(author)))
+    return OK
+
+
+def cmd_channel(args) -> int:
+    from . import channel
+    me = registry.me()
+    if args.action == "list":
+        here = _here(args, me)
+        mine = {key for _, key in channel.memberships(here)}
+        for name, key in channel.memberships(here):
+            n = len(channel.read(key))
+            print("%s  %d post(s)%s" % (name, n, "" if n else "  (empty)"))
+        others = [c for c in channel.all_channels() if c[0] not in mine]
+        if others:
+            print("(%d other channel(s) this folder is not in)" % len(others))
+        return OK
+    try:
+        where = channel.resolve(_here(args, me), args.channel)
+    except channel.ChannelError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    rows = channel.read(where[1])
+    if args.action == "export":
+        text = channel.export_markdown(where[0], rows, args.tag or "decision")
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            print("wrote %s (%d post(s)); review it, then commit it yourself"
+                  % (args.out, len([r for r in rows if r.get("tag") == (args.tag or "decision")])))
+        else:
+            sys.stdout.write(text)
+        return OK
+    text = channel.render(rows, tag=args.tag, limit=args.limit)
+    print(text or "(no posts in %s)" % where[0])
+    return OK
+
+
+def cmd_mcp(args) -> int:
+    from . import mcp
+    return mcp.main()
+
+
 def cmd_prune(args) -> int:
     removed = housekeeping.prune(dry_run=args.dry_run)
     verb = "would remove" if args.dry_run else "removed"
@@ -688,6 +751,24 @@ def build_parser() -> argparse.ArgumentParser:
         if verb == "stop":
             sp.add_argument("--internal", action="store_true", help=argparse.SUPPRESS)
         sp.set_defaults(func=func)
+    po = sub.add_parser("post", help="post to this project's channel (the shared record)")
+    po.add_argument("text")
+    po.add_argument("--tag", default="note", help="note, question, proposal, result, hypothesis, "
+                    "decision (a person only)")
+    po.add_argument("--reply-to")
+    po.add_argument("--channel", help="a named project (default: this project)")
+    po.add_argument("--dir")
+    po.set_defaults(func=cmd_post)
+    ch = sub.add_parser("channel", help="read, list or export channels")
+    ch.add_argument("action", nargs="?", default="show", choices=["show", "list", "export"])
+    ch.add_argument("--channel")
+    ch.add_argument("--tag")
+    ch.add_argument("--limit", type=int)
+    ch.add_argument("--out", help="export: write the markdown here")
+    ch.add_argument("--dir")
+    ch.set_defaults(func=cmd_channel)
+    mc = sub.add_parser("mcp", help=argparse.SUPPRESS)
+    mc.set_defaults(func=cmd_mcp)
     ap = sub.add_parser("approvals", help="permission requests waiting for a person")
     ap.set_defaults(func=cmd_approvals)
     for verb in ("approve", "deny"):
@@ -752,6 +833,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="also show peers in Claude's statusLine (never replaces an existing one)")
     ins.add_argument("--no-commands", action="store_true",
                      help="hooks only: do not write the slash commands or link the skill")
+    ins.add_argument("--no-mcp", action="store_true", help="do not register the xsm MCP server")
     ins.set_defaults(func=cmd_install)
 
     un = sub.add_parser("uninstall", help="remove only the hook groups xsm added")
@@ -777,6 +859,6 @@ def main(argv=None) -> int:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
     paths.ensure_home()
-    if args.command not in ("hook", "statusline", "prune", "pump", "reap"):
+    if args.command not in ("hook", "statusline", "prune", "pump", "reap", "mcp"):
         housekeeping.maybe_prune()
     return args.func(args)

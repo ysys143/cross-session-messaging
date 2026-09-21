@@ -428,3 +428,75 @@ def doctor() -> dict:
         ],
     }
     return report
+
+
+# --- the MCP server (ADR-0005) ---------------------------------------------------------
+#
+# Registered through each runtime's own `mcp add`, so xsm never edits
+# ~/.claude.json or config.toml by hand. User scope, so every session in the
+# home has it.
+
+MCP_NAME = "xsm"
+
+
+def mcp_command() -> list:
+    return [pinned_python(), os.path.join(REPO, "hooks", "xsm-mcp.py")]
+
+
+def _runtime_env(home: str, runtime: str) -> dict:
+    env = dict(os.environ)
+    env["CLAUDE_CONFIG_DIR" if runtime == "claude" else "CODEX_HOME"] = home
+    return env
+
+
+def _mcp_cli(runtime: str) -> str:
+    return "claude" if runtime == "claude" else (shutil.which("codex") or "codex")
+
+
+def mcp_state(home: str, runtime: str) -> str:
+    """absent | current | stale"""
+    home = os.path.realpath(os.path.expanduser(home))
+    try:
+        out = subprocess.run([_mcp_cli(runtime), "mcp", "get", MCP_NAME],
+                             capture_output=True, text=True, timeout=30,
+                             env=_runtime_env(home, runtime))
+    except (OSError, subprocess.SubprocessError):
+        return "absent"
+    text = out.stdout + out.stderr
+    if out.returncode != 0 or "No MCP server" in text or "not found" in text.lower():
+        return "absent"
+    return "current" if all(part in text for part in mcp_command()) else "stale"
+
+
+def install_mcp(home: str, runtime: str) -> str:
+    """added | current | replaced | failed:<why>"""
+    home = os.path.realpath(os.path.expanduser(home))
+    state = mcp_state(home, runtime)
+    if state == "current":
+        return "current"
+    env = _runtime_env(home, runtime)
+    if state == "stale":
+        subprocess.run([_mcp_cli(runtime), "mcp", "remove", MCP_NAME] +
+                       (["--scope", "user"] if runtime == "claude" else []),
+                       capture_output=True, text=True, timeout=30, env=env)
+    extra = []
+    if os.environ.get("XSM_HOME") and not _is_default_home(os.environ["XSM_HOME"]):
+        extra = (["-e"] if runtime == "claude" else ["--env"]) + \
+            ["XSM_HOME=%s" % os.environ["XSM_HOME"]]
+    argv = [_mcp_cli(runtime), "mcp", "add"] + (["--scope", "user"] if runtime == "claude" else []) \
+        + extra + [MCP_NAME, "--"] + mcp_command()
+    out = subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env)
+    if out.returncode != 0:
+        return "failed: %s" % (out.stderr or out.stdout).strip()[:200]
+    return "replaced" if state == "stale" else "added"
+
+
+def remove_mcp(home: str, runtime: str) -> bool:
+    home = os.path.realpath(os.path.expanduser(home))
+    if mcp_state(home, runtime) == "absent":
+        return False
+    out = subprocess.run([_mcp_cli(runtime), "mcp", "remove", MCP_NAME] +
+                         (["--scope", "user"] if runtime == "claude" else []),
+                         capture_output=True, text=True, timeout=30,
+                         env=_runtime_env(home, runtime))
+    return out.returncode == 0

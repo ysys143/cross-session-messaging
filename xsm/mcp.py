@@ -1,0 +1,181 @@
+"""The xsm MCP server: channel tools for a session, over stdio.
+
+Started by the session (Claude Code or Codex) and ending with it, so it is not
+a resident process (ADR-0003). It exists for two reasons (ADR-0005):
+
+- A decision recorded from a session must be the person's. `xsm_decide` asks
+  them through MCP elicitation, and their answer comes back from the client to
+  this server without passing through the model (measured on both runtimes,
+  2026-09-22). The answer and the question are stored with the decision.
+- A sandboxed Codex cannot write `~/.xsm` from its shell, but the MCP servers it
+  starts run outside the sandbox (measured), so posting and reading go through
+  here too.
+
+The session is identified by this process's ancestry: the nearest `claude` or
+`codex` ancestor is the session, and its registry record is the author.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+from . import channel, identity, registry
+
+PROTOCOL = "2025-06-18"
+
+TOOLS = [
+    {"name": "xsm_post",
+     "description": ("Post to this project's xsm channel, the record people and sessions share. "
+                     "Tags: note, question, proposal, result, hypothesis. A decision cannot be "
+                     "posted: ask your user with xsm_decide."),
+     "inputSchema": {"type": "object", "properties": {
+         "text": {"type": "string"},
+         "tag": {"type": "string", "enum": [t for t in channel.TAGS if t != "decision"]},
+         "reply_to": {"type": "string", "description": "id of the post this answers"},
+         "channel": {"type": "string", "description": "a named project; default: this project"}},
+         "required": ["text"]}},
+    {"name": "xsm_channel",
+     "description": "Read this project's xsm channel: threads, or only posts with one tag.",
+     "inputSchema": {"type": "object", "properties": {
+         "tag": {"type": "string", "enum": list(channel.TAGS)},
+         "limit": {"type": "integer", "default": 30},
+         "channel": {"type": "string"}}}},
+    {"name": "xsm_decide",
+     "description": ("Ask your user to decide, and record their answer as a decision in the "
+                     "channel. Your user sees the question and picks an option or writes an "
+                     "answer; you do not choose for them. Use it when a choice should be on "
+                     "record as the user's."),
+     "inputSchema": {"type": "object", "properties": {
+         "question": {"type": "string"},
+         "options": {"type": "array", "items": {"type": "string"},
+                     "description": "choices to offer; omit for a free-text answer"},
+         "summary": {"type": "string", "description": "one line on what is being decided"},
+         "reply_to": {"type": "string"},
+         "channel": {"type": "string"}},
+         "required": ["question"]}},
+]
+
+
+class Server:
+    def __init__(self, inp=sys.stdin, out=sys.stdout):
+        self.inp, self.out = inp, out
+        self.client_caps = {}
+        self.next_id = 0
+
+    # -- transport ----------------------------------------------------------------
+    def send(self, obj: dict) -> None:
+        obj.setdefault("jsonrpc", "2.0")
+        self.out.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        self.out.flush()
+
+    def read(self) -> dict | None:
+        line = self.inp.readline()
+        return json.loads(line) if line else None
+
+    def ask_client(self, method: str, params: dict) -> dict:
+        """A request to the client, answered before anything else continues."""
+        self.next_id += 1
+        rid = "xsm-%d" % self.next_id
+        self.send({"id": rid, "method": method, "params": params})
+        while True:
+            msg = self.read()
+            if msg is None:
+                raise EOFError("client went away")
+            if msg.get("id") == rid and "method" not in msg:
+                return msg
+            if msg.get("method") == "ping" and "id" in msg:
+                self.send({"id": msg["id"], "result": {}})
+
+    # -- the session ---------------------------------------------------------------
+    def session(self) -> dict | None:
+        pid = identity.ancestor_pid({"claude", "codex"})
+        if not pid:
+            return None
+        rows = [r for r in registry.records() if r.get("pid") == pid and r.get("state") == "live"]
+        return max(rows, key=lambda r: r.get("updated", 0)) if rows else None
+
+    # -- tools --------------------------------------------------------------------
+    def call(self, name: str, args: dict) -> str:
+        me = self.session()
+        if not me:
+            raise channel.ChannelError("this session is not registered with xsm; is the xsm hook "
+                                       "installed in its home?")
+        where = channel.resolve(me.get("cwd") or os.getcwd(), args.get("channel"))
+        author = {"kind": "agent", "name": me.get("name"), "alias": me.get("alias"),
+                  "ref": me.get("ref"), "runtime": me.get("runtime")}
+        if name == "xsm_post":
+            rec = channel.post(where, author, args.get("text", ""), args.get("tag") or "note",
+                               args.get("reply_to"))
+            return "posted %s to %s" % (rec["id"], where[0])
+        if name == "xsm_channel":
+            text = channel.render(channel.read(where[1]), tag=args.get("tag"),
+                                  limit=int(args.get("limit") or 30))
+            return text or "(no posts in %s)" % where[0]
+        if name == "xsm_decide":
+            return self.decide(where, me, args)
+        raise channel.ChannelError("unknown tool %s" % name)
+
+    def decide(self, where: tuple, me: dict, args: dict) -> str:
+        if "elicitation" not in (self.client_caps or {}):
+            raise channel.ChannelError("this client cannot ask its user (no elicitation "
+                                       "support); a person can post the decision with "
+                                       "`xsm post --tag decision` in a terminal")
+        question = (args.get("question") or "").strip()
+        options = [o for o in (args.get("options") or []) if isinstance(o, str) and o.strip()]
+        field = {"type": "string", "title": "Answer"}
+        if options:
+            field["enum"] = options
+        reply = self.ask_client("elicitation/create", {
+            "message": question,
+            "requestedSchema": {"type": "object", "properties": {"answer": field},
+                                "required": ["answer"]}})
+        result = reply.get("result") or {}
+        if result.get("action") != "accept":
+            return "your user did not answer (%s); nothing was recorded" % (
+                result.get("action") or (reply.get("error") or {}).get("message") or "no answer")
+        answer = str((result.get("content") or {}).get("answer", "")).strip()
+        if not answer:
+            return "your user gave an empty answer; nothing was recorded"
+        summary = (args.get("summary") or "").strip()
+        text = "%s: %s" % (summary, answer) if summary else "%s -> %s" % (question, answer)
+        author = {"kind": "human", "name": os.environ.get("USER") or "person",
+                  "via": "mcp-elicitation", "asked_by": me.get("ref"),
+                  "runtime": me.get("runtime")}
+        rec = channel.post(where, author, text, "decision", args.get("reply_to"),
+                           approved={"question": question, "answer": answer,
+                                     "options": options or None})
+        return "recorded decision %s in %s: %s" % (rec["id"], where[0], answer)
+
+    # -- loop -------------------------------------------------------------------------
+    def serve(self) -> int:
+        while True:
+            msg = self.read()
+            if msg is None:
+                return 0
+            method, mid = msg.get("method"), msg.get("id")
+            if method == "initialize":
+                params = msg.get("params") or {}
+                self.client_caps = params.get("capabilities") or {}
+                self.send({"id": mid, "result": {
+                    "protocolVersion": params.get("protocolVersion") or PROTOCOL,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "xsm", "version": "1"}}})
+            elif method == "tools/list":
+                self.send({"id": mid, "result": {"tools": TOOLS}})
+            elif method == "tools/call":
+                params = msg.get("params") or {}
+                try:
+                    text, error = self.call(params.get("name"), params.get("arguments") or {}), False
+                except (channel.ChannelError, EOFError) as exc:
+                    text, error = str(exc), True
+                self.send({"id": mid, "result": {"content": [{"type": "text", "text": text}],
+                                                 "isError": error}})
+            elif method == "ping" and mid is not None:
+                self.send({"id": mid, "result": {}})
+            elif mid is not None and method:
+                self.send({"id": mid, "error": {"code": -32601, "message": "not supported"}})
+
+
+def main() -> int:
+    return Server().serve()
