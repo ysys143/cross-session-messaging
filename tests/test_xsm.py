@@ -289,6 +289,21 @@ class IdempotenceTest(TempState):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["hooks"][0]["command"], install.hook_command("claude", "SessionStart"))
 
+    def test_round_trip_leaves_the_file_byte_identical(self):
+        """A settings file people edit by hand must not be reformatted."""
+        from xsm import install
+        home = os.path.join(self.tmp, "claude-fmt")
+        os.makedirs(home, exist_ok=True)
+        target = os.path.join(home, "settings.json")
+        original = ('{\n  "crossSessionInbound": "accept",\n  "hooks": {\n    "UserPromptSubmit": [\n'
+                    '      {\n        "hooks": [\n          {\n            "type": "command",\n'
+                    '            "command": "sh ~/other.sh"\n          }\n        ]\n      }\n'
+                    '    ]\n  }\n}\n')
+        open(target, "w").write(original)
+        install.apply(home, "claude")
+        install.remove(home, "claude")
+        self.assertEqual(open(target).read(), original)
+
     def test_pin_survives_an_install_without_python(self):
         from xsm import install
         install.pin_python("/usr/bin/python3")

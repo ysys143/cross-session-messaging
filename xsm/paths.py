@@ -36,12 +36,30 @@ def read_json(p: str, default=None):
         return default
 
 
-def write_json(p: str, data, mode: int = 0o600) -> None:
+def indent_of(p: str, default: int = 1) -> int:
+    """The indentation a file already uses, so rewriting it does not reformat
+    everything. A settings file the user edits by hand should come back from
+    `xsm uninstall` byte-for-byte, not merely equal after parsing."""
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh.read().splitlines()[1:]:
+                stripped = line.lstrip(" ")
+                if stripped and stripped != line:
+                    return len(line) - len(stripped)
+    except OSError:
+        pass
+    return default
+
+
+def write_json(p: str, data, mode: int = 0o600, indent: int | None = None) -> None:
     os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    if indent is None:
+        indent = indent_of(p)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".xsm-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=1)
+            json.dump(data, fh, ensure_ascii=False, indent=indent)
+            fh.write("\n")
         os.chmod(tmp, mode)
         os.replace(tmp, p)
     except BaseException:
