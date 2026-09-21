@@ -81,7 +81,7 @@ def cmd_list(args) -> int:
             flags.append("out-of-scope")
         if me and r.get("ref") == me.get("ref"):
             flags.append("you")
-        if row.get("native") == "hold":
+        if r.get("native") == "hold":
             flags.append("would be held")
         print("%-*s  [%s]  %-6s %-7s %-9s %s%s" % (
             width, addr, r.get("ref"), r.get("runtime"), r.get("state"),
@@ -103,6 +103,75 @@ def cmd_who(args) -> int:
     if me.get("name_source") and me["name_source"] != "user":
         print("this name was %s, not chosen by your user; it can change. "
               "The stable address is ref:%s" % (me["name_source"], me["ref"]))
+    return OK
+
+
+def _here(args) -> str:
+    """The folder a project command speaks for: --dir, else the session running
+    it (its own cwd, which the shell may have left), else this shell."""
+    if getattr(args, "dir", None):
+        return os.path.realpath(os.path.expanduser(args.dir))
+    me = registry.me()
+    return (me and me.get("cwd")) or os.getcwd()
+
+
+def _home_tilde(path: str) -> str:
+    home = os.path.expanduser("~")
+    return path.replace(home, "~", 1) if path.startswith(home) else path
+
+
+def _print_members(scope: dict, root: str) -> None:
+    for m in scope.get("members", []):
+        mine = os.path.realpath(m.get("root", "")) == root
+        print("  %s%s" % (_home_tilde(m.get("root", "")), "  (this project)" if mine else ""))
+
+
+def cmd_join(args) -> int:
+    here = _here(args)
+    try:
+        scope, added = config.join(args.project, here)
+    except ValueError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return USAGE
+    root = config.project_root(here)
+    print("%s project %s: %s" % ("joined" if added else "already in", args.project,
+                                 _home_tilde(root)))
+    print("members:")
+    _print_members(scope, root)
+    others = [m for m in scope["members"] if os.path.realpath(m["root"]) != root]
+    if not others:
+        print("no other project has joined %s yet. In a session there, run: /xsm-join %s"
+              % (args.project, args.project))
+        return OK
+    reachable = [r for r in registry.records()
+                 if r.get("state") == "live" and config.project_root(r.get("cwd") or "/") != root
+                 and config.scope_for({"cwd": here}, r)[0] == args.project]
+    if reachable:
+        print("sessions in the other projects you can now reach:")
+        for r in reachable:
+            print("  %s@%s [%s] %s" % (r.get("name"), r.get("alias"), r.get("ref"),
+                                       _home_tilde(r.get("cwd") or "")))
+    return OK
+
+
+def cmd_leave(args) -> int:
+    here = _here(args)
+    if config.leave(args.project, here):
+        print("left project %s: %s" % (args.project, _home_tilde(config.project_root(here))))
+        return OK
+    print("this project is not in %s" % args.project, file=sys.stderr)
+    return REFUSED
+
+
+def cmd_projects(args) -> int:
+    root = config.project_root(_here(args))
+    rows = config.projects()
+    if not rows:
+        print("no projects. Join one with: /xsm-join <name>  (or xsm join <name>)")
+        return OK
+    for scope in rows:
+        print(scope.get("id"))
+        _print_members(scope, root)
     return OK
 
 
@@ -415,6 +484,17 @@ def build_parser() -> argparse.ArgumentParser:
     who = sub.add_parser("who", help="identity of the session running this command")
     who.add_argument("--json", action="store_true")
     who.set_defaults(func=cmd_who)
+
+    for verb, helptext, func in (
+            ("join", "put this project in a named xsm project (both sides must join)", cmd_join),
+            ("leave", "take this project out of a named xsm project", cmd_leave)):
+        sp = sub.add_parser(verb, help=helptext)
+        sp.add_argument("project")
+        sp.add_argument("--dir", help="the folder to speak for (default: this session's)")
+        sp.set_defaults(func=func)
+    pj = sub.add_parser("projects", help="named xsm projects and their member folders")
+    pj.add_argument("--dir", help="mark membership relative to this folder")
+    pj.set_defaults(func=cmd_projects)
 
     homes = sub.add_parser("homes", help="declared CONFIG_DIR / CODEX_HOME list")
     homes.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])

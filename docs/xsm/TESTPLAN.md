@@ -246,6 +246,7 @@ cd $XSM_REPO && xsm list
 | 4-8 | 정지한 상대 | 4.3절 | `refused: only stopped sessions match` |
 | 4-9 | 검문 | 4.4절 | B에서 차단, `xsm held list`에 본문 보관 |
 | 4-10 | 고장 대비 | 관찰 터미널에서 `xsm selftest` | 피어 메시지 차단, 사람 입력 통과 |
+| 4-11 | 프로젝트 가입 | 4.5절 | 양쪽이 가입한 뒤에만 `delivered`, 탈퇴하면 다시 `refused` |
 
 ### 4.1 범위 밖 세션(4-6)
 
@@ -333,6 +334,18 @@ xsm held show <목록에 나온 id>      # 전체 기록. show다, how가 아니
 주입된 메시지에는 xsm 헤더가 없으므로 `from`에는 봉투에 적힌 발신 주소(`uds:/tmp/…`)가 남는다. 그것마저 없으면 `unknown`이다.
 
 **4-3에서 보류 창이 뜨면** 두 세션의 권한 모드가 다르고 수신 홈의 `crossSessionInbound`가 `accept`가 아니라는 뜻이다. 1장으로 돌아가 설정을 확인하거나, 두 세션을 같은 모드로 띄운다. `xsm list`에 미리 `would be held`로 표시된다.
+
+### 4.5 프로젝트 가입(4-11)
+
+범위 밖이던 C(`/tmp/xsm-outside`)와 A(시험용 저장소)를 이름 붙인 xsm 프로젝트로 묶는다. 4.1절의 C를 그대로 쓴다.
+
+1. **A에서만 가입한다.** A 세션에 `/xsm-join trial`. 출력에 `joined project trial: /private/tmp/xsm-trial`과 "no other project has joined trial yet"이 나온다. 가입 단위는 저장소 루트라서 같은 저장소의 B도 함께 들어간다.
+2. **한쪽만 가입한 상태로 보낸다.** A에서 `/xsm-send <C의 이름> 한쪽만 가입`. 기대: `refused: out of scope: …; /private/tmp/xsm-outside has not joined project trial (run /xsm-join trial there)`. 한 저장소가 다른 저장소를 끌어들일 수 없다는 확인이다.
+3. **C도 가입한다.** C 세션에 `/xsm-join trial`. 출력의 "sessions in the other projects you can now reach"에 A와 B가 보인다.
+4. **다시 보낸다.** A에게: `<C의 이름>에게 xsm send --kind task로 "네 작업 폴더 경로를 알려줘"를 보내고 결과를 알려줘`. 기대: A는 `delivered`, C 화면의 헤더에 `scope="trial"`, C가 따로 지시하지 않아도 답장한다.
+5. **탈퇴한다.** C에서 `/xsm-leave trial`, 이어서 A에서 2번을 다시 하면 `refused`로 돌아온다. `/xsm-projects`로 남은 구성원을 확인하고, A에서도 `/xsm-leave trial`로 정리한다.
+
+가입 기록은 `~/.xsm/config.json`의 `scopes`에 `{"root": …}`로 남는다. 손으로 쓴 범위와 이름이 같으면 가입이 거부된다.
 
 ## 5. 협업 과제
 
@@ -513,6 +526,7 @@ Codex에는 Claude처럼 "동료의 요청으로 다뤄라"는 자체 안내가 
 | 발견 | 두 홈의 세션이 서로 `live`로 보이고 주소를 지정할 수 있다 |
 | 전달 | 4-3, 4-4가 `delivered`로 닫힌다 |
 | 거부 | 4-6, 4-7, 4-8이 발신 단계에서 거부된다 |
+| 가입 | 4-11에서 양쪽 가입 뒤에만 전달되고, 한쪽 가입과 탈퇴 뒤에는 거부된다 |
 | 검문 | 4-9가 차단되고 본문이 보관된다 |
 | 고장 | 4-10이 통과한다 |
 | 협업 | 5-1과 5-2가 사람 개입 없이 이어지고 5-4가 동작한다 |

@@ -14,6 +14,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 
 from . import paths
@@ -90,6 +91,15 @@ def member_matches(member: dict, session: dict) -> bool:
         return False
     if member.get("home") and member["home"] not in (session.get("alias"), session.get("home")):
         return False
+    root = member.get("root")
+    if root:
+        # A project joined with `xsm join`: the folder itself and everything
+        # under it. A cwd glob cannot say this — `root*` would also match
+        # `root-other`.
+        cwd = os.path.realpath(session.get("cwd") or "")
+        root = os.path.realpath(os.path.expanduser(root))
+        if cwd != root and not cwd.startswith(root.rstrip("/") + "/"):
+            return False
     pattern = member.get("cwd")
     if not pattern:
         return True
@@ -101,6 +111,28 @@ def scope_for(a: dict, b: dict, cfg: dict | None = None):
     """Returns (scope_id, reason). scope_id is None when the two sessions may
     not talk; reason explains the verdict either way."""
     cfg = cfg or load()
+    scope, reason = _scope_for(a, b, cfg)
+    if scope:
+        return scope, reason
+    return None, reason + _half_joined(a, b, cfg)
+
+
+def _half_joined(a: dict, b: dict, cfg: dict) -> str:
+    """When one side has joined a project the other has not, say which and what
+    would open it — otherwise the refusal reads as if joining had no effect."""
+    def joined(session):
+        return {s.get("id") for s in cfg.get("scopes", [])
+                if any(m.get("root") and member_matches(m, session) for m in s.get("members", []))}
+    ja, jb = joined(a), joined(b)
+    notes = []
+    for mine, other in ((ja - jb, b), (jb - ja, a)):
+        for name in sorted(mine):
+            notes.append("%s has not joined project %s (run /xsm-join %s there)"
+                         % (project_root(other.get("cwd") or "/"), name, name))
+    return "; " + "; ".join(notes) if notes else ""
+
+
+def _scope_for(a: dict, b: dict, cfg: dict):
     for scope in cfg.get("scopes", []):
         members = scope.get("members", [])
         if any(member_matches(m, a) for m in members) and \
@@ -121,3 +153,69 @@ def scope_for(a: dict, b: dict, cfg: dict | None = None):
     inside, outside = (ca, cb) if ra else (cb, ca)
     return None, ("%s is in a git repository and %s is not, and no explicit scope covers both"
                   % (inside, outside))
+
+
+# --- projects: scopes declared from a session with `xsm join` ------------------
+#
+# A project is a named scope whose members are folders. Joining adds the
+# caller's project folder (its git root, or the folder itself outside a repo).
+# Two folders talk only when each has joined the same name, so consent is
+# given once per side: one side joining cannot pull the other in.
+
+PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def project_root(cwd: str) -> str:
+    return git_root(cwd) or os.path.realpath(cwd)
+
+
+def _raw() -> dict:
+    return paths.read_json(paths.path(CONFIG), {}) or {}
+
+
+def _save(raw: dict) -> None:
+    paths.write_json(paths.path(CONFIG), raw, mode=0o644)
+
+
+def projects() -> list:
+    """Scopes that `xsm join` manages, i.e. those whose members are folders."""
+    return [s for s in load().get("scopes", []) if any(m.get("root") for m in s.get("members", []))]
+
+
+def join(name: str, cwd: str):
+    """Add cwd's project folder to project `name`. Returns (scope, added)."""
+    if not PROJECT_NAME_RE.match(name or ""):
+        raise ValueError("project names are letters, digits, '.', '_' and '-' (at most 64)")
+    root = project_root(cwd)
+    raw = _raw()
+    scopes = raw.setdefault("scopes", [])
+    scope = next((s for s in scopes if s.get("id") == name), None)
+    if scope is None:
+        scope = {"id": name, "members": []}
+        scopes.append(scope)
+    elif scope.get("members") and not any(m.get("root") for m in scope["members"]):
+        # A hand-written scope with the same id: joining would quietly widen it.
+        raise ValueError("scope %r is written by hand in config.json; edit it there" % name)
+    if any(os.path.realpath(m.get("root", "")) == root for m in scope["members"]):
+        return scope, False
+    scope["members"].append({"root": root})
+    _save(raw)
+    return scope, True
+
+
+def leave(name: str, cwd: str) -> bool:
+    root = project_root(cwd)
+    raw = _raw()
+    for scope in raw.get("scopes", []):
+        if scope.get("id") != name:
+            continue
+        kept = [m for m in scope.get("members", [])
+                if not m.get("root") or os.path.realpath(m["root"]) != root]
+        if len(kept) == len(scope.get("members", [])):
+            return False
+        scope["members"] = kept
+        if not kept:
+            raw["scopes"] = [s for s in raw["scopes"] if s is not scope]
+        _save(raw)
+        return True
+    return False

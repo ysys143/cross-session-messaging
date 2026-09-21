@@ -437,6 +437,56 @@ class CodexReceiverNameTest(TempState):
         self.assertEqual(record["receiver"], "reviewer")
 
 
+class ProjectJoinTest(TempState):
+    """Sessions in different projects talk once both projects have joined the
+    same xsm project by name. One side joining is not enough: that would let a
+    project pull another in without its consent."""
+
+    def _dirs(self):
+        a, b = os.path.join(self.tmp, "proj-a"), os.path.join(self.tmp, "proj-b")
+        os.makedirs(os.path.join(a, "sub"))
+        os.makedirs(b)
+        return a, b
+
+    def test_both_sides_must_join(self):
+        from xsm import config
+        a, b = self._dirs()
+        sa, sb = {"cwd": os.path.join(a, "sub")}, {"cwd": b}
+        self.assertIsNone(config.scope_for(sa, sb)[0])
+        config.join("demo", a)
+        scope, reason = config.scope_for(sa, sb)
+        self.assertIsNone(scope, "one side alone must not open it")
+        self.assertIn("%s has not joined project demo" % os.path.realpath(b), reason)
+        config.join("demo", b)
+        self.assertEqual(config.scope_for(sa, sb)[0], "demo")
+
+    def test_join_is_idempotent_and_leave_closes_it(self):
+        from xsm import config
+        a, b = self._dirs()
+        self.assertTrue(config.join("demo", a)[1])
+        self.assertFalse(config.join("demo", a)[1])
+        config.join("demo", b)
+        self.assertTrue(config.leave("demo", b))
+        self.assertIsNone(config.scope_for({"cwd": a}, {"cwd": b})[0])
+        self.assertTrue(config.leave("demo", a))
+        self.assertEqual(config.projects(), [])
+
+    def test_root_does_not_match_a_sibling_prefix(self):
+        from xsm import config
+        a, _ = self._dirs()
+        self.assertFalse(config.member_matches({"root": a}, {"cwd": a + "-other"}))
+
+    def test_bad_name_and_hand_written_scope_are_refused(self):
+        from xsm import config, paths
+        a, _ = self._dirs()
+        with self.assertRaises(ValueError):
+            config.join("../x", a)
+        paths.write_json(paths.path(config.CONFIG), {"scopes": [
+            {"id": "manual", "members": [{"cwd": "/somewhere/*"}]}]}, mode=0o644)
+        with self.assertRaises(ValueError):
+            config.join("manual", a)
+
+
 class CommandInstallTest(TempState):
     """Slash commands and the skill go in with the hooks, carry an absolute
     launcher path so they never depend on PATH, and come out again without

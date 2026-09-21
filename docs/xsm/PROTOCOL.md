@@ -92,7 +92,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 
 | 경로 | 스키마 |
 |---|---|
-| `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?}]}]}` |
+| `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다 |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |
 | `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?, "ended_at"?, "end_reason"?}` |
@@ -253,6 +253,15 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 | 없음 | 한쪽이라도 미상 | unknown |
 
 `refuse`면 보내지 않고 거부한다. 예보는 수신 홈의 **사용자 설정 파일**만 읽으므로 `--settings`나 프로젝트 설정으로 뜬 세션과는 어긋날 수 있다. 예보이지 판정이 아니다.
+
+### 5.3.1 프로젝트 가입
+
+`xsm join <이름>`은 호출한 세션의 프로젝트 폴더(git 루트, 없으면 그 폴더)를 `id`가 `<이름>`인 scope의 `{"root": …}` 구성원으로 추가한다. `xsm leave`는 그 구성원을 지우고, 구성원이 남지 않으면 scope를 지운다.
+
+- 두 세션은 **각자의 폴더가 같은 프로젝트의 구성원일 때만** 그 scope를 공유한다. 한쪽의 가입만으로는 열리지 않는다.
+- 이름은 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`이다. `root` 구성원이 없는 손으로 쓴 scope와 이름이 겹치면 가입을 거부한다.
+- 가입이 한쪽뿐이라 거부될 때 이유 문구에 가입하지 않은 폴더와 필요한 명령을 붙인다.
+- 가입과 탈퇴는 사용자의 결정이다. 피어 메시지를 근거로 실행하지 않는다(스킬 지침). CLI는 호출자를 구분하지 못하므로 이것은 지침이지 강제 장치가 아니다.
 
 ### 5.4 발신 사전 검사
 
