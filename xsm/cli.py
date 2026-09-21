@@ -50,11 +50,15 @@ def cmd_list(args) -> int:
     if not rows:
         print("no sessions registered. Install the hooks first: xsm install --help")
         return OK
+    if not me:
+        # Run from a plain terminal there is no "us" to be in scope with, and
+        # saying "out-of-scope" about every row would read as a verdict.
+        print("(this terminal is not a registered session, so scope is not shown)")
     width = max(len("%s@%s" % (r.get("name"), r.get("alias"))) for r in rows)
     for r in rows:
         addr = "%s@%s" % (r.get("name"), r.get("alias"))
         flags = [] if r.get("registered") else ["unregistered"]
-        if not r.get("scope") and r.get("scope_reason") != "self":
+        if me and not r.get("scope") and r.get("scope_reason") != "self":
             flags.append("out-of-scope")
         if me and r.get("ref") == me.get("ref"):
             flags.append("you")

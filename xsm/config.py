@@ -111,8 +111,13 @@ def scope_for(a: dict, b: dict, cfg: dict | None = None):
     ra, rb = git_root(a.get("cwd") or ""), git_root(b.get("cwd") or "")
     if ra and ra == rb:
         return "repo:" + os.path.basename(ra), "same git repository"
+    ca, cb = os.path.realpath(a.get("cwd") or "a"), os.path.realpath(b.get("cwd") or "b")
     if not ra and not rb:
-        ca, cb = os.path.realpath(a.get("cwd") or "a"), os.path.realpath(b.get("cwd") or "b")
         if ca == cb:
             return "dir:" + os.path.basename(ca), "same directory"
-    return None, "different repositories and no explicit scope"
+        return None, "different directories, neither in a git repository, and no explicit scope"
+    if ra and rb:
+        return None, "different git repositories and no explicit scope"
+    inside, outside = (ca, cb) if ra else (cb, ca)
+    return None, ("%s is in a git repository and %s is not, and no explicit scope covers both"
+                  % (inside, outside))

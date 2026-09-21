@@ -226,7 +226,7 @@ CLAUDE_CONFIG_DIR=~/.claude-5 claude --name reviewer
 cd $XSM_REPO && xsm list
 ```
 
-기대 출력: 두 세션이 `live`로 보이고, 서로 `out-of-scope`가 아니며, `would be held` 표시가 없다.
+기대 출력: 두 세션이 `live`로 보이고 `would be held` 표시가 없다. 관찰 터미널은 등록된 세션이 아니므로 "(this terminal is not a registered session, so scope is not shown)"이 먼저 나오고 범위 표시는 생략된다. 범위는 세션 안에서 `xsm list`를 실행할 때 상대적으로 계산된다.
 
 ## 4. 통신 확인
 
@@ -239,13 +239,94 @@ cd $XSM_REPO && xsm list
 | 4-3 | 첫 메시지 | A에게: `reviewer에게 "핑, 받으면 ACK만 답해"를 xsm send로 보내고 결과를 알려줘` | A: `delivered`, B 화면에 `[xsm]` 발신 표시와 함께 메시지 도착 |
 | 4-4 | 답장 | B에게: `방금 받은 메시지에 xsm send --reply-to로 답장해` | A 화면에 답장 도착 |
 | 4-5 | 전달 기록 | 관찰 터미널: `xsm ledger` | 두 메시지가 `delivered` |
-| 4-6 | 범위 밖 | 관찰 터미널에서 `/tmp/xsm-outside` 폴더를 만들고 거기서 세션 C를 띄운 뒤, A에게 C로 보내게 한다 | 발신 단계에서 `refused: out of scope` |
-| 4-7 | 이름 충돌 | B를 종료하고 `--name builder`로 다시 띄운 뒤 A에게 `builder`로 보내게 한다 | `refused: 2 sessions match` + 후보 목록 |
-| 4-8 | 정지한 상대 | B 세션을 종료한 뒤 A에게 보내게 한다 | `refused: only stopped sessions match` |
-| 4-9 | 검문 | 관찰 터미널: `python3 tools/spike_s1_send.py send <B의 소켓> --mode prompting --probe raw --no-reply --body "헤더 없는 주입"` | B에서 차단, `xsm held list`에 본문 보관 |
-| 4-10 | 고장 대비 | 관찰 터미널: `xsm selftest` | 피어 메시지 차단, 사람 입력 통과 |
+| 4-6 | 범위 밖 | 4.1절 | 발신 단계에서 `refused: out of scope …` |
+| 4-7 | 이름 충돌 | 4.2절 | `refused: 2 sessions match` + 후보 목록 |
+| 4-8 | 정지한 상대 | 4.3절 | `refused: only stopped sessions match` |
+| 4-9 | 검문 | 4.4절 | B에서 차단, `xsm held list`에 본문 보관 |
+| 4-10 | 고장 대비 | 관찰 터미널에서 `xsm selftest` | 피어 메시지 차단, 사람 입력 통과 |
 
-B의 소켓 경로는 `xsm list --json`의 `socket` 필드에서 얻는다.
+### 4.1 범위 밖 세션(4-6)
+
+**세션 C를 띄운다.** 네 번째 터미널을 열고, 시험용 저장소 **밖의** 폴더에서 A와 같은 홈으로 띄운다.
+
+```bash
+mkdir -p /tmp/xsm-outside
+cd /tmp/xsm-outside
+CLAUDE_CONFIG_DIR=~/.claude-4 claude --name outsider
+```
+
+C에 프롬프트를 한 번 넣어 등록시킨다(예: `준비됐으면 ready라고만 답해`). 관찰 터미널에서 확인한다.
+
+```bash
+xsm list --all
+```
+
+`outsider@claude-4`가 보이고 `out-of-scope` 표시가 붙어야 한다. A·B와 달리 시험용 저장소 밖이기 때문이다.
+
+**A에게 보내게 한다.** A 세션에 이렇게 넣는다.
+
+```
+outsider에게 xsm send로 "범위 밖 시험"이라고 보내고, 명령의 출력을 그대로 보여줘.
+```
+
+기대: 메시지가 나가지 않고 `refused: out of scope: …`가 나온다. 이유 문구는 상황에 따라 다르다(둘 다 git 저장소가 아님 / 서로 다른 저장소 / 한쪽만 저장소). `xsm ledger`에 이 메시지는 남지 않는다.
+
+C는 4.2절에서도 쓰므로 켜 둔다.
+
+### 4.2 이름 충돌(4-7)
+
+C의 이름을 B와 같게 만든다. C 터미널에서 세션을 끝내고 같은 폴더에서 다시 띄운다.
+
+```bash
+# C 터미널에서: /exit 로 종료한 뒤
+CLAUDE_CONFIG_DIR=~/.claude-4 claude --name reviewer
+```
+
+프롬프트를 한 번 넣어 등록시킨다. 이제 `reviewer`라는 이름이 둘이다(B는 `claude-5`, C는 `claude-4`).
+
+A에게 이렇게 넣는다.
+
+```
+reviewer에게 xsm send로 "이름 충돌 시험"이라고 보내고 출력을 그대로 보여줘.
+```
+
+기대: `refused: 2 sessions match 'reviewer'`와 두 후보(`reviewer@claude-5`, `reviewer@claude-4 [ref]`). 이어서 한정한 주소로 다시 보내게 한다.
+
+```
+그럼 reviewer@claude-5 로 다시 보내줘.
+```
+
+기대: `delivered`. 확인이 끝나면 C를 종료한다(`/exit`).
+
+### 4.3 정지한 상대(4-8)
+
+B 터미널에서 `/exit`로 종료한 뒤, A에게 넣는다.
+
+```
+reviewer@claude-5 에게 xsm send로 "정지 확인"이라고 보내고 출력을 보여줘.
+```
+
+기대: `refused: only stopped sessions match 'reviewer@claude-5'`와 후보 목록. 관찰 터미널에서 `xsm list`에는 B가 보이지 않고 `xsm list --all`에는 `stale`로 보인다. 확인 후 B를 다시 띄운다(3장과 같은 명령, 프롬프트 한 번).
+
+### 4.4 헤더 없는 주입 차단(4-9)
+
+xsm을 거치지 않고 Claude의 세션 소켓에 직접 밀어 넣어, 수신 훅이 막는지 본다. 관찰 터미널에서 한다.
+
+```bash
+cd $XSM_REPO
+B=$(xsm list --json | python3 -c "
+import json,sys
+print([r['socket'] for r in json.load(sys.stdin) if r['name']=='reviewer'][0])")
+echo $B
+python3 tools/spike_s1_send.py send $B --mode prompting --probe raw --no-reply --body "헤더 없는 주입"
+```
+
+기대: B 화면에 `UserPromptSubmit operation blocked by hook: xsm: peer message without an xsm header (kept: xsm held list)`가 뜨고 본문은 전달되지 않는다. 보관된 본문을 확인한다.
+
+```bash
+xsm held list
+xsm held show <목록에 나온 id>
+```
 
 **4-3에서 보류 창이 뜨면** 두 세션의 권한 모드가 다르고 수신 홈의 `crossSessionInbound`가 `accept`가 아니라는 뜻이다. 1장으로 돌아가 설정을 확인하거나, 두 세션을 같은 모드로 띄운다. `xsm list`에 미리 `would be held`로 표시된다.
 

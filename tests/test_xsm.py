@@ -4,6 +4,8 @@ scope, the hook's fallback, and the settings merge.
 Run: python3 -m unittest discover -s tests -v
 Everything here works on a temporary XSM_HOME; no session is contacted.
 """
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -345,6 +347,27 @@ class LauncherTest(TempState):
         out = self._run(copied, "list")
         self.assertEqual(out.returncode, 4)
         self.assertIn("no package at", out.stderr)
+
+
+class ListFromAPlainTerminalTest(TempState):
+    """`xsm list` run outside any session has no "us" to compare against, so it
+    must not label every row out-of-scope."""
+
+    def test_no_scope_verdict_without_a_session(self):
+        from xsm import cli, paths, registry
+        home = os.path.join(self.tmp, "homes", "claude-4")
+        os.makedirs(os.path.join(home, "sessions"), exist_ok=True)
+        registry.upsert("claude", home, "s1", os.getpid(), self.tmp, name="solo")
+        paths.write_json(os.path.join(home, "sessions", "%d.json" % os.getpid()),
+                         {"name": "solo", "sessionId": "s1", "messagingSocketPath": ""})
+        for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET"):
+            os.environ.pop(var, None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["list", "--all"])
+        printed = out.getvalue()
+        self.assertIn("not a registered session", printed)
+        self.assertNotIn("out-of-scope", printed)
 
 
 if __name__ == "__main__":
