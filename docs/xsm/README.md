@@ -16,6 +16,7 @@ python3 -m xsm doctor
 - 매번 `<파일>.xsm-backup-<시각>` 백업을 남기고, 쓴 뒤 다시 파싱해 깨졌으면 백업으로 되돌린다.
 - 훅 명령에는 **설치 시점의 파이썬 절대 경로**가 박힌다. 훅이 뜨지 못하면 검문이 통째로 열리기 때문이다(S8-g2).
 - Codex는 첫 세션에서 훅 신뢰를 한 번 승인해야 한다. 승인 전에는 훅이 실행되지 않는다. 설치기는 안내만 하고 우회 옵션을 쓰지 않는다.
+- Codex 훅은 첫 프롬프트부터 돈다. 그래서 훅이 신뢰된 홈에서는 `xsm list`·`xsm send`가 열린 Codex 스레드를 대신 등록한다. `/rename`만 한 세션에도 바로 보낼 수 있고, 그 메시지가 첫 프롬프트가 된다. 프롬프트도 `/rename`도 없는 Codex는 스레드가 없어서 주소가 없다.
 
 ```bash
 python3 -m xsm install --claude-home ~/.claude-4 --python 3.13       # uv python find로 해석
