@@ -36,5 +36,6 @@
 | [0007](0007-remote-transport-and-trust.md) | 원격 통신과 신뢰 모델 | Proposed | G4 |
 | [0008](0008-session-naming-and-namespace.md) | 세션 이름, 주소, 네임스페이스 | Proposed | G1, G2, G5 |
 | [0009](0009-session-trust-handshake.md) | 세션 간 신뢰 수립(핸드셰이크) | Proposed | G1, G2, G4, G5 |
+| [0010](0010-workers.md) | 워커를 띄우고 끝내는 일의 경계 | Accepted | C1 |
 
 새 ADR은 [TEMPLATE.md](TEMPLATE.md)를 복사해 만든다.
