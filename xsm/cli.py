@@ -264,8 +264,17 @@ def cmd_install(args) -> int:
                 "kept-existing": "left alone: this home already has its own statusLine",
             }[outcome])
         if runtime == "codex":
+            if not args.no_commands:
+                state, _ = install.install_skill(home)
+                print("  skill: %s" % {"linked": "linked to the repo",
+                                        "copy-current": "a copy is in place and matches the repo",
+                                        "copy-stale": "a copy has fallen behind the repo",
+                                        "nested-link": "a link sits inside the existing directory",
+                                        "foreign": "something else is at skills/xsm; left alone"
+                                        }.get(state, state))
             print("  Codex asks you to trust hooks once, at the next session start. "
-                  "Until you do, the hook does not run.")
+                  "Until you do, the hook does not run. Codex has no SessionEnd, so a "
+                  "stopped Codex session always reads as stale.")
     return USAGE if failed else OK
 
 
@@ -274,6 +283,8 @@ def cmd_uninstall(args) -> int:
               [(h, "codex") for h in (args.codex_home or [])]
     for home, runtime in targets or [(h["path"], h["runtime"]) for h in config.homes()]:
         result = install.remove(home, runtime)
+        if runtime == "codex" and install.remove_skill(home):
+            print("%s: unlinked the skill" % home)
         if runtime == "claude":
             gone = install.remove_commands(home)
             if gone:

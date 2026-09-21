@@ -9,6 +9,12 @@ description: Talk to other Claude Code or Codex sessions on this machine — lis
 a hook in each session records where it is, and the CLI writes to the
 receiving runtime's native path.
 
+In Claude Code the commands below also exist as `/xsm-list`, `/xsm-who`,
+`/xsm-inbox`, `/xsm-doctor` and `/xsm-send`. In Codex there are no slash
+commands: run `xsm` from the shell. Sending from Codex needs a shell that can
+reach outside the sandbox (full access, or approve the command when asked) —
+the inbox socket and the queue database are both outside it.
+
 ## Finding out who is there
 
 ```bash
