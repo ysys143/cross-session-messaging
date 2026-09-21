@@ -198,6 +198,24 @@ def cmd_install(args) -> int:
             print("already installed in %s (nothing changed)" % result["file"])
         else:
             print("installed into %s (backup: %s)" % (result["file"], result.get("backup", "none")))
+        if runtime == "claude" and not args.no_commands:
+            written = install.install_commands(home)
+            state, detail = install.install_skill(home)
+            print("  slash commands: %s" % ", ".join(
+                "/" + os.path.basename(w)[:-3] for w in written) if written else
+                "  slash commands: none written")
+            notes = {
+                "linked": "linked to the repo",
+                "copy-current": "a copy is in place and matches the repo",
+                "copy-stale": "a copy has fallen behind; refresh it with\n"
+                              "           cp %s %s" % (
+                                  os.path.join(install.REPO, "skills", "xsm", "SKILL.md"),
+                                  detail),
+                "nested-link": "a link sits inside the existing directory (%s);\n"
+                               "           remove it: rm %s" % (detail, detail),
+                "foreign": "something else is at skills/xsm; left alone",
+            }
+            print("  skill: %s" % notes.get(state, state))
         if runtime == "codex":
             print("  Codex asks you to trust hooks once, at the next session start. "
                   "Until you do, the hook does not run.")
@@ -209,6 +227,12 @@ def cmd_uninstall(args) -> int:
               [(h, "codex") for h in (args.codex_home or [])]
     for home, runtime in targets or [(h["path"], h["runtime"]) for h in config.homes()]:
         result = install.remove(home, runtime)
+        if runtime == "claude":
+            gone = install.remove_commands(home)
+            if gone:
+                print("%s: removed %d slash command file(s)" % (home, gone))
+            if install.remove_skill(home):
+                print("%s: unlinked the skill" % home)
         print("%s: removed %s xsm hook group(s)%s" % (
             result.get("file"), result.get("removed", 0),
             "" if not result.get("error") else " (%s)" % result["error"]))
@@ -326,6 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--python", help="interpreter for the hooks: an absolute path, or a version "
                                      "like 3.12 resolved via `uv python find`")
     ins.add_argument("--dry-run", action="store_true")
+    ins.add_argument("--no-commands", action="store_true",
+                     help="hooks only: do not write the slash commands or link the skill")
     ins.set_defaults(func=cmd_install)
 
     un = sub.add_parser("uninstall", help="remove only the hook groups xsm added")

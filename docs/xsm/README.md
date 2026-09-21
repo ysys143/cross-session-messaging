@@ -30,6 +30,20 @@ python3 -m xsm install --claude-home ~/.claude-4 --python /opt/homebrew/bin/pyth
 python3 -m xsm uninstall --claude-home ~/.claude-3
 ```
 
+## 세션 안에서 (슬래시 명령)
+
+설치가 홈에 명령 파일을 넣는다. 세션에서 그대로 쓴다.
+
+| 명령 | 하는 일 |
+|---|---|
+| `/xsm-list` | 지금 메시지를 보낼 수 있는 세션 목록 |
+| `/xsm-who` | 이 세션의 주소 |
+| `/xsm-send <대상> <내용>` | 보내고 결과를 그대로 보고 |
+| `/xsm-inbox` | 최근 메시지와 보류된 것 |
+| `/xsm-doctor` | 설치 상태와 알려진 한계 |
+
+읽기만 하는 명령은 출력을 그대로 세션에 넣는다. `/xsm-send`는 인자를 셸 문자열로 이어 붙이지 않고 모델이 인자로 넘기게 해, 본문에 따옴표나 특수문자가 있어도 안전하다.
+
 ## 쓰기
 
 ```bash

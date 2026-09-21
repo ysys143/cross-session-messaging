@@ -157,37 +157,33 @@ diff ~/.claude-4/settings.json.xsm-backup-* ~/.claude-4/settings.json
 grep -n '#xsm-hook' ~/.claude-4/settings.json
 ```
 
-### 2.2 스킬
+### 2.2 스킬과 슬래시 명령
 
-에이전트가 명령을 알게 하려면 홈마다 스킬을 둔다.
+`install`이 훅과 함께 넣는다. 따로 복사할 것이 없다.
 
-```bash
-for h in ~/.claude-4 ~/.claude-5; do
-  mkdir -p $h/skills/xsm
-  cp $XSM_REPO/skills/xsm/SKILL.md $h/skills/xsm/SKILL.md
-done
-```
+- `<홈>/commands/xsm-*.md` — 세션에서 바로 쓰는 명령 `/xsm-list`, `/xsm-who`, `/xsm-inbox`, `/xsm-doctor`, `/xsm-send`. 파일에는 저장소의 `bin/xsm` 절대 경로가 박히므로 PATH에 의존하지 않는다.
+- `<홈>/skills/xsm` — 저장소의 스킬로 가는 심볼릭 링크. 에이전트가 주소 문법과 결과 읽는 법을 알게 된다.
 
-저장소를 고치면 바로 반영되게 하려면 복사 대신 심볼릭 링크를 쓴다.
+같은 이름의 파일이 이미 있으면 건드리지 않고 건너뛴다. 훅만 넣고 싶으면 `--no-commands`를 준다.
+
+확인:
 
 ```bash
-ln -sfn $XSM_REPO/skills/xsm $h/skills/xsm
+ls ~/.claude-4/commands/xsm-*.md ~/.claude-5/commands/xsm-*.md
+ls -l ~/.claude-4/skills/xsm
 ```
 
-스킬은 `xsm` 명령이 PATH에 있다고 가정한다. 세션에서 쓸 수 있게 해 둔다.
+명령을 쓰려면 세션을 다시 띄워야 한다(3장). 세션 안에서 `/xsm-list`를 입력하면 등록된 세션 목록이 나온다.
+
+사람이 터미널에서 직접 쓰려면 실행 파일을 PATH에 둔다. 선택 사항이다.
 
 ```bash
 mkdir -p ~/.local/bin
-ln -sfn $XSM_REPO/bin/xsm ~/.local/bin/xsm        # 또는 PATH에 $XSM_REPO/bin 추가
-```
-
-링크를 걸었으면 **여기서 바로 확인한다.** 세션 안에서 처음 쓰다가 실패하면 원인을 찾기 번거롭다.
-
-```bash
+ln -sfn $XSM_REPO/bin/xsm ~/.local/bin/xsm
 which xsm && xsm list
 ```
 
-`xsm: no package at …`가 나오면 링크가 저장소의 `bin/xsm`을 가리키고 있지 않다. `ls -l $(which xsm)`으로 확인한다. `ModuleNotFoundError: No module named 'xsm'`가 나오면 예전 버전의 실행 스크립트다. 저장소를 최신으로 맞춘다.
+`xsm: no package at …`가 나오면 링크가 저장소의 `bin/xsm`을 가리키고 있지 않다. `ls -l $(which xsm)`으로 확인한다.
 
 ## 3. 세션 열기
 
@@ -234,8 +230,8 @@ cd $XSM_REPO && xsm list
 
 | # | 항목 | 지시 | 기대 |
 |---|---|---|---|
-| 4-1 | 자기 확인 | A에게: `xsm who를 실행해서 결과만 보여줘` | `builder@claude-4 [ref] claude …` |
-| 4-2 | 상대 찾기 | A에게: `xsm list로 누가 있는지 보여줘` | `reviewer@claude-5`가 `live`로 보임 |
+| 4-1 | 자기 확인 | A에서 `/xsm-who` | `builder@claude-4 [ref] claude …` |
+| 4-2 | 상대 찾기 | A에서 `/xsm-list` | `reviewer@claude-5`가 `live`로 보임 |
 | 4-3 | 첫 메시지 | A에게: `reviewer에게 "핑, 받으면 ACK만 답해"를 xsm send로 보내고 결과를 알려줘` | A: `delivered`, B 화면에 `[xsm]` 발신 표시와 함께 메시지 도착 |
 | 4-4 | 답장 | B에게: `방금 받은 메시지에 xsm send --reply-to로 답장해` | A 화면에 답장 도착 |
 | 4-5 | 전달 기록 | 관찰 터미널: `xsm ledger` | 두 메시지가 `delivered` |

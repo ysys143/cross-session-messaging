@@ -410,5 +410,83 @@ class HeldRecordTest(TempState):
         self.assertEqual(record["body"], "raw")
 
 
+class CommandInstallTest(TempState):
+    """Slash commands and the skill go in with the hooks, carry an absolute
+    launcher path so they never depend on PATH, and come out again without
+    touching anything we did not write."""
+
+    def _home(self):
+        home = os.path.join(self.tmp, "claude-cmd")
+        os.makedirs(home, exist_ok=True)
+        return home
+
+    def test_commands_are_written_with_an_absolute_launcher(self):
+        from xsm import install
+        home = self._home()
+        written = install.install_commands(home)
+        self.assertTrue(written)
+        body = open(os.path.join(home, "commands", "xsm-list.md")).read()
+        self.assertIn(install.launcher(), body)
+        self.assertNotIn("{{XSM}}", body)
+        self.assertIn(install.FILE_MARKER, body)
+
+    def test_the_skill_is_linked_and_unlinked(self):
+        from xsm import install
+        home = self._home()
+        self.assertEqual(install.install_skill(home)[0], "linked")
+        link = os.path.join(home, "skills", "xsm")
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(install.install_skill(home)[0], "linked")      # idempotent
+        self.assertTrue(install.remove_skill(home))
+        self.assertFalse(os.path.exists(link))
+
+    def test_a_foreign_command_of_the_same_name_survives(self):
+        from xsm import install
+        home = self._home()
+        os.makedirs(os.path.join(home, "commands"), exist_ok=True)
+        target = os.path.join(home, "commands", "xsm-list.md")
+        open(target, "w").write("---\ndescription: mine\n---\nkeep me\n")
+        install.install_commands(home)
+        self.assertEqual(open(target).read(), "---\ndescription: mine\n---\nkeep me\n")
+        install.remove_commands(home)
+        self.assertTrue(os.path.exists(target))
+
+    def test_a_foreign_skill_directory_is_left_alone(self):
+        from xsm import install
+        home = self._home()
+        existing = os.path.join(home, "skills", "xsm")
+        os.makedirs(existing)
+        self.assertEqual(install.install_skill(home)[0], "foreign")
+        self.assertFalse(install.remove_skill(home))
+        self.assertTrue(os.path.isdir(existing))
+
+    def test_a_copy_is_reported_as_current_or_stale(self):
+        """Following an older instruction left people with a copied SKILL.md;
+        install has to say when that copy has fallen behind."""
+        from xsm import install
+        home = self._home()
+        skill_dir = os.path.join(home, "skills", "xsm")
+        os.makedirs(skill_dir)
+        ours = os.path.join(install.REPO, "skills", "xsm", "SKILL.md")
+        shutil.copy2(ours, os.path.join(skill_dir, "SKILL.md"))
+        self.assertEqual(install.skill_state(home)[0], "copy-current")
+        open(os.path.join(skill_dir, "SKILL.md"), "a").write("\nstale line\n")
+        state, detail = install.skill_state(home)
+        self.assertEqual(state, "copy-stale")
+        self.assertTrue(detail.endswith("SKILL.md"))
+
+    def test_a_link_nested_inside_the_directory_is_reported(self):
+        """`ln -sfn repo/skills/xsm <home>/skills/xsm` puts the link *inside* an
+        existing directory; the old instructions did exactly that."""
+        from xsm import install
+        home = self._home()
+        skill_dir = os.path.join(home, "skills", "xsm")
+        os.makedirs(skill_dir)
+        os.symlink(os.path.join(install.REPO, "skills", "xsm"), os.path.join(skill_dir, "xsm"))
+        state, detail = install.skill_state(home)
+        self.assertEqual(state, "nested-link")
+        self.assertTrue(detail.endswith("xsm/xsm"))
+
+
 if __name__ == "__main__":
     unittest.main()

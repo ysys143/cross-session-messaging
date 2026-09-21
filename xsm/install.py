@@ -13,6 +13,7 @@ starts under the wrong python silently stops gating (S8-g2).
 from __future__ import annotations
 
 import datetime
+import glob
 import json
 import os
 import shutil
@@ -22,6 +23,8 @@ import sys
 from . import config, paths
 
 MARKER = "#xsm-hook"
+FILE_MARKER = "<!-- xsm-managed -->"        # commands we wrote, and may remove
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit")
 CODEX_EVENTS = ("SessionStart", "UserPromptSubmit")
 
@@ -103,6 +106,107 @@ def _backup(target: str) -> str:
         suffix += 1
     shutil.copy2(target, candidate)
     return candidate
+
+
+def launcher() -> str:
+    """The absolute `xsm` a slash command should run. The launcher in the repo
+    works wherever it is called from, so commands never depend on PATH."""
+    return os.path.join(REPO, "bin", "xsm")
+
+
+def command_files() -> list:
+    pattern = os.path.join(REPO, "commands", "xsm-*.md")
+    return sorted(glob.glob(pattern))
+
+
+def install_commands(home: str) -> list:
+    """Write the slash commands into a Claude home with the launcher path filled
+    in. Written rather than symlinked because the path has to be substituted."""
+    target_dir = os.path.join(home, "commands")
+    os.makedirs(target_dir, exist_ok=True)
+    written = []
+    for source in command_files():
+        body = open(source, encoding="utf-8").read().replace("{{XSM}}", launcher())
+        target = os.path.join(target_dir, os.path.basename(source))
+        existing = _read_text(target)
+        if existing is not None and FILE_MARKER not in existing:
+            continue                        # someone else's command of the same name
+        if existing != body:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(body)
+        written.append(target)
+    return written
+
+
+def skill_state(home: str) -> tuple:
+    """(state, detail) for the skill in this home.
+
+    linked        our symlink, in step with the repo
+    copy-current  a copied SKILL.md identical to ours
+    copy-stale    a copied SKILL.md that has fallen behind
+    nested-link   a link made *inside* an existing directory (ln -sfn into a dir)
+    foreign       something else lives there; we leave it alone
+    absent        nothing there yet
+    """
+    target = os.path.join(home, "skills", "xsm")
+    source = os.path.join(REPO, "skills", "xsm")
+    if os.path.islink(target):
+        return ("linked" if os.path.realpath(target) == os.path.realpath(source)
+                else "foreign"), target
+    if not os.path.exists(target):
+        return "absent", target
+    nested = os.path.join(target, "xsm")
+    if os.path.islink(nested) and os.path.realpath(nested) == os.path.realpath(source):
+        return "nested-link", nested
+    copied = os.path.join(target, "SKILL.md")
+    ours = os.path.join(source, "SKILL.md")
+    if os.path.isfile(copied):
+        try:
+            same = open(copied, encoding="utf-8").read() == open(ours, encoding="utf-8").read()
+        except OSError:
+            same = False
+        return ("copy-current" if same else "copy-stale"), copied
+    return "foreign", target
+
+
+def install_skill(home: str) -> tuple:
+    """Link the skill so the session knows the commands exist. A link keeps it in
+    step with the repo; anything already there that is not ours is left be."""
+    state, detail = skill_state(home)
+    if state != "absent":
+        return state, detail
+    target = os.path.join(home, "skills", "xsm")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    os.symlink(os.path.join(REPO, "skills", "xsm"), target)
+    return "linked", target
+
+
+def remove_commands(home: str) -> int:
+    removed = 0
+    for source in command_files():
+        target = os.path.join(home, "commands", os.path.basename(source))
+        body = _read_text(target)
+        if body is not None and FILE_MARKER in body:
+            os.unlink(target)
+            removed += 1
+    return removed
+
+
+def remove_skill(home: str) -> bool:
+    target = os.path.join(home, "skills", "xsm")
+    source = os.path.join(REPO, "skills", "xsm")
+    if os.path.islink(target) and os.path.realpath(target) == os.path.realpath(source):
+        os.unlink(target)
+        return True
+    return False
+
+
+def _read_text(p: str):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return None
 
 
 def plan(home: str, runtime: str) -> dict:
