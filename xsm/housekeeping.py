@@ -19,7 +19,7 @@ import glob
 import os
 import time
 
-from . import config, identity, paths
+from . import config, identity, inbox, paths
 
 STAMP = "last-prune"
 INTERVAL = 3600.0
@@ -46,7 +46,7 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
     now = time.time() if now is None else now
     pointer_cutoff = now - _setting("retention_days") * 86400
     record_cutoff = now - _setting("ledger_retention_days") * 86400
-    removed = {"sessions": [], "ledger": [], "held": []}
+    removed = {"sessions": [], "ledger": [], "held": [], "inbox": []}
 
     for p in glob.glob(paths.path(paths.SESSIONS, "*.json")):
         rec = paths.read_json(p)
@@ -72,6 +72,15 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
         entry = paths.read_json(p) or {}
         if (entry.get("t") or os.path.getmtime(p)) < record_cutoff:
             removed["held"].append(os.path.basename(p))
+            if not dry_run:
+                _unlink(p)
+
+    # A copy for a Codex session that never read it: the queue item it
+    # duplicates is gone with the session, so it goes with the pointer window.
+    for p in glob.glob(paths.path(inbox.INBOX, "*", "*.json")):
+        entry = paths.read_json(p) or {}
+        if (entry.get("t") or os.path.getmtime(p)) < pointer_cutoff:
+            removed["inbox"].append(os.path.basename(p))
             if not dry_run:
                 _unlink(p)
 

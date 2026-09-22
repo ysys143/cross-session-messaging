@@ -46,6 +46,11 @@ def receipt(msg_id: str, decision: str, receiver: dict | None, reason: str = "")
         "receiver": {k: (receiver or {}).get(k) for k in ("name", "alias", "ref", "runtime")}})
 
 
+def received(msg_id: str) -> bool:
+    """Whether some path already handed this message over (or refused it)."""
+    return os.path.exists(_receipt_path(msg_id))
+
+
 def status(msg_id: str) -> dict:
     entry = paths.read_json(_entry_path(msg_id), {}) or {}
     rec = paths.read_json(_receipt_path(msg_id))

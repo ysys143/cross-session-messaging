@@ -451,6 +451,93 @@ class CodexReceiverNameTest(TempState):
         self.assertEqual(record["receiver"], "reviewer")
 
 
+class CodexInboxTest(TempState):
+    """A Codex session takes its queue only between turns. In S10 collab run 4
+    the Codex worker never ended one (it polled with sleep) and read none of
+    the six messages sent to it. `xsm inbox` hands them over mid-turn."""
+
+    def setUp(self):
+        super().setUp()
+        from xsm import adapters, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        self.a = registry.upsert("codex", home, "t-a", os.getpid(), self.tmp, name="a")
+        self.b = registry.upsert("codex", home, "t-b", os.getpid(), self.tmp, name="b")
+        self.queued = []
+        adapters.to_codex = lambda home, thread, content: self.queued.append(content) or "ok"
+
+    def _send(self, text="hello"):
+        from xsm import send
+        return send.send("b", text, sender=self.a)
+
+    def test_a_message_waits_and_is_read_once(self):
+        from xsm import inbox, ledger, receive
+        r = self._send("phase 2 started")
+        self.assertEqual(r.status, "sent-unconfirmed")
+        self.assertEqual(inbox.count("t-b"), 1)
+        texts = receive.take_inbox(self.b)
+        self.assertEqual(len(texts), 1)
+        self.assertIn("phase 2 started", texts[0])
+        self.assertIn("another agent session", texts[0], "the same framing the hook adds")
+        self.assertEqual(ledger.status(r.msg_id or "")["status"], "delivered")
+        self.assertEqual(receive.take_inbox(self.b), [], "taken once")
+
+    def test_the_queue_copy_arriving_later_is_dropped_not_held(self):
+        from xsm import paths, receive
+        self._send()
+        receive.take_inbox(self.b)
+        receive.register = lambda data, runtime: self.b
+        out = receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "t-b",
+                              "turn_id": "x", "cwd": self.tmp, "prompt": self.queued[0]})
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertEqual(out["decision"], "block", "refusing is what drops it from Codex")
+        self.assertIn("already received", out["reason"])
+        self.assertEqual(os.listdir(paths.path(paths.HELD)), [], "the session has it; not held")
+
+    def test_a_message_the_hook_delivered_is_gone_from_the_inbox(self):
+        from xsm import inbox, receive
+        self._send()
+        receive.register = lambda data, runtime: self.b
+        out = receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "t-b",
+                              "turn_id": "x", "cwd": self.tmp, "prompt": self.queued[0]})
+        self.assertNotEqual((out or {}).get("decision"), "block")
+        self.assertEqual(inbox.count("t-b"), 0)
+        self.assertEqual(receive.take_inbox(self.b), [])
+
+    def test_the_inbox_runs_the_same_checks_as_the_hook(self):
+        from xsm import config, ledger, receive
+        r = self._send()
+        config.blocked = lambda: {self.a["ref"]}
+        texts = receive.take_inbox(self.b)
+        self.assertEqual(len(texts), 1)
+        self.assertIn("refused", texts[0])
+        self.assertNotIn("hello", texts[0])
+        self.assertEqual(ledger.status(r.msg_id or "")["status"], "held")
+
+    def test_a_failed_send_leaves_no_copy(self):
+        from xsm import adapters, inbox
+
+        def refuse(home, thread, content):
+            raise adapters.DeliveryError("sandbox-blocked", "Operation not permitted")
+        adapters.to_codex = refuse
+        self.assertEqual(self._send().status, "error")
+        self.assertEqual(inbox.count("t-b"), 0)
+
+    def test_every_xsm_command_tells_a_codex_session_what_is_waiting(self):
+        from xsm import cli
+        self._send()
+        self.addCleanup(lambda v=os.environ.get("CODEX_THREAD_ID"):
+                        os.environ.__setitem__("CODEX_THREAD_ID", v) if v is not None
+                        else os.environ.pop("CODEX_THREAD_ID", None))
+        os.environ["CODEX_THREAD_ID"] = "t-b"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["ledger", "--compact"])
+        self.assertIn("1 message from other sessions waiting", err.getvalue())
+        self.assertIn("xsm inbox", err.getvalue())
+
+
 class ProjectJoinTest(TempState):
     """Sessions in different projects talk once both projects have joined the
     same xsm project by name. One side joining is not enough: that would let a

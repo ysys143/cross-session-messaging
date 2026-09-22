@@ -66,6 +66,11 @@ TOOLS = [
          "kind": {"type": "string", "enum": ["note", "task", "reply"], "default": "note"},
          "reply_to": {"type": "string"},
          "wait": {"type": "number", "default": 15}}, "required": ["target", "text"]}},
+    {"name": "xsm_inbox",
+     "description": ("Read messages other sessions sent you that are still waiting. Codex takes "
+                     "them only between turns; while you are working, call this whenever an xsm "
+                     "result says messages are waiting, and before you wait on a peer."),
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "xsm_join",
      "description": ("Ask your user to let this session's folder join (or leave) a named xsm "
                      "project, so sessions in other repositories that also joined it can talk "
@@ -148,6 +153,15 @@ class Server:
         where = channel.resolve(me.get("cwd") or os.getcwd(), args.get("channel"))
         author = {"kind": "agent", "name": me.get("name"), "alias": me.get("alias"),
                   "ref": me.get("ref"), "runtime": me.get("runtime")}
+        text = self._call(name, args, me, where, author)
+        if me.get("runtime") == "codex" and name != "xsm_inbox":
+            from . import inbox
+            waiting = inbox.notice(me.get("session_id"))
+            if waiting:
+                text += "\n\n" + waiting
+        return text
+
+    def _call(self, name: str, args: dict, me: dict, where: tuple, author: dict) -> str:
         if name == "xsm_post":
             rec = channel.post(where, author, args.get("text", ""), args.get("tag") or "note",
                                args.get("reply_to"))
@@ -172,6 +186,9 @@ class Server:
             return "%s: %s" % (r.status, r.reason or "")
         if name == "xsm_doc_endorse":
             return self.endorse(me, args)
+        if name == "xsm_inbox":
+            from . import receive
+            return "\n\n----\n\n".join(receive.take_inbox(me)) or "(no messages waiting)"
         raise channel.ChannelError("unknown tool %s" % name)
 
     def decide(self, where: tuple, me: dict, args: dict) -> str:

@@ -20,7 +20,7 @@ import sys
 import time
 from contextlib import nullcontext
 
-from . import config, envelope, housekeeping, identity, ledger, paths, registry, workers
+from . import config, envelope, housekeeping, identity, inbox, ledger, paths, registry, workers
 
 CLAUDE_FIELDS = ("scratchpad_dir", "session_title", "prompt_id")
 CODEX_FIELDS = ("turn_id",)
@@ -191,10 +191,59 @@ def _handle(data: dict) -> dict | None:
 
 
 def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict | None:
-    cfg = config.load()
     msg_id = parsed.header.get("id")
-    decision, reason = "pass", ""
+    if msg_id and ledger.received(msg_id):
+        # Already handed over, almost always by `xsm inbox` while the Codex
+        # turn was still running; this is the queue's own copy arriving late.
+        # Not held: the session has it. Refusing is what drops it from Codex.
+        inbox.drop((me or {}).get("session_id"), msg_id)
+        if span is not None:
+            span.set_attribute("xsm.receive.decision", "duplicate")
+        paths.append_jsonl("decisions.jsonl", {
+            "event": "UserPromptSubmit", "runtime": runtime, "decision": "block",
+            "reason": "already received", "id": msg_id, "receiver": me and me.get("name")})
+        return block(runtime, "message %s was already received (xsm inbox)" % msg_id)
+    decision, reason = check(parsed, me)
+    if msg_id:
+        inbox.drop((me or {}).get("session_id"), msg_id)
 
+    if decision == "block":
+        stored = hold(runtime, reason, data, me, parsed)
+        if span is not None:
+            span.set_attribute("xsm.receive.decision", "held" if stored else "blocked")
+            span.set_status("ERROR", reason)
+        paths.append_jsonl("decisions.jsonl", {
+            "event": "UserPromptSubmit", "runtime": runtime, "decision": "block",
+            "reason": reason, "held": stored, "id": msg_id,
+            "receiver": me and me.get("name"), "from": parsed.header.get("from")})
+        if msg_id:
+            ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
+        if not stored:
+            # Refusing without a copy would destroy the message; warn instead.
+            return allow_with_context(runtime, envelope.sender_context(parsed, runtime) +
+                                      "\n[xsm] This message failed a check (%s) but could not "
+                                      "be stored, so it was delivered with this warning." % reason)
+        return block(runtime, reason + " (kept: xsm held list)")
+
+    if span is not None:
+        span.set_attribute("xsm.receive.decision", "pass")
+    paths.append_jsonl("decisions.jsonl", {
+        "event": "UserPromptSubmit", "runtime": runtime, "decision": "pass", "reason": reason,
+        "id": msg_id, "receiver": me and me.get("name"), "from": parsed.header.get("from")})
+    if msg_id:
+        ledger.receipt(msg_id, "delivered", me)
+    if parsed.header.get("kind") == "reply":
+        workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
+    worker = workers.load(os.environ.get("XSM_WORKER") or "") if os.environ.get("XSM_WORKER") else None
+    return allow_with_context(runtime, envelope.sender_context(
+        parsed, runtime, worker=bool(worker), cwd=(me or {}).get("cwd")))
+
+
+def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
+    """(decision, reason) for a peer message: the same checks whether it came
+    in through the hook or was taken with `xsm inbox`."""
+    cfg = cfg if cfg is not None else config.load()
+    decision, reason = "pass", ""
     if not parsed.header:
         decision, reason = ("block", "peer message without an xsm header") \
             if cfg.get("strict_peers", True) else ("pass", "unheadered peer message allowed")
@@ -236,37 +285,51 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
                 decision, reason = "block", "out of scope: %s" % why
             elif scope != parsed.header.get("scope"):
                 decision, reason = "block", "scope changed since the message was sent"
+    return decision, reason
 
-    if decision == "block":
-        stored = hold(runtime, reason, data, me, parsed)
-        if span is not None:
-            span.set_attribute("xsm.receive.decision", "held" if stored else "blocked")
-            span.set_status("ERROR", reason)
-        paths.append_jsonl("decisions.jsonl", {
-            "event": "UserPromptSubmit", "runtime": runtime, "decision": "block",
-            "reason": reason, "held": stored, "id": msg_id,
-            "receiver": me and me.get("name"), "from": parsed.header.get("from")})
-        if msg_id:
-            ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
-        if not stored:
-            # Refusing without a copy would destroy the message; warn instead.
-            return allow_with_context(runtime, envelope.sender_context(parsed, runtime) +
-                                      "\n[xsm] This message failed a check (%s) but could not "
-                                      "be stored, so it was delivered with this warning." % reason)
-        return block(runtime, reason + " (kept: xsm held list)")
 
-    if span is not None:
-        span.set_attribute("xsm.receive.decision", "pass")
-    paths.append_jsonl("decisions.jsonl", {
-        "event": "UserPromptSubmit", "runtime": runtime, "decision": "pass", "reason": reason,
-        "id": msg_id, "receiver": me and me.get("name"), "from": parsed.header.get("from")})
-    if msg_id:
-        ledger.receipt(msg_id, "delivered", me)
-    if parsed.header.get("kind") == "reply":
-        workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
-    worker = workers.load(os.environ.get("XSM_WORKER") or "") if os.environ.get("XSM_WORKER") else None
-    return allow_with_context(runtime, envelope.sender_context(
-        parsed, runtime, worker=bool(worker), cwd=(me or {}).get("cwd")))
+def take_inbox(me: dict) -> list:
+    """Messages waiting for this Codex session, handed over now instead of at
+    the end of its turn. Each goes through check() exactly as the hook would
+    run it, gets the same receipt, and comes back as the text the hook would
+    have shown: sender context, then the body. A refused one is kept in the
+    held list and comes back as a one-line notice."""
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    runtime = me.get("runtime") or "codex"
+    worker = bool(os.environ.get("XSM_WORKER") and workers.load(os.environ["XSM_WORKER"]))
+    out = []
+    for item in inbox.take(str(me.get("session_id"))):
+        parsed = envelope.parse(item["content"])
+        msg_id = parsed.header.get("id") or item.get("id")
+        if msg_id and ledger.received(msg_id):
+            continue                     # the hook got there first
+        span_cm = telemetry.span("xsm.receive.inbox", {"xsm.msg.id": msg_id}, kind="CONSUMER",
+                                 traceparent=parsed.header.get("traceparent")) \
+            if telemetry else nullcontext()
+        with span_cm as span:
+            decision, reason = check(parsed, me)
+            if decision == "block":
+                stored = hold(runtime, reason, {}, me, parsed)
+                ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
+                out.append("[xsm] Message %s from %s was refused (%s)%s." % (
+                    msg_id, parsed.header.get("from") or "unknown", reason,
+                    "; kept in the held list" if stored else ""))
+            else:
+                ledger.receipt(msg_id, "delivered", me, "read with xsm inbox")
+                if parsed.header.get("kind") == "reply":
+                    workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
+                out.append(envelope.sender_context(parsed, runtime, worker=worker,
+                                                   cwd=me.get("cwd")) + "\n\n" + parsed.body)
+            if span is not None:
+                span.set_attribute("xsm.receive.decision",
+                                   "pass" if decision != "block" else "held")
+            paths.append_jsonl("decisions.jsonl", {
+                "event": "inbox", "runtime": runtime, "decision": decision, "reason": reason,
+                "id": msg_id, "receiver": me.get("name"), "from": parsed.header.get("from")})
+    return out
 
 
 def _sender_record(parsed) -> dict | None:

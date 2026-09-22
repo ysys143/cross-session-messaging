@@ -13,8 +13,8 @@ import os
 import sys
 import time
 
-from . import config, envelope, housekeeping, install, ledger, paths, registry, resolve, send, \
-    workers
+from . import config, envelope, housekeeping, inbox, install, ledger, paths, receive, registry, \
+    resolve, send, workers
 
 OK, REFUSED, UNCONFIRMED, USAGE = 0, 2, 3, 4
 
@@ -310,6 +310,22 @@ def cmd_send(args) -> int:
             print(resolve.describe(result.candidates))
     return {"delivered": OK, "sent-unconfirmed": UNCONFIRMED, "held": REFUSED,
             "blocked": REFUSED, "refused": REFUSED}.get(result.status, USAGE)
+
+
+def cmd_inbox(args) -> int:
+    """Messages waiting for this Codex session, now rather than at the end of
+    its turn. For a Claude session there is nothing to take: its inbox socket
+    delivers as soon as it is idle."""
+    me = registry.me()
+    if not me:
+        print("this session is not registered; run `xsm doctor`", file=sys.stderr)
+        return REFUSED
+    texts = receive.take_inbox(me)
+    if not texts:
+        print("(no messages waiting)")
+        return OK
+    print(("\n\n" + "-" * 40 + "\n\n").join(texts))
+    return OK
 
 
 def cmd_status(args) -> int:
@@ -1092,6 +1108,9 @@ def build_parser() -> argparse.ArgumentParser:
     snd.add_argument("--json", action="store_true")
     snd.set_defaults(func=cmd_send)
 
+    ib = sub.add_parser("inbox", help="messages waiting for this Codex session, read mid-turn")
+    ib.set_defaults(func=cmd_inbox)
+
     st = sub.add_parser("status", help="delivery state of one message")
     st.add_argument("msg_id")
     st.add_argument("--wait", type=float, default=0.0)
@@ -1174,8 +1193,22 @@ def main(argv=None) -> int:
     # ship, and metrics would count its own calls.
     if telemetry is None or args.command in ("mcp", "statusline",
                                              "metrics", "otlp-export"):
-        return args.func(args)
-    return _traced(telemetry, args)
+        code = args.func(args)
+    else:
+        code = _traced(telemetry, args)
+    _inbox_notice(args.command)
+    return code
+
+
+def _inbox_notice(command: str) -> None:
+    """A Codex session mid-turn does not know anything arrived; every xsm
+    command it runs tells it. On stderr, so `--json` output stays parseable."""
+    thread = os.environ.get("CODEX_THREAD_ID")
+    if not thread or command in ("hook", "mcp", "statusline", "inbox", "worker-finish"):
+        return
+    text = inbox.notice(thread)
+    if text:
+        print(text, file=sys.stderr)
 
 
 class _StderrTail:

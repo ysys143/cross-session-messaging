@@ -74,6 +74,7 @@ xsm list                          # 이 폴더와 주고받을 수 있는 살아
 xsm who                           # 지금 세션의 신원
 xsm send "reviewer@claude-4" --text "..." --wait 20
 xsm status <msg-id>
+xsm inbox                         # Codex 세션: 턴 도중 도착한 메시지를 지금 읽는다
 xsm ledger
 xsm held list | xsm held show <id>
 xsm doctor | xsm selftest

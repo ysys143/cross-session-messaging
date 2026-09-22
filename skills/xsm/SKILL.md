@@ -95,6 +95,12 @@ A Codex session picks up a queued message within about ten seconds when its
 thread is loaded and idle, otherwise at its user's next input. It cannot be
 interrupted mid-turn. Never report `sent-unconfirmed` as delivered.
 
+If you are a Codex session, messages sent to you wait while your turn runs.
+Every xsm command and MCP tool result tells you when some are waiting; read
+them with `xsm inbox` (or the `xsm_inbox` MCP tool) — do that before you wait
+on a peer, and whenever you are told. Each message is handed over once, through
+the same checks as the hook; the queued copy that arrives later is dropped.
+
 ## The channel: the record you keep with your user and other sessions
 
 ```bash

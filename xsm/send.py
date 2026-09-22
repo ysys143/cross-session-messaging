@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from contextlib import nullcontext
 
-from . import adapters, config, envelope, ledger, paths, registry, resolve
+from . import adapters, config, envelope, inbox, ledger, paths, registry, resolve
 
 
 class SendResult:
@@ -124,9 +124,13 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
                                reply_address=("uds:%s" % sender["socket"]) if sender.get("socket")
                                else None)
         else:
+            # Codex takes its queue only between turns; the copy is what a
+            # session in the middle of one reads with `xsm inbox`.
+            inbox.keep(str(target.get("session_id")), msg_id, content)
             adapters.to_codex(target.get("home", os.path.expanduser("~/.codex")),
                               str(target.get("session_id")), content)
     except adapters.DeliveryError as err:
+        inbox.drop(str(target.get("session_id")), msg_id)
         ledger.failed(msg_id, "%s: %s" % (err.reason, err.detail))
         paths.append_jsonl("decisions.jsonl", {"decision": "send-failed", "id": msg_id,
                                                "reason": err.reason, "detail": err.detail})
@@ -142,7 +146,7 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
     note = "queued"
     if target.get("runtime") == "codex":
         note = ("queued; a Codex session picks the queue up within about 10 seconds when the "
-                "thread is loaded and idle, otherwise at the user's next input")
+                "thread is loaded and idle, or mid-turn with `xsm inbox`")
     elif forecast == "hold":
         note = "queued, but Claude will hold it for its user: %s" % why
     elif forecast == "unknown":

@@ -84,6 +84,14 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 
 - **항상 UUID로 지정한다.** 이름 조회는 스레드가 100개를 넘으면 거부된다(S7).
 - 대상 TUI가 스레드를 로드한 유휴 상태면 약 10초 안에 턴이 시작된다. 진행 중인 턴에는 끼어들지 않는다(S2).
+- **턴 중 수신(`xsm inbox`).** 발신 측은 대기열에 넣기 전에 봉투 사본을 `inbox/<thread-uuid>/<id>.json`에
+  둔다(대기열 전송이 실패하면 지운다). Codex 세션은 턴 도중 `xsm inbox`나 MCP `xsm_inbox`로 사본을 꺼낸다.
+  꺼내는 순간 훅과 같은 검사(`receive.check`)를 거치고 같은 영수증을 쓴다. 나중에 대기열 사본이 훅에
+  도착하면 영수증이 이미 있으므로 보관하지 않고 거부한다. Codex에서 훅 거부는 그 대기열 항목을 흔적 없이
+  소비한다(S6). 반대로 훅이 먼저 받으면 사본을 지운다. 사본을 꺼낼 때는 rename으로 선점하므로 두 경로가
+  동시에 읽어도 한 번만 넘긴다. Codex 세션이 부르는 xsm 명령과 MCP 도구는 대기 중인 사본 수를 알린다
+  (명령은 stderr). 근거: S10 collab4에서 Codex 워커가 `sleep` 폴링으로 턴을 끝내지 않아 15분 동안 받은
+  메시지 6건을 하나도 읽지 못했다.
 - `readonly database` 오류는 샌드박스 발신이다.
 
 ## 3. 상태 파일
@@ -92,6 +100,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 
 | 경로 | 스키마 |
 |---|---|
+| `inbox/<thread-uuid>/<id>.json` | `{"id", "t", "content"}`: Codex 대상 메시지의 봉투 사본(§2.2). 어느 경로로든 넘겨지면 지우고, 읽히지 않은 사본은 세션 포인터 보존 기간이 지나면 정리한다 |
 | `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다 |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |

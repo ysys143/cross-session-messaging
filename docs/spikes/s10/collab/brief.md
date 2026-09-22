@@ -40,4 +40,7 @@
 
 `./xsm send`가 sandbox 오류로 실패하면 xsm MCP 도구 `xsm_send`로 보내라. 같은 target, kind, text다.
 
+xsm 명령이나 도구 결과에 "messages ... waiting for you"가 보이면 `./xsm inbox`(또는 MCP `xsm_inbox`)로
+읽어라. 일하는 도중에 온 메시지가 거기 쌓인다.
+
 이 폴더 안에만 써라.
