@@ -83,6 +83,18 @@ Codex에서는 `/xsm-list` 대신 `$xsm-list`로 부른다. Claude의 `!`명령`
 메시지가 사라진다. `xsm install`은 플러그인이 있는 홈을 거부한다. `xsm doctor`가 어느 홈이 어느 길인지,
 복사본이 낡았는지, 지금 무엇이 막혀 있는지 보여 준다.
 
+### 플러그인을 고칠 때 알아야 할 것 (실측 2026-09-23)
+
+- **MCP 서버는 플러그인 루트의 `.mcp.json`에서만 읽는다.** `plugin.json`에 `mcpServers`를 직접 쓰거나 다른
+  경로를 가리키면 `claude plugin details`가 `MCP servers (0)`으로 센다. 그래서 이 저장소 루트에 `.mcp.json`이
+  있다. 대가: Claude Code는 같은 파일을 **프로젝트 MCP 설정**으로도 읽으므로, 이 저장소를 연 세션은 xsm MCP
+  서버를 쓸지 한 번 묻는다. 기여자만 겪는 비용이다.
+- **설치본은 버전별 캐시 사본이다.** 저장소를 고쳐도 `plugin.json`의 `version`이 그대로면
+  `claude plugin update`가 "already at the latest version"이라고 답한다. 고쳤으면 버전을 올린다.
+- **검증은 `claude plugin validate . --strict`**, 구성 요소와 토큰 비용은 `claude plugin details xsm`.
+- `claude mcp list`를 세션 밖에서 돌리면 `Missing environment variables: CLAUDE_PLUGIN_ROOT` 경고가 붙는다.
+  세션 안에서는 그 변수가 채워지므로 서버는 정상 연결된다.
+
 ## 쓰기
 
 ```bash

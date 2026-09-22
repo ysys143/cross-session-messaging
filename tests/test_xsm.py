@@ -406,10 +406,13 @@ class PluginPackagingTest(TempState):
     def test_the_manifests_point_at_files_that_exist(self):
         plugin = self._json(".claude-plugin", "plugin.json")
         self.assertEqual(plugin["name"], "xsm")
-        for field in ("commands", "skills", "hooks", "mcpServers"):
+        for field in ("commands", "skills", "hooks"):
             target = os.path.join(REPO, plugin[field][2:] if plugin[field].startswith("./")
                                   else plugin[field])
             self.assertTrue(os.path.exists(target), "%s -> %s" % (field, target))
+        self.assertNotIn("mcpServers", plugin,
+                         "Claude reads a plugin's MCP servers from .mcp.json at the plugin root; "
+                         "a manifest field was ignored (measured 2026-09-23)")
         market = self._json(".claude-plugin", "marketplace.json")
         self.assertEqual([p["name"] for p in market["plugins"]], ["xsm"])
         self.assertEqual(market["plugins"][0]["version"], plugin["version"],
@@ -427,6 +430,9 @@ class PluginPackagingTest(TempState):
                     self.assertTrue(os.access(launcher, os.X_OK), "the launcher must be executable")
 
     def test_the_mcp_server_has_no_env_that_could_point_the_store_at_nowhere(self):
+        # Measured 2026-09-23: Claude counts a plugin's MCP servers only from
+        # .mcp.json at the plugin root. An inline mcpServers object in
+        # plugin.json and a path to another file both came out as zero.
         server = self._json(".mcp.json")["mcpServers"]["xsm"]
         self.assertIn("${CLAUDE_PLUGIN_ROOT}", server["command"])
         self.assertNotIn("env", server, "an empty XSM_HOME would mean the working directory")
