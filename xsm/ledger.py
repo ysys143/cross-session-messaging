@@ -39,11 +39,32 @@ def failed(msg_id: str, reason: str) -> None:
     paths.write_json(_entry_path(msg_id), entry)
 
 
-def receipt(msg_id: str, decision: str, receiver: dict | None, reason: str = "") -> None:
+def receipt(msg_id: str, decision: str, receiver: dict | None, reason: str = "",
+            outcome: str | None = None) -> None:
     """Written by the receiving hook. `decision` is delivered | held | blocked."""
-    paths.write_json(_receipt_path(msg_id), {
-        "id": msg_id, "decision": decision, "reason": reason, "t": time.time(),
-        "receiver": {k: (receiver or {}).get(k) for k in ("name", "alias", "ref", "runtime")}})
+    rec = {"id": msg_id, "decision": decision, "reason": reason, "t": time.time(),
+           "receiver": {k: (receiver or {}).get(k) for k in ("name", "alias", "ref", "runtime")}}
+    if outcome:
+        rec["outcome"] = outcome
+    paths.write_json(_receipt_path(msg_id), rec)
+
+
+def close(task_id: str, outcome: str, by: dict | None = None) -> None:
+    """How the task sent as `task_id` ended, written on the task's own entry.
+
+    The reply that carries the outcome is a message of its own and its receipt
+    goes with it; a `--once` worker is stopped and forgotten moments later, so
+    the entry the sender already holds the id of is the only lasting place for
+    this. Left on a separate key because `status()` overwrites `status` with
+    the receipt's decision."""
+    entry = paths.read_json(_entry_path(task_id), {}) or {}
+    if not entry:
+        return                      # nothing sent under that id here; nothing to close
+    entry["outcome"] = outcome
+    entry["closed_t"] = time.time()
+    if by:
+        entry["closed_by"] = {k: by.get(k) for k in ("name", "alias", "ref", "runtime")}
+    paths.write_json(_entry_path(task_id), entry)
 
 
 def received(msg_id: str) -> bool:
@@ -57,6 +78,10 @@ def status(msg_id: str) -> dict:
     if rec:
         entry["status"] = rec.get("decision")
         entry["receipt"] = rec
+        if rec.get("outcome") and not entry.get("outcome"):
+            # A reply's own outcome belongs on the reply; a task's comes from
+            # close(). Neither overwrites the other.
+            entry["outcome"] = rec["outcome"]
     return entry
 
 

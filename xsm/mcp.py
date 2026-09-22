@@ -67,6 +67,10 @@ TOOLS = [
          "target": {"type": "string"}, "text": {"type": "string"},
          "kind": {"type": "string", "enum": ["note", "task", "reply"], "default": "note"},
          "reply_to": {"type": "string"},
+         "outcome": {"type": "string", "enum": ["succeeded", "failed"],
+                     "description": "only on a reply that closes a task you were given: how it "
+                                    "ended. Say a failure here, not only in the words — the flag "
+                                    "is what the sender can act on."},
          "wait": {"type": "number", "default": 15}}, "required": ["target", "text"]}},
     {"name": "xsm_inbox",
      "description": ("Codex sessions: read messages other sessions sent you that are still "
@@ -190,7 +194,8 @@ class Server:
             from . import send as send_mod
             r = send_mod.send(args.get("target") or "", args.get("text") or "", sender=me,
                               kind=args.get("kind") or "note", reply_to=args.get("reply_to"),
-                              wait=float(args.get("wait") or 0))
+                              wait=float(args.get("wait") or 0),
+                              outcome=args.get("outcome") if args.get("kind") == "reply" else None)
             return "%s: %s" % (r.status, r.reason or "")
         if name == "xsm_doc_endorse":
             return self.endorse(me, args)

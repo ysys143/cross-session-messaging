@@ -1057,9 +1057,14 @@ def reap_detached(ending: dict | None = None) -> None:
                      stderr=subprocess.DEVNULL, env=env, start_new_session=True)
 
 
-def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None) -> None:
+def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None,
+             outcome: str | None = None) -> None:
     """Called by the receiving hook: a `once` worker is stopped when its answer
-    to the task it was given reaches the session that started it."""
+    to the task it was given reaches the session that started it.
+
+    `outcome` is how the worker says the task ended. It does not change that
+    decision — a worker that reports failure has still answered, and it is a
+    person's call whether to send the work again."""
     if not sender_ref or not receiver:
         return
     for worker in all_workers():

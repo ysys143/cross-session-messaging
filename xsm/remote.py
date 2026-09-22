@@ -375,6 +375,11 @@ def _serve(peer: str, request: dict, span=None) -> dict:
     content = envelope.build(request.get("body") or "", msg_id=msg_id, sender=sender,
                              scope="remote:%s" % peer, kind=request.get("kind") or "note",
                              reply_to=request.get("reply_to"), origin=peer,
+                             # Strict when sending, lenient when receiving: a peer on a
+                             # newer version may name an outcome this one has never heard
+                             # of, and that is not a reason to drop its message.
+                             outcome=request.get("outcome")
+                             if request.get("outcome") in envelope.OUTCOMES else None,
                              traceparent=span.traceparent() if span is not None
                              else request.get("traceparent"))
     # The gate trusts a remote message only if this receiver recorded it.
@@ -428,7 +433,8 @@ def split_target(spec: str) -> tuple:
 
 
 def send(sender: dict, spec: str, peer: str, body: str, kind: str, reply_to: str | None,
-         wait: float, msg_id: str | None = None, traceparent: str | None = None) -> dict:
+         wait: float, msg_id: str | None = None, traceparent: str | None = None,
+         outcome: str | None = None) -> dict:
     pairing = pairing_for(peer)
     from . import channel
     if not _project_members(pairing["local_project"], sender.get("cwd") or "/"):
@@ -438,7 +444,7 @@ def send(sender: dict, spec: str, peer: str, body: str, kind: str, reply_to: str
     msg_id = msg_id or envelope.new_id()
     request = {"op": "send", "id": msg_id, "target": spec, "body": body, "kind": kind,
                "reply_to": reply_to, "wait": wait, "project": pairing["local_project"],
-               "traceparent": traceparent,
+               "traceparent": traceparent, "outcome": outcome,
                "sender": {k: sender.get(k) for k in ("name", "alias", "ref", "session_id",
                                                      "permission_mode")}}
     ledger.queued(msg_id, sender, {"name": spec, "alias": peer, "ref": None, "runtime": "remote"},

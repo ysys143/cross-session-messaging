@@ -24,6 +24,7 @@ ENVELOPE_RE = re.compile(
     r"^<%s(?P<attrs>[^>]*)>\s*\n(?P<inner>.*?)\n?</%s>\s*\Z" % (TAG, TAG), re.S)
 FIELD_RE = re.compile(r"([a-z-]+)=(\"[^\"]*\"|\S+)")
 KINDS = ("note", "task", "reply")
+OUTCOMES = ("succeeded", "failed")      # how a task ended, on the reply that closes it
 
 
 class Parsed:
@@ -49,13 +50,20 @@ def _fields(text: str) -> dict:
 
 def build(body: str, *, msg_id: str, sender: dict, scope: str, kind: str = "note",
           reply_to: str | None = None, origin: str | None = None,
-          traceparent: str | None = None) -> str:
+          traceparent: str | None = None, outcome: str | None = None) -> str:
     """Wrap a body for delivery. `sender` is a registry record, so from-mode is
     the mode that session actually reported, not a self-claim."""
     if kind not in KINDS:
         raise ValueError("unknown kind: %s" % kind)
+    if outcome and outcome not in OUTCOMES:
+        raise ValueError("unknown outcome: %s" % outcome)
     header = ['[xsm v1', 'id=%s' % msg_id, 'from="%s@%s"' % (sender.get("name"), sender.get("alias")),
               'ref=%s' % sender.get("ref"), 'scope="%s"' % scope, 'kind=%s' % kind]
+    if outcome:
+        # How a task ended, said in a field rather than left in the prose. The
+        # first of the optional fields, and absent unless asked for, so a
+        # receiver that has never heard of it reads the header as it always did.
+        header.append("outcome=%s" % outcome)
     if reply_to:
         header.append("reply-to=%s" % reply_to)
     if origin:
@@ -106,7 +114,7 @@ def looks_like_peer(prompt: str) -> bool:
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "xsm")
 
 
-def reply_command(parsed: Parsed) -> str | None:
+def reply_command(parsed: Parsed, include_outcome: bool = False) -> str | None:
     """The exact command that answers this message. Addressed by ref, not name,
     because names change and collide (S7); run by absolute path, because the
     receiving shell may not have xsm on PATH (a Codex sandbox, a bare env)."""
@@ -123,8 +131,11 @@ def reply_command(parsed: Parsed) -> str | None:
         os.path.realpath(os.path.expanduser(state)) != os.path.realpath(os.path.expanduser("~/.xsm")) else ""
     # --wait turns "queued" into a real answer: the replier learns whether its
     # reply arrived instead of reporting sent-unconfirmed and guessing.
-    return '%s%s send %s --kind reply --reply-to %s --wait 15 --text "<your answer>"' % (
-        prefix, LAUNCHER, target, header["id"])
+    # The outcome goes after it, so the command a task hands back reads the
+    # same as ever up to that point.
+    ending = " --outcome succeeded" if include_outcome else ""
+    return '%s%s send %s --kind reply --reply-to %s --wait 15%s --text "<your answer>"' % (
+        prefix, LAUNCHER, target, header["id"], ending)
 
 
 WORKER_RULE = ("You are a worker: this task is your job. Do every part you can. If a step is "
@@ -153,7 +164,7 @@ def sender_context(parsed: Parsed, runtime: str = "claude", worker: bool = False
     if header.get("scope"):
         lines.append("Scope: %s. Message id: %s. Kind: %s." % (header.get("scope"), header.get("id"),
                                                                 kind))
-    reply = reply_command(parsed)
+    reply = reply_command(parsed, include_outcome=kind == "task")
     shell = ("from the shell; if the sandbox stops it, use the xsm_send MCP tool with the same "
              "target, kind and reply_to") if runtime == "codex" else "with your Bash tool"
     if kind == "task":
@@ -162,9 +173,13 @@ def sender_context(parsed: Parsed, runtime: str = "claude", worker: bool = False
                      "to repeat it. When you are done — or if you cannot do it — report back:")
         if reply:
             lines.append("  " + reply + "   (run it %s)" % shell)
+            lines.append("  Say `--outcome failed` if you could not finish it. Put it in the "
+                         "flag, not only in the words: the flag is what the sender can act on.")
     elif kind == "reply":
         lines.append("It answers your earlier message %s. Carry on with the work it belongs to; "
                      "answer only if it asks you something." % (header.get("reply-to") or ""))
+        if header.get("outcome") in OUTCOMES:
+            lines.append("It reports the task ended: %s." % header["outcome"])
         if reply:
             lines.append("  To answer: " + reply)
     else:

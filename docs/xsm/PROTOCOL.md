@@ -41,9 +41,12 @@ python3 -m unittest discover -s tests      # 테스트 53건(벡터 35건 포함
 | `ref` | 예 | 발신 세션의 6자리 지문(4절). **판정은 이름이 아니라 이 값으로 한다** |
 | `scope` | 예 | 발신 시점에 성립한 scope id. 수신 측이 다시 계산해 비교한다 |
 | `kind` | 예 | `note`, `task`, `reply` |
+| `outcome` | 아니오 | `succeeded` \| `failed`. 과제를 끝맺는 `reply`에만 붙는다. `kind` 바로 뒤, 선택 필드 중 맨 앞에 온다 |
 | `reply-to` | 아니오 | 답장 대상 `id` |
 
 값에 공백이 있으면 큰따옴표로 감싼다. 알 수 없는 필드는 무시한다(앞으로 늘어날 수 있다).
+
+`outcome`은 **보낼 때 엄격하고 받을 때 관대하다**. 만드는 쪽은 아는 값 두 개만 쓰고 그 밖의 값은 거부한다. 읽는 쪽은 모르는 값을 "없는 것"으로 접고 메시지는 그대로 전달한다. 나중 판에서 값이 늘어도 이 판이 메시지를 떨어뜨리지 않기 위해서다. 없을 때는 필드 자체가 빠지므로, 이 필드를 모르는 수신자에게 헤더는 예전과 글자 하나까지 같다.
 
 ### 1.3 분류
 
@@ -108,8 +111,8 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |
 | `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?, "ended_at"?, "end_reason"?}` |
-| `ledger/<msg-id>.json` | `{"id", "status": "queued", "t", "kind", "scope", "from": {...}, "to": {...}, "preview"}` |
-| `ledger/<msg-id>.recv.json` | `{"id", "decision": "delivered"\|"held"\|"blocked", "reason", "t", "receiver": {...}}` |
+| `ledger/<msg-id>.json` | `{"id", "status": "queued", "t", "kind", "scope", "from": {...}, "to": {...}, "preview", "outcome"?, "closed_t"?, "closed_by"?}`. `outcome`은 그 과제를 끝맺는 답장이 도착했을 때 붙는다. `status`와 **별도 키**다 — 조회 시 영수증의 판정이 `status`를 덮어쓰므로 같은 키에 두면 사라진다 |
+| `ledger/<msg-id>.recv.json` | `{"id", "decision": "delivered"\|"held"\|"blocked", "reason", "t", "receiver": {...}, "outcome"?}` |
 | `held/<밀리초>.json` | `{"t", "reason", "runtime", "receiver", "id"?, "from"?, "scope"?, "body"}` |
 | `decisions.jsonl` | 한 줄에 판정 하나. 최소 `{"t", "decision", "reason"}` |
 
@@ -220,6 +223,8 @@ refused: only stopped sessions match 'life-b'
 8. 지금 계산한 scope가 헤더의 `scope`와 다르다 → **차단**(보낸 뒤 정책이 바뀐 경우).
 9. 그 밖에는 **통과**시키고 발신 표시 문맥을 붙인다.
 
+게이트는 `outcome`을 **판정에 쓰지 않는다**. 실패를 알리는 답장도 성공을 알리는 답장과 똑같이 전달된다. 이 필드는 보고이지 권한이 아니다.
+
 차단할 때는 **본문을 `held/`에 먼저 저장한 뒤** 차단한다. Codex는 차단하면 큐 항목이 사라지기 때문이다(S6). 저장에 실패하면 차단하지 않고 경고 문맥을 붙여 통과시킨다. 차단·통과 모두 `id`가 있으면 영수증을 쓴다.
 
 출력 형식:
@@ -252,6 +257,8 @@ refused: only stopped sessions match 'life-b'
 - 실행 파일은 절대 경로다. 받는 셸의 PATH에 `xsm`이 없을 수 있다.
 - 훅이 기본값이 아닌 `XSM_HOME`으로 돌았으면 그 경로를 싣는다. 답장과 영수증이 같은 상태에 남아야 한다.
 - `--wait 15`로 답장한 쪽이 전달 여부를 확정해 받는다.
+- `kind`가 `task`일 때만 `--wait 15` **뒤에** `--outcome succeeded`가 붙고, 못 끝냈으면 `--outcome failed`로 바꾸라는 줄이 따라온다. 말이 아니라 플래그에 담으라고 적는다 — 보낸 쪽이 분기할 수 있는 것은 플래그다. `note`와 `reply`의 답장 명령은 예전 그대로다.
+- 받은 답장에 `outcome`이 실려 있으면 문맥에 "It reports the task ended: X." 한 줄이 더 붙는다.
 - Codex에게는 "셸에서 실행하라"고, Claude에게는 "Bash 도구로 실행하라"고 적는다. Codex는 피어 메시지에 대한 자체 안내가 없어서 이 문맥이 유일한 안내다.
 
 실측(2026-09-21): 역할을 미리 지시받지 않은 세션이 `task`를 받아 요청된 확인을 모두 하고 추가 경계 조건까지 시험한 뒤, 붙어 온 답장 명령을 그대로 실행했다. 요청한 쪽은 `reply`를 받고 다시 답하지 않았다.
@@ -331,7 +338,7 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 - **위험한 옵션.** `full_access`와 `trust_hooks`는 부른 쪽이 사람(`human_terminal()`)이 아니면 허가를 요구한다. 허가는 `grants/<id>.json`에 저장되며 `{asked_by, runtime, cwd, options, expires}`로 묶인다. `spawn`은 파일을 `.used`로 rename해서 한 번만 쓰고, 세션·런타임·폴더가 다르거나, 옵션을 다 덮지 못하거나, 만료됐으면 거부한다. 허가는 MCP `xsm_grant`만 만든다. 이 도구는 elicitation으로 `deny`/`allow once`를 묻고, 결과를 채널에 `decision`(작성자 `사람 via mcp-elicitation`)으로 남긴다. `trust_hooks`는 Codex 워커에만 된다.
 - **동시 수.** 새 워커를 띄우기 전에 부른 세션(`parent_ref`)의 워커 가운데 `gone`이 아닌 것을 센다. `XSM_MAX_WORKERS`, 없으면 config `max_workers`(기본 4) 이상이면 거부한다. 세기 전에 남은 워커를 먼저 정리한다.
 - **남은 워커.** 워커의 `parent_ref`에 해당하는 레코드가 없거나 `ended`/`stale`이면 그 워커는 남은 것이다. 만든 지 120초가 지났는데 자기 프로세스가 없는 워커도 같다. 이런 워커는 `stop`으로 정리한다. 확인 시점은 셋이다. (1) 부모의 SessionEnd 훅: 부모 프로세스가 아직 살아 있으므로, 분리된 `xsm reap --after-pid <부모 pid>`가 그 프로세스가 끝나길(최대 120초) 기다렸다가 정리한다. (2) `workers`와 `spawn`. (3) 매시간 정리. 훅 경로에서는 늘 분리된 프로세스로 한다.
-- **종료.** `stop`은 pid와 시작 시각이 기록과 같을 때만 신호를 보낸다(프로세스 그룹에 SIGTERM, 5초 뒤 SIGKILL). 패널 워커는 `tmux kill-pane`. 대기 중인 승인은 `denied`로 닫고, 워커 기록·폴더·세션 포인터를 지운다. 원장은 보존 기간 규칙을 따른다. `once`는 `--task`가 있어야 쓸 수 있다. 과제 id는 보내기 전에 워커 기록에 저장한다. 그 과제(`task_id`)에 대한 `reply`가 부모(`parent_ref`)의 훅을 통과하면, 훅이 분리된 프로세스로 `xsm stop --internal`을 띄운다. 훅 안에서 종료를 기다리지 않기 위해서다. `task_id`가 없으면 어떤 답장으로도 멈추지 않는다.
+- **종료.** `stop`은 pid와 시작 시각이 기록과 같을 때만 신호를 보낸다(프로세스 그룹에 SIGTERM, 5초 뒤 SIGKILL). 패널 워커는 `tmux kill-pane`. 대기 중인 승인은 `denied`로 닫고, 워커 기록·폴더·세션 포인터를 지운다. 원장은 보존 기간 규칙을 따른다. `once`는 `--task`가 있어야 쓸 수 있다. 과제 id는 보내기 전에 워커 기록에 저장한다. 그 과제(`task_id`)에 대한 `reply`가 부모(`parent_ref`)의 훅을 통과하면, 훅이 분리된 프로세스로 `xsm stop --internal`을 띄운다. 훅 안에서 종료를 기다리지 않기 위해서다. `task_id`가 없으면 어떤 답장으로도 멈추지 않는다. **`outcome`은 이 판정을 바꾸지 않는다.** `failed`라고 답해도 답한 것이므로 `once` 워커는 멈춘다. 같은 일을 다시 맡길지는 사람의 판단이다. 과제의 성패는 워커 기록이 아니라 부모가 이미 id를 쥐고 있는 원장 항목(`ledger/<과제 id>.json`의 `outcome`)에 남는다 — 워커 기록은 몇 초 뒤 지워진다.
 
 ### 5.6 채널과 MCP 서버
 
@@ -370,9 +377,12 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 
 `list`, `who`, `ledger`, `held`, `doctor`는 성공하면 0, 등록되지 않은 세션에서의 `who`는 2다.
 
+**`outcome`은 종료 코드를 새로 만들지 않는다.** 위 표는 메시지 하나의 전달 결과를 말하고, 과제의 성패는 그와 다른 층이다. 실패를 알리는 답장이 전달되면 `delivered`(0)다. 과제의 성패는 `xsm status <과제 id>`가 전달 상태 뒤에 `(task failed)`로, `xsm ledger`가 `[task failed]`로 보여 준다. `--kind reply`가 아닌데 `--outcome`을 주면 보내기 전에 거부한다(2).
+
 ## 7. 버전과 호환
 
 - 헤더의 `v1`이 형식 버전이다. 모르는 필드는 무시하고, 모르는 버전은 "우리 메시지가 아닌 피어 메시지"로 다룬다(5.1절 2번 규칙이 적용된다).
+- `outcome`은 v1 안에서의 추가다. 선택 필드이고 기본은 생략이므로, 이 필드를 모르는 구현과 아는 구현이 섞여 있어도 양쪽 다 오늘과 같이 동작한다. 모르는 구현은 필드를 무시하고, 아는 구현은 필드가 없는 답장을 "성패를 말하지 않은 답장"으로 읽는다. 본문을 읽어 성패를 추측하지 않는다.
 - 상태 파일에 새 필드를 더하는 것은 호환된다. 필드를 지우거나 뜻을 바꾸면 v2다.
 - `tests/vectors.json`의 `version`이 벡터 형식의 버전이다.
 

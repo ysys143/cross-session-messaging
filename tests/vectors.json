@@ -85,6 +85,35 @@
     },
     "body": "answer"
    }
+  },
+  {
+   "id": "reply-carries-an-outcome",
+   "why": "A task's answer says how the task ended in a field, so the sender can branch on it instead of reading the prose.",
+   "prompt": "<cross-session-message from-name=\"a@claude-4\" from-mode=\"prompting\">\n[xsm v1 id=r1 from=\"a@claude-4\" ref=aaaaaa scope=\"repo:x\" kind=reply outcome=failed reply-to=t1]\nthe build never ran\n</cross-session-message>",
+   "expect": {
+    "peer": true,
+    "body": "the build never ran",
+    "header": {
+     "id": "r1",
+     "kind": "reply",
+     "outcome": "failed",
+     "reply-to": "t1"
+    }
+   }
+  },
+  {
+   "id": "an-unknown-outcome-is-still-a-message",
+   "why": "Strict when sending, lenient when receiving (PROTOCOL 7): a value a later version invents must not stop this one from delivering the message. The field parses; whoever reads it folds what it does not know to nothing.",
+   "prompt": "<cross-session-message from-name=\"a@claude-4\" from-mode=\"prompting\">\n[xsm v1 id=r2 from=\"a@claude-4\" ref=aaaaaa scope=\"repo:x\" kind=reply outcome=partly reply-to=t1]\nhalf of it\n</cross-session-message>",
+   "expect": {
+    "peer": true,
+    "body": "half of it",
+    "header": {
+     "id": "r2",
+     "kind": "reply",
+     "outcome": "partly"
+    }
+   }
   }
  ],
  "build": [
@@ -152,6 +181,49 @@
     "kind=reply",
     "reply-to=m1",
     "from-mode=\"prompting\""
+   ]
+  },
+  {
+   "id": "outcome-goes-after-kind",
+   "why": "The first of the optional fields, so a header built without it is byte for byte the header this format has always had.",
+   "sender": {
+    "name": "a",
+    "alias": "h",
+    "ref": "aaaaaa",
+    "permission_mode": "auto"
+   },
+   "args": {
+    "body": "done",
+    "msg_id": "m5",
+    "scope": "s",
+    "kind": "reply",
+    "reply_to": "m1",
+    "outcome": "succeeded"
+   },
+   "expect_contains": [
+    "kind=reply outcome=succeeded reply-to=m1"
+   ]
+  },
+  {
+   "id": "no-outcome-no-field",
+   "why": "Absent unless asked for: a receiver that has never heard of the field reads the header exactly as it did before.",
+   "sender": {
+    "name": "a",
+    "alias": "h",
+    "ref": "aaaaaa",
+    "permission_mode": "auto"
+   },
+   "args": {
+    "body": "hi",
+    "msg_id": "m6",
+    "scope": "s",
+    "kind": "note"
+   },
+   "expect_contains": [
+    "kind=note"
+   ],
+   "expect_absent": [
+    "outcome="
    ]
   }
  ],
@@ -657,6 +729,39 @@
     "held": true
    },
    "why": "A stopped session keeps its pointer for days; its name must not carry a message now (ADR-0009)."
+  },
+  {
+   "id": "outcome-reaches-the-receiving-agent",
+   "why": "The point of the field is that the session that sent the task is told how it ended; if the gate does not surface it, it may as well not exist.",
+   "sessions": [
+    {
+     "name": "a",
+     "alias": "claude-3",
+     "session_id": "s-a",
+     "cwd": "{tmp}/ws"
+    },
+    {
+     "name": "b",
+     "alias": "claude-4",
+     "session_id": "s-b",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "s-b",
+   "message": {
+    "kind": "peer",
+    "from": "s-a",
+    "kind_field": "reply",
+    "reply_to": "t1",
+    "outcome": "failed",
+    "body": "could not run the tests"
+   },
+   "expect": {
+    "output": "allow",
+    "context_contains": [
+     "It reports the task ended: failed."
+    ]
+   }
   }
  ],
  "native_forecast": [

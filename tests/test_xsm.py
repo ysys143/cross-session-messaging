@@ -1968,3 +1968,58 @@ class ListClearTest(TempState):
         with contextlib.redirect_stdout(io.StringIO()):
             cli.main(["list", "clear", "-a", "--dir", here])
         self.assertEqual({r["session_id"] for r in registry.records()}, {"live1"})
+
+
+class OutcomeTest(TempState):
+    def test_outcome_belongs_to_a_reply(self):
+        from xsm import cli
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = cli.main(["send", "nobody", "--text", "x", "--outcome", "failed"])
+        self.assertEqual(code, 2, "a note cannot close a task")
+        self.assertIn("--outcome belongs to the reply", err.getvalue())
+
+    def test_build_refuses_an_outcome_it_does_not_know(self):
+        from xsm import envelope
+        sender = {"name": "a", "alias": "h", "ref": "aaaaaa"}
+        with self.assertRaises(ValueError, msg="strict when sending"):
+            envelope.build("x", msg_id="m1", sender=sender, scope="s", kind="reply",
+                           outcome="maybe")
+
+    def test_a_reply_closes_the_task_on_the_senders_ledger(self):
+        from xsm import envelope, ledger, receive
+        ledger.queued("t1", {"name": "a", "ref": "aaaaaa"}, {"name": "b", "ref": "bbbbbb"},
+                      "repo:x", "task", "run the tests")
+        parsed = envelope.parse(envelope.build(
+            "could not", msg_id="r1", sender={"name": "b", "alias": "h", "ref": "bbbbbb"},
+            scope="repo:x", kind="reply", reply_to="t1", outcome="failed"))
+        receive._close_task(parsed, receive._outcome(parsed))
+        entry = ledger.status("t1")
+        self.assertEqual(entry["outcome"], "failed", "the task's own entry outlives the worker")
+        self.assertEqual(entry["status"], "queued", "the outcome is not a delivery state")
+        self.assertEqual(entry["closed_by"]["ref"], "bbbbbb")
+
+    def test_an_unknown_outcome_is_ignored_not_refused(self):
+        from xsm import envelope, ledger, receive
+        ledger.queued("t2", {"name": "a", "ref": "aaaaaa"}, {"name": "b", "ref": "bbbbbb"},
+                      "repo:x", "task", "run the tests")
+        parsed = envelope.parse("<%s>\n[xsm v1 id=r2 from=\"b@h\" ref=bbbbbb scope=\"repo:x\" "
+                                "kind=reply outcome=partly reply-to=t2]\nhalf\n</%s>"
+                                % (envelope.TAG, envelope.TAG))
+        self.assertIsNone(receive._outcome(parsed), "lenient when receiving")
+        receive._close_task(parsed, receive._outcome(parsed))
+        self.assertIsNone(ledger.status("t2").get("outcome"))
+
+    def test_the_reply_command_a_task_hands_back_carries_the_flag(self):
+        from xsm import envelope
+        parsed = envelope.parse(envelope.build(
+            "do it", msg_id="t9", sender={"name": "a", "alias": "h", "ref": "aaaaaa"},
+            scope="repo:x", kind="task"))
+        context = envelope.sender_context(parsed)
+        self.assertIn("--wait 15 --outcome succeeded", context)
+        self.assertIn("--outcome failed", context, "the failure path has to be named too")
+        note = envelope.parse(envelope.build(
+            "fyi", msg_id="n9", sender={"name": "a", "alias": "h", "ref": "aaaaaa"},
+            scope="repo:x", kind="note"))
+        self.assertNotIn("--outcome", envelope.sender_context(note),
+                         "a note closes nothing; the command it offers stays as it was")

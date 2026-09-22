@@ -126,7 +126,7 @@ def _build_case(case):
         args = case["args"]
         wire = envelope.build(args["body"], msg_id=args["msg_id"], sender=case["sender"],
                               scope=args["scope"], kind=args.get("kind", "note"),
-                              reply_to=args.get("reply_to"))
+                              reply_to=args.get("reply_to"), outcome=args.get("outcome"))
         for fragment in case.get("expect_contains", []):
             self.assertIn(fragment, wire, case["id"])
         for fragment in case.get("expect_absent", []):
@@ -189,7 +189,10 @@ def _gate_case(case):
             from xsm import config as cfg
             scope = message.get("scope_override") or cfg.scope_for(sender, receiver)[0] or "none"
             prompt = envelope.build(message["body"], msg_id="vec-%s" % case["id"],
-                                    sender=sender, scope=scope, kind=message.get("kind_field", "note"))
+                                    sender=sender, scope=scope,
+                                    kind=message.get("kind_field", "note"),
+                                    reply_to=message.get("reply_to"),
+                                    outcome=message.get("outcome"))
 
         payload = {"hook_event_name": message.get("event", "UserPromptSubmit"),
                    "session_id": receiver["session_id"], "cwd": receiver["cwd"],

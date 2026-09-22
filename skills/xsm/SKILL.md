@@ -70,7 +70,8 @@ a second name kept by xsm would drift from the one the runtime shows.
 ```bash
 xsm send "reviewer@claude-4" --text "Tests pass on my branch. Can you review docs/plan?"
 xsm send "reviewer@claude-4" --text "..." --wait 20     # wait for the receiver's own record
-xsm send "ref:a1b2c3" --text "..." --kind task --reply-to 9f2c1d
+xsm send "ref:a1b2c3" --text "..." --kind task
+xsm send "ref:a1b2c3" --text "done, 3 tests fixed" --kind reply --reply-to 9f2c1d --outcome succeeded
 ```
 
 Address by `name`, `name@home`, `name [ref]`, or `ref:xxxxxx`. The target is
@@ -86,6 +87,12 @@ counts as done. The receiver is told to carry a task out on arrival and is
 handed the exact command to report back, so it should not need its user to
 explain anything. Use `--kind reply --reply-to <id>` to answer, which tells the
 other side not to answer again.
+
+**When you answer a task, say how it ended:** add `--outcome succeeded` or
+`--outcome failed` to that reply. Put it in the flag, not only in the words —
+the flag is what the sender can branch on, and `xsm status <task id>` keeps it
+after you are gone. It belongs to a reply that closes a task and nothing else;
+on a note or a task the command refuses.
 
 Read the result as it is written:
 

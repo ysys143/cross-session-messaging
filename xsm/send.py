@@ -38,7 +38,7 @@ class SendResult:
 
 def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
          reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
-         msg_id: str | None = None) -> SendResult:
+         msg_id: str | None = None, outcome: str | None = None) -> SendResult:
     """One span around the whole attempt, refusals included.
 
     A refusal is as worth timing as a delivery: "out of scope" and "target has
@@ -53,7 +53,7 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
                              kind="PRODUCER") if telemetry else nullcontext()
     with span_cm as span:
         result = _send(target_spec, body, sender=sender, kind=kind, reply_to=reply_to,
-                       priority=priority, wait=wait, msg_id=msg_id, span=span)
+                       priority=priority, wait=wait, msg_id=msg_id, outcome=outcome, span=span)
         if span is not None:
             span.set_attribute("xsm.result.status", result.status)
             if result.msg_id:
@@ -70,7 +70,7 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
 
 def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
           reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
-          msg_id: str | None = None, span=None) -> SendResult:
+          msg_id: str | None = None, outcome: str | None = None, span=None) -> SendResult:
     sender = sender or registry.me()
     if not sender:
         return SendResult("refused", "this session is not registered; run `xsm doctor`")
@@ -81,7 +81,8 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
         if sender.get("ref") in config.blocked():
             return SendResult("refused", "this session is blocked (xsm block)")
         reply = remote.send(sender, local_spec, peer, body, kind, reply_to, wait, msg_id,
-                            traceparent=span.traceparent() if span is not None else None)
+                            traceparent=span.traceparent() if span is not None else None,
+                            outcome=outcome)
         status = reply.get("status") or ("queued" if reply.get("ok") else "error")
         status = {"queued": "sent-unconfirmed"}.get(status, status)
         return SendResult(status, reply.get("error") or ("on %s" % peer), reply.get("id"),
@@ -120,7 +121,7 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
 
     msg_id = msg_id or envelope.new_id()
     content = envelope.build(body, msg_id=msg_id, sender=sender, scope=scope, kind=kind,
-                             reply_to=reply_to,
+                             reply_to=reply_to, outcome=outcome,
                              traceparent=span.traceparent() if span is not None else None)
     ledger.queued(msg_id, sender, target, scope, kind, body)
 

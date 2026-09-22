@@ -113,6 +113,24 @@ def _emit(runtime: str, payload: dict | None) -> None:
         print(json.dumps(payload, ensure_ascii=False))
 
 
+def _outcome(parsed) -> str | None:
+    """How the sender says a task ended, if it said so in a way this version
+    knows. An unknown value folds to nothing: the message is still delivered,
+    it simply carries no outcome here (PROTOCOL 7)."""
+    value = parsed.header.get("outcome")
+    return value if value in envelope.OUTCOMES else None
+
+
+def _close_task(parsed, outcome: str | None) -> None:
+    """Record on the task's own ledger entry how it ended. The task was sent
+    from here, so its entry is in this machine's ledger; the worker that
+    answered may be stopped and forgotten a moment later."""
+    task_id = parsed.header.get("reply-to")
+    if task_id and outcome:
+        ledger.close(task_id, outcome, {"name": parsed.header.get("from"),
+                                        "ref": parsed.header.get("ref")})
+
+
 def allow_with_context(runtime: str, context: str) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                    "additionalContext": context}}
@@ -243,10 +261,12 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
     paths.append_jsonl("decisions.jsonl", {
         "event": "UserPromptSubmit", "runtime": runtime, "decision": "pass", "reason": reason,
         "id": msg_id, "receiver": me and me.get("name"), "from": parsed.header.get("from")})
+    outcome = _outcome(parsed)
     if msg_id:
-        ledger.receipt(msg_id, "delivered", me)
+        ledger.receipt(msg_id, "delivered", me, outcome=outcome)
     if parsed.header.get("kind") == "reply":
-        workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
+        _close_task(parsed, outcome)
+        workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me, outcome)
     worker = workers.load(os.environ.get("XSM_WORKER") or "") if os.environ.get("XSM_WORKER") else None
     return allow_with_context(runtime, envelope.sender_context(
         parsed, runtime, worker=bool(worker), cwd=(me or {}).get("cwd")))
@@ -331,9 +351,12 @@ def take_inbox(me: dict) -> list:
                     msg_id, parsed.header.get("from") or "unknown", reason,
                     "; kept in the held list" if stored else ""))
             else:
-                ledger.receipt(msg_id, "delivered", me, "read with xsm inbox")
+                outcome = _outcome(parsed)
+                ledger.receipt(msg_id, "delivered", me, "read with xsm inbox", outcome=outcome)
                 if parsed.header.get("kind") == "reply":
-                    workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
+                    _close_task(parsed, outcome)
+                    workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"),
+                                     me, outcome)
                 out.append(envelope.sender_context(parsed, runtime, worker=worker,
                                                    cwd=me.get("cwd")) + "\n\n" + parsed.body)
             if span is not None:

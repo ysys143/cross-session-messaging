@@ -438,8 +438,12 @@ def cmd_send(args) -> int:
     if not body:
         print("nothing to send: pass --text or --text-file", file=sys.stderr)
         return USAGE
+    if args.outcome and args.kind != "reply":
+        print("refused: --outcome belongs to the reply that closes a task, not to %s"
+              % args.kind, file=sys.stderr)
+        return REFUSED
     result = send.send(args.target, body, kind=args.kind, reply_to=args.reply_to,
-                       priority=args.priority, wait=args.wait)
+                       priority=args.priority, wait=args.wait, outcome=args.outcome)
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=False))
     else:
@@ -479,9 +483,13 @@ def cmd_status(args) -> int:
     if not state:
         print("no such message", file=sys.stderr)
         return REFUSED
+    # The outcome is the task's, not the delivery's: a task can be delivered and
+    # then fail, so it goes after the status rather than in place of it.
+    ending = "  (task %s)" % state["outcome"] if state.get("outcome") else ""
     print(json.dumps(state, ensure_ascii=False, indent=1) if args.json
-          else "%s  %s -> %s  %s" % (state.get("status"), (state.get("from") or {}).get("name"),
-                                     (state.get("to") or {}).get("name"), state.get("id")))
+          else "%s  %s -> %s  %s%s" % (state.get("status"), (state.get("from") or {}).get("name"),
+                                       (state.get("to") or {}).get("name"), state.get("id"),
+                                       ending))
     return OK if state.get("status") == "delivered" else UNCONFIRMED
 
 
@@ -516,22 +524,26 @@ def cmd_ledger(args) -> int:
         def who(side: dict) -> str:
             return "you" if me_ref and side.get("ref") == me_ref else _short(side.get("name"), 18)
         print("\n".join(_md_table(["status", "from → to", "message"], [
-            (row.get("status"), "%s → %s" % (who(row.get("from") or {}), who(row.get("to") or {})),
+            ("%s%s" % (row.get("status"),
+                       " / task %s" % row["outcome"] if row.get("outcome") else ""),
+             "%s → %s" % (who(row.get("from") or {}), who(row.get("to") or {})),
              _short(row.get("preview"), 36))
             for row in rows])) if rows else "no messages")
         return OK
     if args.compact:
         for row in rows:
-            print("%s %s->%s %s: %s" % (row.get("status"), (row.get("from") or {}).get("name"),
-                                        (row.get("to") or {}).get("name"), row.get("id"),
-                                        (row.get("preview") or "").replace("\n", " ")[:40]))
+            print("%s%s %s->%s %s: %s" % (
+                row.get("status"), "/%s" % row["outcome"] if row.get("outcome") else "",
+                (row.get("from") or {}).get("name"), (row.get("to") or {}).get("name"),
+                row.get("id"), (row.get("preview") or "").replace("\n", " ")[:40]))
         if not rows:
             print("no messages")
         return OK
     for row in rows:
-        print("%-16s %-17s %s -> %s  %s" % (
+        print("%-16s %-17s %s -> %s  %s%s" % (
             row.get("id"), row.get("status"), (row.get("from") or {}).get("name"),
-            (row.get("to") or {}).get("name"), (row.get("preview") or "").replace("\n", " ")[:50]))
+            (row.get("to") or {}).get("name"), (row.get("preview") or "").replace("\n", " ")[:50],
+            "  [task %s]" % row["outcome"] if row.get("outcome") else ""))
     return OK
 
 
@@ -1071,10 +1083,14 @@ def _cmd_workers(args) -> int:
         print("no workers")
         return OK
     for w in rows:
-        print("%s [%s] %s %s %s %s depth %s/%s%s%s%s" % (
+        # A worker that has already answered its task says how it ended, so a
+        # caller reading this list does not have to look the task up.
+        done = ledger.status(w.get("task_id") or "").get("outcome") if w.get("task_id") else None
+        print("%s [%s] %s %s %s %s depth %s/%s%s%s%s%s" % (
             w["name"], w.get("ref"), w["runtime"], w["mode"], workers.state(w),
             w.get("model") or "-", w.get("depth", 1), w.get("max_depth", 1),
-            "  once" if w.get("once") else "", "  FULL-ACCESS" if w.get("full_access") else "",
+            "  once" if w.get("once") else "", "  task %s" % done if done else "",
+            "  FULL-ACCESS" if w.get("full_access") else "",
             "  hooks-untrusted" if w.get("trust_hooks") else ""))
     return OK
 
@@ -1428,6 +1444,8 @@ def build_parser() -> argparse.ArgumentParser:
     snd.add_argument("--text-file", help="file path, or - for stdin")
     snd.add_argument("--kind", choices=list(envelope.KINDS), default="note")
     snd.add_argument("--reply-to", help="message id being answered")
+    snd.add_argument("--outcome", choices=list(envelope.OUTCOMES),
+                     help="on a reply that closes a task: how the task ended")
     snd.add_argument("--priority", choices=["next", "now", "later"], default="next")
     snd.add_argument("--wait", type=float, default=0.0,
                      help="seconds to wait for the receiver's own record of delivery")
