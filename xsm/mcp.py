@@ -73,8 +73,12 @@ TOOLS = [
                      "waiting. Codex takes them only between turns; while you are working, call "
                      "this whenever an xsm result says messages are waiting, and before you wait "
                      "on a peer. A Claude session never needs it: its messages arrive on their "
-                     "own."),
-     "inputSchema": {"type": "object", "properties": {}}},
+                     "own. `wait` blocks until one arrives instead of sleeping in a loop — a "
+                     "loop that never ends your turn is why six messages once went unread."),
+     "inputSchema": {"type": "object", "properties": {
+         "wait": {"type": "number", "default": 0,
+                  "description": "seconds to block until a message arrives (max 60 here; the "
+                                 "shell `xsm inbox --wait` allows longer)"}}}},
     {"name": "xsm_join",
      "description": ("Ask your user to let this session's folder join (or leave) a named xsm "
                      "project, so sessions in other repositories that also joined it can talk "
@@ -191,7 +195,12 @@ class Server:
         if name == "xsm_doc_endorse":
             return self.endorse(me, args)
         if name == "xsm_inbox":
-            from . import receive
+            from . import inbox, receive
+            wait = float(args.get("wait") or 0)
+            if wait > 0:
+                # Shorter than the shell's cap: serve() reads one request at a
+                # time, so a long block looks to the client like a dead server.
+                inbox.wait_for(me.get("session_id"), min(wait, inbox.MCP_MAX_WAIT))
             return "\n\n----\n\n".join(receive.take_inbox(me)) or "(no messages waiting)"
         raise channel.ChannelError("unknown tool %s" % name)
 

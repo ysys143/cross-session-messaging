@@ -85,6 +85,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 - **항상 UUID로 지정한다.** 이름 조회는 스레드가 100개를 넘으면 거부된다(S7).
 - 대상 TUI가 스레드를 로드한 유휴 상태면 약 10초 안에 턴이 시작된다. 진행 중인 턴에는 끼어들지 않는다(S2).
 - **첫 프롬프트 전 스레드로 보내기.** `codex queue`는 rollout이 없는 스레드를 `no rollout found`로 거부한다. 이 오류일 때만 xsm은 `codex queue`가 쓸 행을 대기열 DB(`queue_<n>.sqlite`의 `queued_items`)에 직접 쓴다: `id`(UUIDv7), `thread_id`, `payload_json = {"UserInput": {"content": [{"type": "text", "text": <봉투>, "text_elements": []}], "client_id": <UUIDv7>}}`, `queue_order = 그 스레드 최대값 + 1`, `created_at_ms = updated_at_ms = 지금`. DB 트리거가 리비전을 올리고 TUI가 가져간다(실측 8~14초). 열 구성이 이와 다르면 쓰지 않고 `codex-internal-changed`로 실패한다. Codex 내부 형식에 기대는 유일한 곳이다(ADR-0002 부록).
+- **기다렸다 받기.** `xsm inbox --wait <초>`는 사본이 하나라도 생길 때까지 막았다가 **생기는 즉시** 돌려준다. 상한 600초(사람을 기다리는 승인 한도와 같은 값)이고 넘기면 조이며 그 사실을 stderr로 알린다. 이 상한이 "대기는 데몬이 아니다"를 코드로 못 박는 지점이다. 15초마다 stderr로 살아 있음을 알리고(조용한 프로세스는 에이전트가 죽인다), 만료돼도 종료 코드는 **0**에 출력은 `(no messages waiting)`이다 — §6의 코드는 메시지 하나의 전달 결과이지 "아무것도 오지 않았다"가 아니다. 대기 루프는 세기만 하고 절대 꺼내지 않는다(꺼내기는 rename 선점이라 기다리던 메시지를 삼킨다). MCP `xsm_inbox`의 `wait`는 상한 60초다. MCP 서버가 요청을 한 번에 하나씩 읽으므로 더 길게 막으면 클라이언트에는 서버가 죽은 것으로 보인다.
 - **턴 중 수신(`xsm inbox`).** 발신 측은 대기열에 넣기 전에 봉투 사본을 `inbox/<thread-uuid>/<id>.json`에
   둔다(대기열 전송이 실패하면 지운다). Codex 세션은 턴 도중 `xsm inbox`나 MCP `xsm_inbox`로 사본을 꺼낸다.
   꺼내는 순간 훅과 같은 검사(`receive.check`)를 거치고 같은 영수증을 쓴다. 나중에 대기열 사본이 훅에

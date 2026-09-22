@@ -461,6 +461,11 @@ def cmd_inbox(args) -> int:
     if not me:
         print("this session is not registered; run `xsm doctor`", file=sys.stderr)
         return REFUSED
+    if args.wait > 0:
+        if args.wait > inbox.MAX_WAIT:
+            print("[xsm] --wait clamped to %ds; it blocks one command, it is not a daemon."
+                  % inbox.MAX_WAIT, file=sys.stderr)
+        inbox.wait_for(me.get("session_id"), args.wait, out=sys.stderr)
     texts = receive.take_inbox(me)
     if not texts:
         print("(no messages waiting)")
@@ -1430,6 +1435,9 @@ def build_parser() -> argparse.ArgumentParser:
     snd.set_defaults(func=cmd_send)
 
     ib = sub.add_parser("inbox", help="messages waiting for this Codex session, read mid-turn")
+    ib.add_argument("--wait", type=float, default=0.0,
+                    help="block until a message arrives, at most this many seconds (max %d); "
+                         "returns the moment one does, and 0 either way" % inbox.MAX_WAIT)
     ib.set_defaults(func=cmd_inbox)
 
     st = sub.add_parser("status", help="delivery state of one message")

@@ -1087,6 +1087,56 @@ class CodexInboxTest(TempState):
         self.assertEqual(self._send().status, "error")
         self.assertEqual(inbox.count("t-b"), 0)
 
+    def test_waiting_returns_the_moment_a_message_lands(self):
+        """The alternative is what a worker actually did: sleep in a loop,
+        which never ends the turn, which is why the queue never arrived."""
+        import threading
+        from xsm import inbox
+        threading.Timer(0.3, self._send, ["late one"]).start()
+        started = time.time()
+        self.assertEqual(inbox.wait_for("t-b", 10, interval=0.05), 1)
+        self.assertLess(time.time() - started, 5, "it does not sit out the deadline")
+
+    def test_waiting_takes_nothing_so_the_message_is_still_there(self):
+        from xsm import inbox, receive
+        self._send("keep me")
+        self.assertEqual(inbox.wait_for("t-b", 5, interval=0.05), 1)
+        self.assertEqual(len(receive.take_inbox(self.b)), 1, "the wait must not claim it")
+
+    def test_an_expiry_is_not_a_failure_and_says_what_to_do(self):
+        from xsm import cli, inbox, registry
+        out, err = io.StringIO(), io.StringIO()
+        said = io.StringIO()
+        self.assertEqual(inbox.wait_for("t-b", 0.2, interval=0.05, out=said), 0)
+        self.assertIn("do not sleep-poll", said.getvalue())
+        with mock.patch.object(registry, "me", lambda: self.b), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["inbox", "--wait", "0.2"]), 0, "nothing arrived is not an error")
+        self.assertIn("(no messages waiting)", out.getvalue())
+        self.assertNotIn("waiting for messages", out.getvalue(), "stdout stays the message alone")
+
+    def test_a_long_wait_is_clamped_to_the_cap(self):
+        from xsm import cli, inbox, registry
+        seen = []
+        err = io.StringIO()
+        with mock.patch.object(registry, "me", lambda: self.b), \
+                mock.patch.object(inbox, "wait_for",
+                                  lambda sid, secs, **kw: seen.append(secs) or 0), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            cli.main(["inbox", "--wait", "99999"])
+        self.assertIn("clamped", err.getvalue(), "an unbounded wait would be a daemon")
+        with mock.patch.object(inbox, "MAX_WAIT", 0.2):
+            started = time.time()
+            self.assertEqual(inbox.wait_for("nobody", 99999, interval=0.05), 0)
+        self.assertLess(time.time() - started, 5, "the cap is what stops it being a daemon")
+
+    def test_the_keepalive_goes_to_stderr(self):
+        from xsm import inbox
+        said = io.StringIO()
+        inbox.wait_for("t-b", 0.3, interval=0.05, keepalive=0.01, out=said)
+        self.assertIn("waiting for messages", said.getvalue(),
+                      "a silent process is one an agent kills")
+
     def test_every_xsm_command_tells_a_codex_session_what_is_waiting(self):
         from xsm import cli
         self._send()

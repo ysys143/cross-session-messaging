@@ -105,6 +105,11 @@ From a sandboxed shell (a background worker, a Codex workspace-write
 session) `xsm send` to a Codex peer refuses at once and says to use the
 `xsm_send` MCP tool: `codex queue` cannot run inside the sandbox. Use the tool.
 
+Waiting for a peer? `xsm inbox --wait 60` blocks until one arrives and returns
+the moment it does. **Do not sleep-poll** — a loop that never ends your turn is
+why six messages once went unread for fifteen minutes. An expiry is not an
+error: it exits 0 and says nothing arrived.
+
 If you are a Codex session, messages sent to you wait while your turn runs.
 Every xsm command and MCP tool result tells you when some are waiting; read
 them with `xsm inbox` (or the `xsm_inbox` MCP tool) — do that before you wait
