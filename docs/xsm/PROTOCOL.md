@@ -103,7 +103,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 |---|---|
 | `mcp/<pid>.json` | `{"pid", "ppid", "lstart", "started", "cwd"}`: 실행 중인 xsm MCP 서버의 비콘(§4.3). 서버가 끝나면 지우고, 죽은 pid의 비콘은 읽을 때 정리한다 |
 | `inbox/<thread-uuid>/<id>.json` | `{"id", "t", "content"}`: Codex 대상 메시지의 봉투 사본(§2.2). 어느 경로로든 넘겨지면 지우고, 읽히지 않은 사본은 세션 포인터 보존 기간이 지나면 정리한다 |
-| `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다 |
+| `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "telemetry_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다 |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |
 | `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?, "ended_at"?, "end_reason"?}` |
@@ -200,7 +200,7 @@ refused: only stopped sessions match 'life-b'
 | 멈춘 세션의 포인터 | 7일 | `retention_days` | 재개하면 같은 주소가 돌아오므로 바로 지우지 않는다. 기준 시각은 `ended_at`, 없으면 마지막 `updated` |
 | 원장과 영수증 | 30일 | `ledger_retention_days` | "그 메시지가 도착했나"에 답할 만큼 |
 | 보류된 본문 | 30일 | `ledger_retention_days` | 같음 |
-
+| 스팬과 메트릭 포인트 | 7일 | `telemetry_retention_days`(`0`이면 무한) | 사고 직후에 보는 기록이다. 머리에서만, **이미 내보낸 줄만** 지우고 `otlp-cursor.json`을 그만큼 내린다. 커서가 닿지 않은 줄은 남긴다(ADR-0011) |
 `live`인 포인터는 기간과 무관하게 지우지 않는다. `xsm prune --dry-run`으로 무엇이 지워질지 먼저 볼 수 있다.
 
 ## 5. 판정

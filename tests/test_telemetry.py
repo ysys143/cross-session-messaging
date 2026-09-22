@@ -375,3 +375,60 @@ class SendIsUnchangedByTelemetryTest(TempState):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TelemetryRetentionTest(TempState):
+    """Spans are for the week after an incident, not forever (ADR-0011). The
+    exporter remembers how far it has read as a line number, so dropping a
+    line it has not reached would silently skip an unsent one."""
+
+    def _write(self, name, rows):
+        from xsm import paths
+        for row in rows:
+            paths.append_jsonl(name, row)
+
+    def test_old_exported_lines_go_and_the_cursor_follows(self):
+        import time as _time
+        from xsm import housekeeping, otlp_export, paths, telemetry
+        old, fresh = _time.time() - 30 * 86400, _time.time()
+        self._write(telemetry.SPANS, [{"name": "a", "start": old}, {"name": "b", "start": old},
+                                      {"name": "c", "start": fresh}])
+        self._write(telemetry.METRICS, [{"name": "m", "t": old}, {"name": "n", "t": fresh}])
+        paths.write_json(paths.path(otlp_export.CURSOR), {"spans": 3, "points": 2})
+
+        self.assertEqual(housekeeping.prune_telemetry(_time.time(), dry_run=True),
+                         {telemetry.SPANS: 2, telemetry.METRICS: 1})
+        self.assertEqual(len(paths.read_jsonl(telemetry.SPANS)), 3, "a dry run writes nothing")
+
+        housekeeping.prune_telemetry(_time.time())
+        self.assertEqual([r["name"] for r in paths.read_jsonl(telemetry.SPANS)], ["c"])
+        self.assertEqual([r["name"] for r in paths.read_jsonl(telemetry.METRICS)], ["n"])
+        cursor = paths.read_json(paths.path(otlp_export.CURSOR)) or {}
+        self.assertEqual((cursor["spans"], cursor["points"]), (1, 1),
+                         "the cursor moves down by what was dropped")
+
+    def test_a_line_the_exporter_has_not_read_is_kept_however_old(self):
+        import time as _time
+        from xsm import housekeeping, otlp_export, paths, telemetry
+        old = _time.time() - 30 * 86400
+        self._write(telemetry.SPANS, [{"name": "sent", "start": old},
+                                      {"name": "unsent", "start": old}])
+        paths.write_json(paths.path(otlp_export.CURSOR), {"spans": 1})
+        housekeeping.prune_telemetry(_time.time())
+        self.assertEqual([r["name"] for r in paths.read_jsonl(telemetry.SPANS)], ["unsent"])
+        self.assertEqual((paths.read_json(paths.path(otlp_export.CURSOR)) or {})["spans"], 0)
+
+    def test_nothing_is_exported_yet_so_nothing_is_dropped(self):
+        import time as _time
+        from xsm import housekeeping, paths, telemetry
+        self._write(telemetry.SPANS, [{"name": "a", "start": _time.time() - 30 * 86400}])
+        self.assertEqual(housekeeping.prune_telemetry(_time.time()), {})
+        self.assertEqual(len(paths.read_jsonl(telemetry.SPANS)), 1)
+
+    def test_zero_days_keeps_everything(self):
+        import time as _time
+        from xsm import config, housekeeping, otlp_export, paths, telemetry
+        config._save({"telemetry_retention_days": 0})
+        self._write(telemetry.SPANS, [{"name": "a", "start": _time.time() - 400 * 86400}])
+        paths.write_json(paths.path(otlp_export.CURSOR), {"spans": 1})
+        self.assertEqual(housekeeping.prune_telemetry(_time.time()), {})
+        self.assertEqual(len(paths.read_jsonl(telemetry.SPANS)), 1)

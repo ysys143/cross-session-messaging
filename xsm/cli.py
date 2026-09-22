@@ -1231,10 +1231,15 @@ def cmd_mcp(args) -> int:
 def cmd_prune(args) -> int:
     removed = housekeeping.prune(dry_run=args.dry_run)
     verb = "would remove" if args.dry_run else "removed"
-    print("%s %d session pointer(s), %d ledger record(s), %d held message(s)" % (
-        verb, len(removed["sessions"]), len(removed["ledger"]), len(removed["held"])))
+    lines = removed.get("telemetry") or {}
+    print("%s %d session pointer(s), %d ledger record(s), %d held message(s), %d inbox copy(ies), "
+          "%d telemetry line(s)" % (
+              verb, len(removed["sessions"]), len(removed["ledger"]), len(removed["held"]),
+              len(removed.get("inbox") or []), sum(lines.values())))
     for name in removed["sessions"]:
         print("  session %s" % name)
+    for name, count in sorted(lines.items()):
+        print("  %s: %d line(s) already exported" % (name, count))
     return OK
 
 

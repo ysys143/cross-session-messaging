@@ -39,7 +39,7 @@ Claude Code와 Codex 에이전트 세션들이 서로를 인식하고 메시지�
 ├── hooks/                        # 런타임이 부르는 훅 진입점
 ├── commands/                     # 슬래시 명령
 ├── docs/
-│   ├── adr/                     # 아키텍처 결정 기록 (0001–0011)
+│   ├── adr/                     # 아키텍처 결정 기록 (0001–0012)
 │   ├── xsm/                     # 프로토콜·테스트 계획
 │   ├── references/              # 조사 자료, 오버헤드 실측
 │   ├── plan/ · spikes/ · reviews/
@@ -130,6 +130,9 @@ OTLP의 형식만 직접 만들기 때문에, 의존성은 여전히 stdlib뿐�
 xsm metrics                 # 이 머신에 쌓인 호출 수, 에러, p95
 xsm metrics --json
 ```
+
+스팬과 메트릭은 기본 7일 보관합니다(`telemetry_retention_days`). 정리는 이미 내보낸 줄만,
+파일 머리에서만 지우므로 아직 전송하지 않은 기록은 남습니다. 메시지 본문은 스팬에 넣지 않습니다.
 
 collector로 보내려면:
 

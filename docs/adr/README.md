@@ -38,7 +38,7 @@
 | [0008](0008-session-naming-and-namespace.md) | 세션 이름, 주소, 네임스페이스 | Accepted | G1, G2, G5 |
 | [0009](0009-session-trust-handshake.md) | 세션 간 신뢰 수립(핸드셰이크) | Superseded | G1, G2, G4, G5 |
 | [0010](0010-workers.md) | 워커를 띄우고 끝내는 일의 경계 | Accepted | C1 |
-| [0011](0011-telemetry-without-an-sdk.md) | SDK 없이 관측 가능하게 만들기 | Proposed | G2, G3, C1 |
+| [0011](0011-telemetry-without-an-sdk.md) | SDK 없이 관측 가능하게 만들기 | Accepted | G2, G3, C1 |
 | [0012](0012-who-picks-the-next-node.md) | 여러 세션이 한 문제를 나눠 풀 때, 다음 노드는 누가 고르는가 | Proposed | G3, G6, G7, C1 |
 
 새 ADR은 [TEMPLATE.md](TEMPLATE.md)를 복사해 만든다.

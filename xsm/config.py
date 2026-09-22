@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "max_workers": 4,         # workers one session may have running at once
     "deny": [],               # session refs that may neither send nor receive (ADR-0009)
     "ignore_frameworks": [],  # frameworks inside which xsm still starts workers: orca, herdr, all
+    "telemetry_retention_days": 7,   # spans and metric points (ADR-0011); 0 keeps them forever
 }
 
 

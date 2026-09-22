@@ -16,6 +16,7 @@ The retention windows follow from what we measured:
 from __future__ import annotations
 
 import glob
+import json
 import os
 import time
 
@@ -23,7 +24,7 @@ from . import config, identity, inbox, paths
 
 STAMP = "last-prune"
 INTERVAL = 3600.0
-DEFAULTS = {"retention_days": 7, "ledger_retention_days": 30}
+DEFAULTS = {"retention_days": 7, "ledger_retention_days": 30, "telemetry_retention_days": 7}
 
 
 def _setting(name: str) -> float:
@@ -46,7 +47,7 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
     now = time.time() if now is None else now
     pointer_cutoff = now - _setting("retention_days") * 86400
     record_cutoff = now - _setting("ledger_retention_days") * 86400
-    removed = {"sessions": [], "ledger": [], "held": [], "inbox": []}
+    removed = {"sessions": [], "ledger": [], "held": [], "inbox": [], "telemetry": {}}
 
     for p in glob.glob(paths.path(paths.SESSIONS, "*.json")):
         rec = paths.read_json(p)
@@ -75,6 +76,8 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
             if not dry_run:
                 _unlink(p)
 
+    removed["telemetry"] = prune_telemetry(now, dry_run)
+
     # A copy for a Codex session that never read it: the queue item it
     # duplicates is gone with the session, so it goes with the pointer window.
     for p in glob.glob(paths.path(inbox.INBOX, "*", "*.json")):
@@ -101,6 +104,51 @@ def maybe_prune() -> dict | None:
         return prune()
     except Exception:                  # housekeeping must never break a hook
         return None
+
+
+def prune_telemetry(now: float, dry_run: bool = False) -> dict:
+    """Drop old spans and metric points, but never one still waiting to be
+    exported: `xsm otlp-export` remembers how far it has read as a line
+    number, so a line dropped from the head would silently skip an unsent one
+    (ADR-0011). Lines are dropped from the head only, and the cursor moves
+    down by as many.
+
+    Measured for the window's default (2026-09-23): a heavy day of workers and
+    pilots wrote 836 spans, 340 kB — a week of that is a few megabytes.
+    """
+    from . import otlp_export, telemetry
+    days = _setting("telemetry_retention_days")
+    if days <= 0:
+        return {}
+    cutoff = now - days * 86400
+    cursor = paths.read_json(paths.path(otlp_export.CURSOR), {}) or {}
+    dropped = {}
+    for name, key in ((telemetry.SPANS, "spans"), (telemetry.METRICS, "points")):
+        rows = paths.read_jsonl(name)
+        if not rows:
+            continue
+        exported = int(cursor.get(key, 0))
+        cut = 0
+        for row in rows[:exported]:
+            when = row.get("start") or row.get("t") or 0
+            if when >= cutoff:
+                break
+            cut += 1
+        if not cut:
+            continue
+        dropped[name] = cut
+        if dry_run:
+            continue
+        keep = rows[cut:]
+        tmp = paths.path(name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for row in keep:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, paths.path(name))
+        cursor[key] = max(0, exported - cut)
+    if dropped and not dry_run:
+        paths.write_json(paths.path(otlp_export.CURSOR), cursor)
+    return dropped
 
 
 def _unlink(p: str) -> None:
