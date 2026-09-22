@@ -72,6 +72,17 @@ Codex에서는 `/xsm-list` 대신 `$xsm-list`로 부른다. Claude의 `!`명령`
 
 읽기만 하는 명령은 출력을 그대로 세션에 넣는다. `/xsm-send`는 인자를 셸 문자열로 이어 붙이지 않고 모델이 인자로 넘기게 해, 본문에 따옴표나 특수문자가 있어도 안전하다.
 
+## 설치 두 가지
+
+| 길 | 대상 | 갱신 | 특징 |
+|---|---|---|---|
+| 플러그인 (`/plugin install xsm@xsm`) | Claude Code | `plugin.json`의 `version` | 훅·명령·스킬·MCP·`bin/`이 한 번에. 끄면 훅도 꺼짐. 명령은 `/xsm:list` |
+| `xsm install` | Codex, 플러그인 안 쓰는 Claude 홈 | `xsm install --refresh` | 설정 파일에 훅을 병합하고 명령·스킬을 복사. 명령은 `/xsm-list`, Codex는 `$xsm-list` |
+
+한 Claude 홈에 둘 다 두면 훅이 두 번 돈다. 두 번째 수신 게이트가 자기 영수증을 보고 중복으로 거부하므로
+메시지가 사라진다. `xsm install`은 플러그인이 있는 홈을 거부한다. `xsm doctor`가 어느 홈이 어느 길인지,
+복사본이 낡았는지, 지금 무엇이 막혀 있는지 보여 준다.
+
 ## 쓰기
 
 ```bash

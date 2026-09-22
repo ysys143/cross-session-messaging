@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 from . import config, paths
 
@@ -144,6 +145,53 @@ def launcher() -> str:
 def command_files() -> list:
     pattern = os.path.join(REPO, "commands", "xsm-*.md")
     return sorted(glob.glob(pattern))
+
+
+PLUGIN_COMMANDS = os.path.join(REPO, ".claude-plugin", "commands")
+
+
+def plugin_command(source: str) -> str:
+    """The same command, for the plugin. A plugin's files are copied as they
+    are, so there is no install step to put an absolute launcher in: the
+    plugin's own bin/ is on PATH while it is enabled, so `xsm` is enough.
+    The name loses its prefix because Claude namespaces a plugin's commands
+    itself: /xsm:list, not /xsm:xsm-list."""
+    body = open(source, encoding="utf-8").read().replace("{{XSM}}", "xsm")
+    return body.replace("/xsm-", "/xsm:")        # usage lines inside the body
+
+
+def plugin_command_files() -> dict:
+    """{path under .claude-plugin/commands: contents}"""
+    return {os.path.join(PLUGIN_COMMANDS, os.path.basename(s)[len("xsm-"):]): plugin_command(s)
+            for s in command_files()}
+
+
+def write_plugin_commands() -> list:
+    written = []
+    os.makedirs(PLUGIN_COMMANDS, exist_ok=True)
+    for target, body in plugin_command_files().items():
+        if _read_text(target) != body:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(body)
+        written.append(target)
+    return written
+
+
+def plugin_installed(home: str) -> str | None:
+    """The xsm plugin's version in this Claude home, or None.
+
+    Both ways of installing exist (user decision, 2026-09-23): a plugin, and
+    `xsm install` writing into settings.json. Both in one home would run every
+    hook twice — the second run of the receive gate would see its own receipt
+    and refuse the message as a duplicate — so each install path checks for
+    the other."""
+    state = paths.read_json(os.path.join(os.path.expanduser(home), "plugins",
+                                         "installed_plugins.json"), {}) or {}
+    for key, entries in (state.get("plugins") or {}).items():
+        if key == PLUGIN_NAME or key.startswith(PLUGIN_NAME + "@"):
+            for entry in entries if isinstance(entries, list) else [entries]:
+                return (entry or {}).get("version") or "installed"
+    return None
 
 
 def install_commands(home: str) -> list:
@@ -275,6 +323,31 @@ def remove_codex_commands(home: str) -> int:
     return removed
 
 
+def stale_copies(home: str, runtime: str = "claude") -> list:
+    """Files we installed into a home that no longer match the repository.
+    A copied skill in a second profile sat eight versions behind for a day
+    before anyone noticed (2026-09-23), because nothing compared them."""
+    out = []
+    if runtime == "claude":
+        for source in command_files():
+            target = os.path.join(home, "commands", os.path.basename(source))
+            body = _read_text(target)
+            if body is not None and FILE_MARKER in body and \
+                    body != open(source, encoding="utf-8").read().replace("{{XSM}}", launcher()):
+                out.append(target)
+        state, detail = skill_state(home)
+        if state == "copy-stale":
+            out.append(detail)
+    else:
+        for source in command_files():
+            name = os.path.basename(source)[:-3]
+            target = os.path.join(home, "skills", name, "SKILL.md")
+            body = _read_text(target)
+            if body is not None and FILE_MARKER in body and body != codex_command_skill(source)[0]:
+                out.append(target)
+    return out
+
+
 def skill_state(home: str) -> tuple:
     """(state, detail) for the skill in this home.
 
@@ -306,10 +379,18 @@ def skill_state(home: str) -> tuple:
     return "foreign", target
 
 
-def install_skill(home: str) -> tuple:
+def install_skill(home: str, refresh: bool = False) -> tuple:
     """Link the skill so the session knows the commands exist. A link keeps it in
-    step with the repo; anything already there that is not ours is left be."""
+    step with the repo; anything already there that is not ours is left be.
+
+    With `refresh`, a copy that has fallen behind is rewritten: it is our file,
+    and telling a person to run `cp` is how two profiles ended up eight
+    versions behind (2026-09-23)."""
     state, detail = skill_state(home)
+    if state == "copy-stale" and refresh:
+        with open(detail, "w", encoding="utf-8") as fh:
+            fh.write(open(os.path.join(REPO, "skills", "xsm", "SKILL.md"), encoding="utf-8").read())
+        return "copy-current", detail
     if state != "absent":
         return state, detail
     target = os.path.join(home, "skills", "xsm")
@@ -543,6 +624,33 @@ def diff(home: str, runtime: str) -> str:
     return "\n".join(lines)
 
 
+def stuck(now: float | None = None) -> dict:
+    """What is waiting on someone right now, from the records themselves.
+
+    Everything here cost a person an investigation once: a worker waiting ten
+    minutes on a permission nobody saw, messages queued to a Codex thread its
+    TUI had left, sends that failed inside a sandbox. `xsm doctor` said
+    nothing about any of them (2026-09-23)."""
+    from . import ledger, registry
+    now = time.time() if now is None else now
+    waiting = []
+    for p in glob.glob(paths.path("approvals", "*.json")):
+        req = paths.read_json(p, {}) or {}
+        if req.get("status") in (None, "pending"):
+            waiting.append({"id": req.get("id"), "worker": req.get("worker"),
+                            "tool": req.get("tool"), "waiting_s": int(now - (req.get("t") or now))})
+    rows = ledger.recent(200)
+    undelivered = [r for r in rows if r.get("status") == "queued" and now - (r.get("t") or now) > 120]
+    failures = {}
+    for r in rows:
+        if r.get("status") == "error":
+            failures[(r.get("error") or "unknown").split(":")[0]] = \
+                failures.get((r.get("error") or "unknown").split(":")[0], 0) + 1
+    replaced = [r for r in registry.records() if r.get("end_reason") == "thread_replaced"]
+    return {"approvals": waiting, "undelivered": undelivered, "send_failures": failures,
+            "threads_replaced": [{"name": r.get("name"), "ref": r.get("ref")} for r in replaced]}
+
+
 def doctor() -> dict:
     """Facts a person can act on, not a verdict."""
     from . import adapters, registry            # imported here to keep hook startup lean
@@ -566,6 +674,13 @@ def doctor() -> dict:
         "decisions_seen": len(decisions),
         "hook_errors_recent": len(errors),
         "held": len(os.listdir(paths.path(paths.HELD))) if os.path.isdir(paths.path(paths.HELD)) else 0,
+        "version": plugin_version(),
+        "tmux": shutil.which("tmux"),
+        "plugins": {h["path"]: plugin_installed(h["path"]) for h in config.homes()
+                    if h.get("runtime") == "claude"},
+        "stale": {h["path"]: stale_copies(h["path"], h.get("runtime") or "claude")
+                  for h in config.homes()},
+        "stuck": stuck(),
         "limits": [
             "A peer message without the xsm envelope cannot be told apart from your own typing "
             "inside a hook, so it passes the gate (S8-g2). Set crossSessionInbound to \"hold\" "
@@ -584,6 +699,15 @@ def doctor() -> dict:
 # home has it.
 
 MCP_NAME = "xsm"
+PLUGIN_NAME = "xsm"
+
+
+def plugin_manifest() -> dict:
+    return paths.read_json(os.path.join(REPO, ".claude-plugin", "plugin.json"), {}) or {}
+
+
+def plugin_version() -> str:
+    return plugin_manifest().get("version") or ""
 
 
 def mcp_command() -> list:

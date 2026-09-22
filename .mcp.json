@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "xsm": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/hooks/xsm-mcp"
+    }
+  }
+}

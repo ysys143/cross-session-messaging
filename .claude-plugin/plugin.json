@@ -1,0 +1,22 @@
+{
+  "name": "xsm",
+  "displayName": "Cross-Session Messaging",
+  "version": "0.2.0",
+  "description": "Message the other Claude Code and Codex sessions on this machine: list them, send a task, answer one, start workers, and see what was delivered.",
+  "author": {
+    "name": "jaesolshin"
+  },
+  "repository": "https://github.com/jaesolshin/cross-session-messaging",
+  "license": "MIT",
+  "keywords": [
+    "messaging",
+    "sessions",
+    "codex",
+    "orchestration",
+    "multi-agent"
+  ],
+  "commands": "./.claude-plugin/commands/",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}

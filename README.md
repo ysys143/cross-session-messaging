@@ -19,6 +19,8 @@ Claude Code와 Codex 에이전트 세션들이 서로를 인식하고 메시지�
 ## 구조
 
 ```
+├── .claude-plugin/               # 플러그인·마켓플레이스 매니페스트, 플러그인용 명령 사본
+├── hooks/hooks.json, .mcp.json   # 플러그인이 제공하는 훅과 MCP 서버
 ├── bin/xsm                       # 런처 (PYTHONPATH 설정 후 python3 -m xsm)
 ├── xsm/                          # 구현 전체 (Python, stdlib만)
 │   ├── cli.py                   # 서브커맨드 전부
@@ -50,16 +52,33 @@ Claude Code와 Codex 에이전트 세션들이 서로를 인식하고 메시지�
 
 ### 설치
 
-패키지 설치는 없습니다. 의존성이 stdlib뿐이라 `bin/xsm`이 `PYTHONPATH`를 잡고 바로 실행합니다.
-여기서 설치란 각 `CONFIG_DIR`에 훅을 심는 일을 말합니다.
+의존성은 stdlib뿐입니다. 설치란 각 세션이 훅을 돌리게 만드는 일이고, 두 가지 길이 있습니다.
 
-```bash
-bin/xsm install                      # ~/.claude 와 ~/.codex 에 훅 설치
-bin/xsm install --claude-home ~/.claude-2   # 프로필이 여러 개면 각각
-bin/xsm doctor                       # 무엇이 설치됐고 무엇이 안 됐는지
+**Claude Code: 플러그인** (권장). 저장소 자체가 마켓플레이스입니다.
+
+```
+/plugin marketplace add jaesolshin/cross-session-messaging
+/plugin install xsm@xsm
 ```
 
-`~/.local/bin` 등 PATH에 `bin/xsm`을 링크해두면 이후 `xsm`으로 부를 수 있습니다.
+훅·명령·스킬·MCP 서버·`bin/`이 함께 들어오고, `plugin.json`의 `version`이 오를 때 갱신됩니다.
+명령은 `/xsm:list`, `/xsm:who`처럼 플러그인 이름이 앞에 붙습니다. 플러그인을 끄면 훅도 함께 꺼집니다.
+
+**Codex, 그리고 플러그인을 쓰지 않는 Claude 홈: `xsm install`.**
+
+```bash
+bin/xsm install --codex-home ~/.codex          # Codex 훅·스킬·MCP
+bin/xsm install --claude-home ~/.claude-2      # 플러그인 대신 직접 설치할 때
+bin/xsm install --refresh                      # 이미 설치한 모든 홈을 최신으로
+bin/xsm doctor                                 # 설치 상태, 낡은 사본, 지금 막힌 것
+```
+
+한 Claude 홈에 플러그인과 직접 설치가 같이 있으면 훅이 두 번 돌아 위험합니다. `xsm install`은 그런 홈을
+거부합니다(`--force`로 넘길 수 있음). 직접 설치한 사본은 저장소가 바뀌어도 자동으로 따라가지 않으므로,
+`xsm doctor`가 낡았다고 알려 주면 `xsm install --refresh`로 갱신합니다.
+
+`~/.local/bin` 등 PATH에 `bin/xsm`을 링크해두면 이후 `xsm`으로 부를 수 있습니다(플러그인으로 설치하면
+세션 안에서는 자동으로 PATH에 들어갑니다).
 
 ### 세션 등록
 

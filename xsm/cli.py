@@ -611,10 +611,27 @@ def cmd_held(args) -> int:
 def cmd_install(args) -> int:
     targets = [(h, "claude") for h in (args.claude_home or [])] + \
               [(h, "codex") for h in (args.codex_home or [])]
+    if args.refresh and not targets:
+        # Every home xsm already knows: the commands, skills and MCP entry it
+        # wrote there are copies, and a copy eight versions behind is what a
+        # second profile quietly ran for a day (2026-09-23).
+        targets = [(h["path"], h["runtime"]) for h in config.homes()]
+        if not targets:
+            print("nothing installed yet; name a home: --claude-home ~/.claude", file=sys.stderr)
+            return USAGE
     if not targets:
-        print("name at least one home: --claude-home ~/.claude-3 --codex-home ~/.codex",
-              file=sys.stderr)
+        print("name at least one home: --claude-home ~/.claude-3 --codex-home ~/.codex\n"
+              "or refresh the ones already installed: xsm install --refresh", file=sys.stderr)
         return USAGE
+    for home, runtime in list(targets):
+        if runtime != "claude":
+            continue
+        plugin = install.plugin_installed(home)
+        if plugin and not args.force:
+            print("refused: %s has the xsm plugin (%s), which brings its own hooks; installing "
+                  "again would run every hook twice. Remove the plugin, or pass --force if you "
+                  "know why you want both." % (_home_tilde(home), plugin), file=sys.stderr)
+            return REFUSED
     try:
         chosen = install.resolve_python(args.python)
     except ValueError as err:
@@ -642,7 +659,7 @@ def cmd_install(args) -> int:
             print("installed into %s (backup: %s)" % (result["file"], result.get("backup", "none")))
         if runtime == "claude" and not args.no_commands:
             written = install.install_commands(home)
-            state, detail = install.install_skill(home)
+            state, detail = install.install_skill(home, refresh=args.refresh)
             print("  slash commands: %s" % ", ".join(
                 "/" + os.path.basename(w)[:-3] for w in written) if written else
                 "  slash commands: none written")
@@ -674,7 +691,7 @@ def cmd_install(args) -> int:
             }.get(outcome, outcome))
         if runtime == "codex":
             if not args.no_commands:
-                state, _ = install.install_skill(home)
+                state, _ = install.install_skill(home, refresh=args.refresh)
                 print("  skill: %s" % {"linked": "linked to the repo",
                                         "copy-current": "a copy is in place and matches the repo",
                                         "copy-stale": "a copy has fallen behind the repo",
@@ -725,6 +742,7 @@ def cmd_doctor(args) -> int:
     if getattr(args, "table", False):
         print("\n".join(_md_table(["check", "result"], _doctor_rows(report))))
         return OK
+    print("xsm        %s" % (report.get("version") or "?"))
     print("state      %s" % report["xsm_home"])
     print("python     %s%s" % (report["interpreter"], "" if report["interpreter_ok"] else "  TOO OLD"))
     print("codex      %s" % (report["codex_binary"] or "not found on PATH"))
@@ -747,9 +765,37 @@ def cmd_doctor(args) -> int:
         print("codex      %s: hooks %s" % (home, "trusted" if not missing else
               "NOT trusted for %s — start codex there and choose 'Trust all and continue'"
               % ", ".join(missing)))
+    if not report.get("tmux"):
+        print("tmux       not found: `xsm spawn` needs it (messaging does not)")
+    for home, plugin in (report.get("plugins") or {}).items():
+        if plugin:
+            print("plugin     %-45s xsm %s" % (_home_tilde(home), plugin))
+    for home, files in (report.get("stale") or {}).items():
+        if files:
+            print("stale      %s: %d file(s) behind the repo; refresh with `xsm install --refresh`"
+                  % (_home_tilde(home), len(files)))
+    for line in _stuck_lines(report.get("stuck") or {}):
+        print("stuck      %s" % line)
     for note in report["limits"]:
         print("limit      %s" % note)
     return OK
+
+
+def _stuck_lines(stuck: dict) -> list:
+    """What is waiting on someone. Each of these cost an investigation once."""
+    lines = []
+    for req in stuck.get("approvals") or []:
+        lines.append("%s has waited %ds for a person: %s (xsm approve %s)" % (
+            req.get("worker"), req.get("waiting_s"), req.get("tool"), req.get("id")))
+    for row in stuck.get("undelivered") or []:
+        lines.append("%s -> %s is still queued: %s" % (
+            (row.get("from") or {}).get("name"), (row.get("to") or {}).get("name"), row.get("id")))
+    for reason, count in sorted((stuck.get("send_failures") or {}).items()):
+        lines.append("%d send(s) failed with %s" % (count, reason))
+    for rec in stuck.get("threads_replaced") or []:
+        lines.append("%s [%s] is a Codex thread its TUI has left; it reads nothing" % (
+            rec.get("name"), rec.get("ref")))
+    return lines
 
 
 def _doctor_rows(report: dict) -> list:
@@ -1372,6 +1418,10 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--no-commands", action="store_true",
                      help="hooks only: do not write the slash commands or link the skill")
     ins.add_argument("--no-mcp", action="store_true", help="do not register the xsm MCP server")
+    ins.add_argument("--refresh", action="store_true",
+                     help="re-write what xsm installed in every home it knows")
+    ins.add_argument("--force", action="store_true",
+                     help="install into a home that already has the xsm plugin")
     ins.set_defaults(func=cmd_install)
 
     un = sub.add_parser("uninstall", help="remove only the hook groups xsm added")

@@ -394,6 +394,157 @@ class ListFromAPlainTerminalTest(TempState):
         self.assertNotIn("out-of-scope", printed)
 
 
+class PluginPackagingTest(TempState):
+    """The repository is also a Claude Code plugin (user decision, 2026-09-23:
+    support both the plugin and `xsm install`). These pin what the manifests
+    must say, because a plugin that is wrong is only found by installing it."""
+
+    def _json(self, *parts):
+        with open(os.path.join(REPO, *parts)) as fh:
+            return json.load(fh)
+
+    def test_the_manifests_point_at_files_that_exist(self):
+        plugin = self._json(".claude-plugin", "plugin.json")
+        self.assertEqual(plugin["name"], "xsm")
+        for field in ("commands", "skills", "hooks", "mcpServers"):
+            target = os.path.join(REPO, plugin[field][2:] if plugin[field].startswith("./")
+                                  else plugin[field])
+            self.assertTrue(os.path.exists(target), "%s -> %s" % (field, target))
+        market = self._json(".claude-plugin", "marketplace.json")
+        self.assertEqual([p["name"] for p in market["plugins"]], ["xsm"])
+        self.assertEqual(market["plugins"][0]["version"], plugin["version"],
+                         "the marketplace entry and the plugin must not disagree")
+
+    def test_the_hooks_manifest_covers_every_event_the_gate_needs(self):
+        hooks = self._json("hooks", "hooks.json")["hooks"]
+        self.assertEqual(sorted(hooks),
+                         ["PermissionRequest", "SessionEnd", "SessionStart", "UserPromptSubmit"])
+        for event, groups in hooks.items():
+            for group in groups:
+                for hook in group["hooks"]:
+                    self.assertIn("${CLAUDE_PLUGIN_ROOT}", hook["command"], event)
+                    launcher = os.path.join(REPO, "hooks", "xsm-hook")
+                    self.assertTrue(os.access(launcher, os.X_OK), "the launcher must be executable")
+
+    def test_the_mcp_server_has_no_env_that_could_point_the_store_at_nowhere(self):
+        server = self._json(".mcp.json")["mcpServers"]["xsm"]
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}", server["command"])
+        self.assertNotIn("env", server, "an empty XSM_HOME would mean the working directory")
+        self.assertTrue(os.access(os.path.join(REPO, "hooks", "xsm-mcp"), os.X_OK))
+
+    def test_the_plugin_commands_are_the_same_commands_without_the_prefix(self):
+        from xsm import install
+        for target, body in install.plugin_command_files().items():
+            self.assertTrue(os.path.exists(target), "%s is not written; run install.write_plugin_"
+                                                    "commands()" % target)
+            with open(target) as fh:
+                self.assertEqual(fh.read(), body, "%s is out of step with commands/" % target)
+            self.assertNotIn("{{XSM}}", body)
+            self.assertNotIn("/xsm-", body, "Claude namespaces these itself: /xsm:list")
+
+    def test_the_hook_launcher_refuses_a_peer_message_when_no_python_is_found(self):
+        """A hook that cannot start is a gate that is open (S8-g2)."""
+        import subprocess
+        launcher = os.path.join(REPO, "hooks", "xsm-hook")
+        env = dict(os.environ, XSM_PYTHON_CANDIDATES="/nonexistent-python")
+        peer = json.dumps({"hook_event_name": "UserPromptSubmit",
+                           "prompt": "<cross-session-message>\n[xsm v1 id=1]\nhi\n"
+                                     "</cross-session-message>"})
+        out = subprocess.run([launcher], input=peer, capture_output=True, text=True, env=env)
+        self.assertEqual(json.loads(out.stdout)["decision"], "block")
+        human = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "hello"})
+        out = subprocess.run([launcher], input=human, capture_output=True, text=True, env=env)
+        self.assertEqual(out.stdout.strip(), "", "a person is never locked out of their session")
+
+
+class InstallRefreshTest(TempState):
+    """Two profiles ran a skill eight versions behind for a day because the
+    copies xsm wrote were never compared or refreshed (2026-09-23)."""
+
+    def _home(self):
+        home = os.path.join(self.tmp, "claude-home")
+        os.makedirs(os.path.join(home, "commands"), exist_ok=True)
+        return home
+
+    def test_a_copy_that_fell_behind_is_reported_and_refreshed(self):
+        from xsm import install
+        home = self._home()
+        install.install_commands(home)
+        skills = os.path.join(home, "skills", "xsm")
+        os.makedirs(skills)
+        with open(os.path.join(skills, "SKILL.md"), "w") as fh:
+            fh.write("---\nname: xsm\n---\nan old copy\n")
+        target = os.path.join(home, "commands", "xsm-list.md")
+        with open(target, "a") as fh:
+            fh.write("\nstale line\n")
+        self.assertEqual(sorted(os.path.basename(p) for p in install.stale_copies(home)),
+                         ["SKILL.md", "xsm-list.md"])
+        self.assertEqual(install.install_skill(home, refresh=True)[0], "copy-current")
+        install.install_commands(home)
+        self.assertEqual(install.stale_copies(home), [])
+
+    def test_a_home_with_the_plugin_is_seen(self):
+        from xsm import install, paths
+        home = self._home()
+        self.assertIsNone(install.plugin_installed(home))
+        paths.write_json(os.path.join(home, "plugins", "installed_plugins.json"),
+                         {"version": 2, "plugins": {"xsm@xsm": [{"scope": "user",
+                                                                 "version": "0.2.0"}]}})
+        self.assertEqual(install.plugin_installed(home), "0.2.0")
+
+    def test_installing_over_a_plugin_is_refused_so_hooks_do_not_run_twice(self):
+        from xsm import cli, install, paths
+        home = self._home()
+        paths.write_json(os.path.join(home, "plugins", "installed_plugins.json"),
+                         {"version": 2, "plugins": {"xsm@xsm": [{"version": "0.2.0"}]}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main(["install", "--claude-home", home])
+        self.assertNotEqual(code, 0)
+        self.assertIn("run every hook twice", err.getvalue())
+        self.assertIsNone(install._read_text(os.path.join(home, "settings.json")))
+
+
+class StuckReportTest(TempState):
+    """`xsm doctor` said nothing while a worker waited ten minutes on a
+    permission and two messages sat queued to a closed Codex thread."""
+
+    def test_doctor_names_what_is_waiting_on_someone(self):
+        from xsm import install, ledger, paths, registry
+        paths.write_json(paths.path("approvals", "a1.json"),
+                         {"id": "a1", "worker": "w1", "tool": "Read", "status": "pending",
+                          "t": time.time() - 300})
+        a = {"name": "a", "alias": "h", "ref": "r1", "runtime": "claude"}
+        b = {"name": "b", "alias": "h", "ref": "r2", "runtime": "codex"}
+        ledger.queued("m1", a, b, "dir:x", "note", "hello")
+        entry = paths.read_json(paths.path(paths.LEDGER, "m1.json")) or {}
+        entry["t"] = time.time() - 600
+        paths.write_json(paths.path(paths.LEDGER, "m1.json"), entry)
+        ledger.queued("m2", a, b, "dir:x", "note", "boom")
+        ledger.failed("m2", "sandbox-blocked: Operation not permitted")
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        rec = registry.upsert("codex", home, "t-gone", os.getpid(), self.tmp, name="left")
+        rec["end_reason"] = "thread_replaced"
+        paths.write_json(registry._record_path("codex", "t-gone"), rec)
+
+        stuck = install.stuck()
+        self.assertEqual(stuck["approvals"][0]["worker"], "w1")
+        self.assertGreaterEqual(stuck["approvals"][0]["waiting_s"], 300)
+        self.assertEqual([r["id"] for r in stuck["undelivered"]], ["m1"])
+        self.assertEqual(stuck["send_failures"], {"sandbox-blocked": 1})
+        self.assertEqual([t["name"] for t in stuck["threads_replaced"]], ["left"])
+        lines = "\n".join(cli_stuck_lines(stuck))
+        self.assertIn("has waited", lines)
+        self.assertIn("still queued", lines)
+        self.assertIn("sandbox-blocked", lines)
+
+
+def cli_stuck_lines(stuck):
+    from xsm import cli
+    return cli._stuck_lines(stuck)
+
+
 class SuggestionTest(TempState):
     """A name that matches nothing comes back with what does exist, so a caller
     working from a stale list does not have to fetch one."""
