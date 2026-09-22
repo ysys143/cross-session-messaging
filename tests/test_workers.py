@@ -1,5 +1,5 @@
 """Workers: framework deference, approvals that only a person can grant, and
-the headless Codex pump. Live behaviour (spawning real sessions) is covered by
+where a worker runs. Live behaviour (spawning real sessions) is covered by
 TESTPLAN chapter 10; these tests pin the rules around it."""
 import contextlib
 import io
@@ -42,7 +42,7 @@ class FrameworkTest(TempState):
 class ApprovalTest(TempState):
     def _worker(self, **extra):
         from xsm import workers
-        rec = {"name": "w1", "runtime": "claude", "mode": "headless", "approval_timeout": 5,
+        rec = {"name": "w1", "runtime": "claude", "mode": "background", "approval_timeout": 5,
                "created": time.time(), "session_id": "s-w1"}
         rec.update(extra)
         workers.save(rec)
@@ -136,76 +136,10 @@ class ApprovalTest(TempState):
         self.assertEqual(printed, "")
 
 
-class HeadlessCodexTest(TempState):
-    def _worker(self):
-        from xsm import registry, workers
-        rec = {"name": "cx", "runtime": "codex", "mode": "headless", "session_id": "t-cx",
-               "home": self.tmp, "cwd": self.tmp, "created": time.time(), "model": "m"}
-        workers.save(rec)
-        registry.upsert("codex", self.tmp, "t-cx", os.getpid(), self.tmp)
-        return rec
-
-    def test_reachable_between_turns_under_its_worker_name(self):
-        from xsm import registry
-        self._worker()
-        rec = registry.by_session("codex", "t-cx")
-        self.assertEqual((rec["name"], rec["state"]), ("cx", "live"))
-
-    def test_pump_runs_each_message_and_answers_tasks(self):
-        from xsm import envelope, send, workers
-        w = self._worker()
-        prompts, replies = [], []
-        workers._codex_exec = lambda worker, prompt, resume: prompts.append(prompt) or [
-            {"type": "item.completed", "item": {"type": "agent_message", "text": "42"}}]
-        send.send = lambda target, body, **kw: replies.append((target, body, kw["kind"],
-                                                               kw["reply_to"]))
-        sender = {"name": "boss", "alias": "claude-4", "ref": "abcdef", "session_id": "s"}
-        task = envelope.build("6*7?", msg_id="m1", sender=sender, scope="dir:x", kind="task")
-        note = envelope.build("fyi", msg_id="m2", sender=sender, scope="dir:x", kind="note")
-        from xsm import ledger
-        blocked = envelope.build("rm -rf", msg_id="m3", sender=sender, scope="dir:x", kind="task")
-        ledger.receipt("m1", "delivered", {"name": "cx"})
-        ledger.receipt("m3", "held", {"name": "cx"}, "out of scope")
-        workers.ensure_pump = lambda worker: None
-        for item in (task, note, blocked):
-            workers.deliver(w, item)
-        workers.pump("cx")
-        self.assertEqual(prompts, [task, note, blocked], "one turn per message, in order")
-        self.assertEqual(replies, [("ref:abcdef", "42", "reply", "m1")],
-                         "only a delivered task gets an automatic answer")
-        self.assertEqual(os.listdir(os.path.join(self.tmp, "workers", "cx", "claimed")), [])
-
-    def test_a_failed_turn_puts_the_message_back(self):
-        from xsm import workers
-        w = self._worker()
-        def boom(worker, prompt, resume):
-            raise RuntimeError("codex failed")
-        workers._codex_exec = boom
-        workers.ensure_pump = lambda worker: None
-        workers.deliver(w, "hello")
-        with self.assertRaises(RuntimeError):
-            workers.pump("cx")
-        self.assertEqual(len(os.listdir(os.path.join(self.tmp, "workers", "cx", "inbox"))), 1)
-
-    def test_a_second_pump_does_not_run_while_one_holds_the_lock(self):
-        from xsm import workers
-        w = self._worker()
-        held = workers._try_lock(w)
-        try:
-            self.assertTrue(workers._pump_alive(w))
-            ran = []
-            workers._codex_exec = lambda *a: ran.append(1) or []
-            workers.ensure_pump = lambda worker: None
-            workers.deliver(w, "x")
-            self.assertEqual(workers.pump("cx"), 0)
-            self.assertEqual(ran, [])
-        finally:
-            held.close()
-        self.assertFalse(workers._pump_alive(w))
-
+class OnceTest(TempState):
     def test_once_worker_stops_when_its_answer_arrives(self):
         from xsm import workers
-        workers.save({"name": "o1", "runtime": "claude", "mode": "headless", "ref": "wwwwww",
+        workers.save({"name": "o1", "runtime": "claude", "mode": "background", "ref": "wwwwww",
                       "parent_ref": "pppppp", "once": True, "task_id": "m9", "created": 0})
         from unittest import mock
         stopped = []
@@ -219,7 +153,7 @@ class HeadlessCodexTest(TempState):
 
     def test_once_without_a_task_id_is_never_stopped_by_a_reply(self):
         from xsm import workers
-        workers.save({"name": "o2", "runtime": "claude", "mode": "headless", "ref": "wwwwww",
+        workers.save({"name": "o2", "runtime": "claude", "mode": "background", "ref": "wwwwww",
                       "parent_ref": "pppppp", "once": True, "created": 0})
         from unittest import mock
         stopped = []
@@ -268,58 +202,6 @@ for line in sys.stdin:
         out({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": text}}})
         out({"method": "turn/completed", "params": {}})
 """
-
-
-class CodexAppServerTest(TempState):
-    """Headless Codex turns go through the app-server: each states its sandbox
-    and approval policy, and its approval requests wait for a person."""
-
-    def _setup(self):
-        from xsm import workers
-        bindir = os.path.join(self.tmp, "bin")
-        os.makedirs(bindir)
-        fake = os.path.join(bindir, "codex")
-        with open(fake, "w") as fh:
-            fh.write(FAKE_APP_SERVER.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
-        os.chmod(fake, 0o755)
-        w = {"name": "cx", "runtime": "codex", "mode": "headless", "session_id": "t1",
-             "home": self.tmp, "cwd": self.tmp, "model": "m", "approval_timeout": 10,
-             "env": {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""),
-                     "FAKE_LOG": os.path.join(self.tmp, "fake.log")}}
-        workers.save(w)
-        os.makedirs(os.path.join(self.tmp, "workers", "cx"), exist_ok=True)
-        workers.PUMP_ENV = workers.PUMP_ENV + ("FAKE_LOG",)
-        return workers, w
-
-    def _answer(self, workers, approve):
-        def run():
-            for _ in range(100):
-                rows = workers.approvals()
-                if rows:
-                    workers.human_terminal = lambda: True
-                    workers.answer(rows[0]["id"], approve)
-                    return
-                time.sleep(0.1)
-        threading.Thread(target=run).start()
-
-    def test_every_turn_states_its_policy_and_asks_a_person(self):
-        workers, w = self._setup()
-        self._answer(workers, False)
-        events = workers._codex_exec(w, "hi", resume=True)
-        self.assertEqual([e["item"]["text"] for e in events], ["declined"])
-        sent = [json.loads(l) for l in open(os.path.join(self.tmp, "fake.log"))]
-        resume = next(m for m in sent if m.get("method") == "thread/resume")["params"]
-        self.assertEqual((resume["approvalPolicy"], resume["sandbox"]),
-                         ("on-request", "workspace-write"))
-        answer = next(m for m in sent if m.get("id") == "srv-1")
-        self.assertEqual(answer["result"], {"decision": "decline"})
-
-    def test_an_approved_request_is_accepted(self):
-        workers, w = self._setup()
-        self._answer(workers, True)
-        events = workers._codex_exec(w, "hi", resume=False)
-        self.assertEqual(events[0], {"type": "thread.started", "thread_id": "t-new"})
-        self.assertEqual(events[-1]["item"]["text"], "done")
 
 
 class FreshTuiAdoptionTest(TempState):
@@ -452,7 +334,7 @@ class SafetyTest(TempState):
 
     def test_both_claude_modes_start_in_default_permission_mode(self):
         from xsm import workers
-        for mode in ("pane", "headless"):
+        for mode in ("pane", "background"):
             argv = workers._claude_argv({"name": "w", "mode": mode}, "/s.json")
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
 
@@ -502,19 +384,16 @@ class GrantTest(TempState):
                 workers.spawn("claude", cwd=self.tmp, full_access=True, caller=self.ME)
         self.assertIn("xsm_grant", str(cm.exception))
 
-    def test_trust_hooks_is_for_codex_panes_only(self):
+    def test_trust_hooks_is_for_codex_only(self):
         from unittest import mock
         from xsm import workers
         workers._check_installed = lambda home, runtime: None
         workers.check_concurrency = lambda caller: None
         env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_", "TMUX"))}
         with mock.patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(workers.WorkerError):
-                workers.spawn("claude", cwd=self.tmp, trust_hooks=True, caller=self.ME)
             with self.assertRaises(workers.WorkerError) as cm:
-                workers.spawn("codex", cwd=self.tmp, trust_hooks=True, headless=True,
-                              caller=self.ME)
-        self.assertIn("tmux pane", str(cm.exception))
+                workers.spawn("claude", cwd=self.tmp, trust_hooks=True, caller=self.ME)
+        self.assertIn("Codex option", str(cm.exception))
 
     def test_mcp_grant_asks_and_records(self):
         import io
@@ -557,15 +436,61 @@ class DangerousFlagsTest(TempState):
         with mock.patch.object(workers.subprocess, "run", run), \
                 mock.patch.object(workers.time, "sleep", lambda s: None), \
                 mock.patch.object(workers, "_tmux_type", lambda *a: None):
-            workers._start_in_pane(w, "%1")
+            workers._start_in_tmux(w, "%1")
+        self.assertEqual(seen[0][:2], ["tmux", "split-window"])
         command = shlex.split(seen[0][-1])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("--dangerously-bypass-hook-trust", command)
         self.assertNotIn("on-request", command)
 
+    def test_a_background_worker_is_a_real_tui_in_the_xsm_workers_session(self):
+        """Never `claude -p` or `codex exec`: those run one prompt and are gone,
+        so there is no session to send a message to (user decision, 2026-09-22)."""
+        import shlex
+        from unittest import mock
+        from xsm import workers
+        for runtime, sessions_exist in (("claude", False), ("codex", True)):
+            seen = []
+            def run(argv, **kw):
+                seen.append(argv)
+                if argv[1] == "has-session":
+                    return mock.Mock(returncode=0 if sessions_exist else 1)
+                return mock.Mock(returncode=0, stdout="%9 4242\n", stderr="")
+            w = {"name": "b", "runtime": runtime, "home": self.tmp, "cwd": self.tmp,
+                 "mode": "background", "model": "m", "approval_timeout": 5}
+            os.makedirs(os.path.join(self.tmp, "workers", "b"), exist_ok=True)
+            with mock.patch.object(workers.subprocess, "run", run), \
+                    mock.patch.object(workers.time, "sleep", lambda s: None), \
+                    mock.patch.object(workers, "_tmux_type", lambda *a: None):
+                workers._start_in_tmux(w, None)
+            launch = next(a for a in seen if a[0] == "tmux" and a[1] in ("new-window",
+                                                                           "new-session"))
+            self.assertEqual(launch[1], "new-window" if sessions_exist else "new-session")
+            self.assertIn(workers.BACKGROUND_SESSION, launch)
+            command = shlex.split(launch[-1])
+            self.assertNotIn("-p", command)
+            self.assertNotIn("exec", command[command.index(runtime):])
+            if runtime == "codex":
+                self.assertEqual(command[command.index("-a") + 1], "never",
+                                 "nobody to ask, and Codex has no hook to relay the question")
+            self.assertEqual(w["pane"], "%9")
+
+    def test_a_worker_in_the_default_claude_home_does_not_name_it(self):
+        """Naming ~/.claude in CLAUDE_CONFIG_DIR makes Claude read folder trust
+        from ~/.claude/.claude.json, not ~/.claude.json: every worker then sat
+        at a trust prompt for a folder its caller already trusted."""
+        from unittest import mock
+        from xsm import workers
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/somewhere/else"}):
+            default = workers._env({"name": "d", "runtime": "claude",
+                                    "home": os.path.expanduser("~/.claude")})
+            other = workers._env({"name": "o", "runtime": "claude", "home": "/x/.claude-2"})
+        self.assertNotIn("CLAUDE_CONFIG_DIR", default)
+        self.assertEqual(other["CLAUDE_CONFIG_DIR"], "/x/.claude-2")
+
     def test_full_access_claude_skips_the_approval_hook(self):
         from xsm import workers
-        w = {"name": "c", "mode": "headless", "full_access": True, "approval_timeout": 5}
+        w = {"name": "c", "mode": "background", "full_access": True, "approval_timeout": 5}
         os.makedirs(os.path.join(self.tmp, "workers", "c"))
         argv = workers._claude_argv(w, workers._claude_worker_settings(w))
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "bypassPermissions")
@@ -580,7 +505,7 @@ class NoIdleWorkerTest(TempState):
     def test_parent_is_tasked_and_told_the_outcome(self):
         from xsm import registry, workers
         rec = registry.upsert("claude", self.tmp, "s-w", os.getpid(), self.tmp)
-        w = {"name": "w1", "runtime": "claude", "mode": "headless", "session_id": "s-w",
+        w = {"name": "w1", "runtime": "claude", "mode": "background", "session_id": "s-w",
              "parent_ref": "pppppp", "approval_timeout": 1}
         workers.save(w)
         sent = []
@@ -704,5 +629,5 @@ class Adr0009FixesTest(TempState):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_", "TMUX"))}
         with mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaises(workers.WorkerError) as cm:
-                workers.spawn("claude", cwd=there, caller=caller, headless=True)
+                workers.spawn("claude", cwd=there, caller=caller, background=True)
         self.assertIn("outside-scope", str(cm.exception))

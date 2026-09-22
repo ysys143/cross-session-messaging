@@ -137,12 +137,15 @@ same way. Pairing a machine is your user's decision (`xsm_grant`, option
 xsm spawn claude --model haiku --once --task "Run the tests in ./pkg and report failures"
 xsm spawn codex --effort high --task "Review docs/plan.md for gaps"     # Codex default model: gpt-5.6-luna
 xsm workers                 # what xsm started and whether it is running
-xsm attach <worker>         # watch a headless worker, type to it
+xsm attach <worker>         # go to its tmux pane
 xsm stop <worker>           # stop it and remove its records
 ```
 
 - Inside tmux the worker opens as the real TUI in a pane next to yours; its
-  user can watch and answer its prompts there. Elsewhere it runs headless.
+  user can watch and answer its prompts there. Elsewhere (or with
+  `--background`) it runs as the same real TUI in a window of the detached tmux
+  session `xsm-workers`. A worker is never `claude -p` or `codex exec`. The
+  statusline shows each of your workers and whether one is waiting on a person.
 - `--task` sends the task as `--kind task` once the worker is up; the answer
   comes back to you as a reply. `--once` stops the worker when that answer
   arrives. Put everything the worker needs in the task.
@@ -152,8 +155,8 @@ xsm stop <worker>           # stop it and remove its records
   reports a step it could not do for lack of permission, get the permission
   (`xsm_approve` when it asks again, `xsm_grant` for full access) and send the
   step back; do not accept "no permission" as the end of the task.
-- A headless worker's permission prompts (Claude or Codex) go to your user:
-  it runs sandboxed to its folder, and anything more waits for approval. You get a note
+- A background Claude worker's permission prompts go to your user; a
+  background Codex worker runs sandboxed to its folder and does not ask. You get a note
   saying what it is waiting for. **Never try to approve it yourself** —
   `xsm approve` works only from a person's terminal, and trying to get around
   that is permission laundering. Tell your user what is waiting and why.

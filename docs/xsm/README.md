@@ -210,23 +210,23 @@ xsm approvals | approve <id> | deny <id>
 | 부른 곳 | 워커 | 승인 창 |
 |---|---|---|
 | tmux 안 | 부른 패널 옆에 분할한 패널에서 실제 TUI. Claude는 `--permission-mode default`, Codex는 `-s workspace-write -a on-request`로 띄워 사용자 기본 설정(auto, YOLO)을 따르지 않는다 | 사람이 그 패널에서 답한다 |
-| 일반 셸 | 헤드리스. Claude는 `claude -p` 스트림 모드(스스로 연 FIFO로 턴을 받는다), Codex는 턴마다 `codex app-server`를 잠깐 띄워 한 턴을 돈다 | xsm이 넘긴다. 사람이 터미널에서 `xsm approve`/`deny`, 또는 `xsm attach` 안에서 y/n |
+| 일반 셸, 또는 `--background` | 분리된 tmux 세션 `xsm-workers`의 창에서 실제 TUI. 헤드리스(`claude -p`, `codex exec`)로는 띄우지 않는다 | Claude는 xsm이 넘긴다(사람이 터미널에서 `xsm approve`/`deny`). Codex는 `-a never`로 샌드박스 안에서만 일하고 묻지 않는다 |
 | Orca·herdr 안 | 띄우지 않는다. 워커 관리는 그 도구의 몫이고, xsm은 세션 간 메시지만 맡는다 | |
 
-- **워커는 권한 때문에 놀지 않는다.** 헤드리스 워커가 승인을 기다리기 시작하면, 부모 세션에 `task`가 간다. 내용은 "지금 `xsm_approve`를 불러라"다. 부모가 MCP 도구 `xsm_approve`를 부르면 사용자 화면에 워커의 요청이 양식으로 뜬다. 사용자는 허용이나 거부만 고르면 된다. 터미널도 `!`도 필요 없다. 대기 시간이 지나거나 거부되면 부모에게 결과가 간다. 워커의 과제에는 규칙이 붙는다. 할 수 있는 것은 다 하고, 막힌 단계는 "못 했다"로 끝내지 말고 필요한 권한과 이유를 적어 보고하고, 한 것과 확인한 것만 말하라는 것이다. 작업 폴더도 명시된다.
+- **워커는 권한 때문에 놀지 않는다.** 백그라운드 워커가 승인을 기다리기 시작하면, 부모 세션에 `task`가 간다. 내용은 "지금 `xsm_approve`를 불러라"다. 부모가 MCP 도구 `xsm_approve`를 부르면 사용자 화면에 워커의 요청이 양식으로 뜬다. 사용자는 허용이나 거부만 고르면 된다. 터미널도 `!`도 필요 없다. 대기 시간이 지나거나 거부되면 부모에게 결과가 간다. 워커의 과제에는 규칙이 붙는다. 할 수 있는 것은 다 하고, 막힌 단계는 "못 했다"로 끝내지 말고 필요한 권한과 이유를 적어 보고하고, 한 것과 확인한 것만 말하라는 것이다. 작업 폴더도 명시된다.
 - **auto 모드에서 도구 호출이 막히면 묻는다.** Claude Code auto 모드의 분류기가 `xsm_approve`나 `xsm_grant` 호출을 막을 수 있다. 그때 에이전트는 멈추지 않고 질문 도구로 사용자에게 물은 뒤, 동의를 받으면 다시 부른다. 실측에서는 동의 뒤의 재호출이 통과해 양식이 떴다.
-- **승인은 사람만 한다.** 헤드리스 워커가 승인이 필요해지면 그 워커 전용 `PermissionRequest` 훅이 요청을 기록하고, 부모 세션에 무엇을 기다리는지 알리고, 답을 기다린다(기본 600초, 넘기면 거부). `xsm approve`는 터미널에서만 동작한다. 에이전트의 셸 도구에는 터미널이 없다(실측). 거부는 어디서나 된다. 범위를 좁히기만 하기 때문이다.
+- **승인은 사람만 한다.** 백그라운드 Claude 워커가 승인이 필요해지면 그 워커 전용 `PermissionRequest` 훅이 요청을 기록하고, 부모 세션에 무엇을 기다리는지 알리고, 답을 기다린다(기본 600초, 넘기면 거부). `xsm approve`는 터미널에서만 동작한다. 에이전트의 셸 도구에는 터미널이 없다(실측). 거부는 어디서나 된다. 범위를 좁히기만 하기 때문이다.
 - 이 검사는 보안 경계가 아니다. 같은 사용자로 도는 에이전트는 가짜 터미널을 만들거나(`script`) 승인 파일을 직접 써서 넘을 수 있다. 막는 것은 에이전트가 습관처럼 또는 다른 세션의 지시를 따라 승인하는 경우까지다. xsm 검문의 다른 부분과 같은 한계다.
 - 워커가 미리 허용받는 것은 `xsm send`(보고)뿐이다. 과제가 `xsm stop`이나 `xsm install`을 시켜도 승인을 거친다.
-- 보고는 승인 없이 된다. Claude 워커는 xsm 실행 권한을 받고 뜬다. 헤드리스 Codex 워커는 샌드박스 안에서 xsm에 닿지 못하므로, 과제를 받은 턴의 마지막 메시지를 pump가 대신 답장으로 보낸다.
+- 보고는 승인 없이 된다. Claude 워커는 xsm 실행 권한을 받고 뜬다. Codex 워커는 셸에서 `xsm send`로, 샌드박스에 막히면 MCP `xsm_send`로 보고한다.
 - **깊이 제한(`max_depth`, 기본 1).** 최상위 세션 아래로 워커가 몇 단계까지 이어질 수 있는지다. 1이면 세션은 워커를 띄우고, 워커는 더 띄우지 못한다. 전역값은 `~/.xsm/config.json`의 `max_depth`나 환경변수 `XSM_MAX_DEPTH`로 정하고, 워커를 띄울 때 `--max-depth N`으로 그 워커 아래의 한도를 정한다. 워커는 물려받은 한도를 낮출 수만 있다. 한도는 워커 기록에 있으므로 워커가 환경변수를 바꿔서 늘릴 수 없다.
 - **동시 워커 수(`max_workers`, 기본 4).** 한 세션이 동시에 돌릴 수 있는 워커 수다. config `max_workers`나 `XSM_MAX_WORKERS`로 정한다. 넘기면 돌고 있는 워커 이름과 함께 거부한다.
 - **남은 워커 정리.** 워커를 띄운 세션이 끝나면(정상 종료, 흔적 없는 정지, 기록 삭제) 그 워커를 종료하고 기록을 지운다. Claude 부모가 정상 종료하면 SessionEnd 훅이 부모 프로세스가 사라지기를 기다렸다가 바로 정리한다(실측 2초 안). 그 밖의 경우는 `xsm workers`, `xsm spawn`, 매시간 정리 때 잡힌다. 부모가 정지한 워커면 그 아래 워커도 이어서 정리된다. 상태를 확인할 수 없는(unknown) 부모의 워커는 건드리지 않는다.
 - **범위 밖 폴더의 워커.** 부모 세션과 범위가 다른 폴더에 워커를 띄우면, 그 워커는 그쪽 프로젝트의 세션들과 통하게 된다. 그래서 `xsm_grant`의 `outside_scope` 허가가 있어야 한다. 사람이 터미널에서 친 `spawn`은 예외다.
-- **전체 권한과 훅 신뢰 우회.** `--full-access`는 샌드박스와 승인 없이 띄운다(Codex `--dangerously-bypass-approvals-and-sandbox`, 헤드리스면 `danger-full-access`와 `never`, Claude `bypassPermissions`). `--trust-hooks`는 Codex 패널 워커를 `--dangerously-bypass-hook-trust`로 띄운다. 헤드리스 Codex의 app-server에는 이 옵션이 없다. 둘 다 **사용자의 명시적 허가**가 있어야 한다. 에이전트는 MCP 도구 `xsm_grant`로 이유와 함께 요청한다. 사용자가 양식에서 "allow once"를 고르면 1회용 허가 id가 나오고, `spawn … --grant <id>`에 쓴다. 허가는 요청한 세션, 런타임, 폴더, 옵션에 묶이고 10분 뒤 만료된다. 허가와 거절은 채널에 결정으로 남는다. 사람이 터미널에서 직접 치는 `spawn`은 그 자체가 허가라서 id가 필요 없다. `xsm workers`에는 `FULL-ACCESS`, `hooks-untrusted`로 표시된다.
+- **전체 권한과 훅 신뢰 우회.** `--full-access`는 샌드박스와 승인 없이 띄운다(Codex `--dangerously-bypass-approvals-and-sandbox`, Claude `bypassPermissions`). `--trust-hooks`는 Codex 워커를 `--dangerously-bypass-hook-trust`로 띄운다. 둘 다 **사용자의 명시적 허가**가 있어야 한다. 에이전트는 MCP 도구 `xsm_grant`로 이유와 함께 요청한다. 사용자가 양식에서 "allow once"를 고르면 1회용 허가 id가 나오고, `spawn … --grant <id>`에 쓴다. 허가는 요청한 세션, 런타임, 폴더, 옵션에 묶이고 10분 뒤 만료된다. 허가와 거절은 채널에 결정으로 남는다. 사람이 터미널에서 직접 치는 `spawn`은 그 자체가 허가라서 id가 필요 없다. `xsm workers`에는 `FULL-ACCESS`, `hooks-untrusted`로 표시된다.
 - auto 모드 세션에서 `xsm_grant`가 분류기에 막히면, 위의 규칙대로 에이전트가 먼저 사용자에게 묻는다. xsm은 권한 설정을 바꾸지 않는다.
 - `--once`면 과제의 답이 부모에게 도착하는 순간 부모 쪽 훅이 워커를 종료하고 기록을 지운다.
-- **Codex 워커도 사용자 설정과 관계없이 승인을 묻는다.** 헤드리스 턴은 매번 작업 폴더 쓰기만 허용하는 샌드박스(`workspace-write`)와 `on-request` 승인 정책을 명시해서 돈다. 그 밖의 작업은 승인 요청이 되어 xsm으로 사람에게 간다. 패널의 Codex TUI도 `-s workspace-write -a on-request`로 띄우므로 사용자의 YOLO 설정을 따르지 않고 패널에서 묻는다. `codex exec`는 승인을 묻지 않아서(승인 정책이 `never`로 강제된다, 실측) 이 경로에는 쓰지 않는다.
+- **Codex 워커는 사용자 설정과 관계없이 샌드박스를 명시한다.** 패널 Codex TUI는 `-s workspace-write -a on-request`로 띄워 사용자의 YOLO 설정을 따르지 않고 패널에서 묻는다. 백그라운드 Codex TUI는 물을 사람이 없고 Codex에는 질문을 중계할 훅 이벤트가 없으므로 `-s workspace-write -a never`로 띄운다. 작업 폴더 안에서만 일한다.
 
 ## 종료된 세션
 

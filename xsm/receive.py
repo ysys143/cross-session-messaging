@@ -266,8 +266,7 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
         workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me)
     worker = workers.load(os.environ.get("XSM_WORKER") or "") if os.environ.get("XSM_WORKER") else None
     return allow_with_context(runtime, envelope.sender_context(
-        parsed, runtime, auto_reply=workers.is_headless_codex(worker), worker=bool(worker),
-        cwd=(me or {}).get("cwd")))
+        parsed, runtime, worker=bool(worker), cwd=(me or {}).get("cwd")))
 
 
 def _sender_record(parsed) -> dict | None:
@@ -300,7 +299,7 @@ def main(argv=None) -> int:
             "reason": "xsm internal error: %s" % type(err).__name__,
             "detail": str(err)[:300], "peer_like": looks_like_peer})
         if (data or {}).get("hook_event_name") == "PermissionRequest":
-            # No answer means the runtime's own default, which for a headless
+            # No answer means the runtime's own default, which for a background
             # worker is to refuse. Never print a prompt decision here.
             return 0
         if looks_like_peer:

@@ -382,13 +382,11 @@ def _serve(peer: str, request: dict, span=None) -> dict:
                      {"id": msg_id, "peer": peer, "t": time.time()})
     ledger.queued(msg_id, sender, target, "remote:%s" % peer, request.get("kind") or "note",
                   request.get("body") or "")
-    from . import adapters, workers
+    from . import adapters
     try:
         if target.get("runtime") == "claude":
             adapters.to_claude(target["socket"], content, msg_id, priority="next",
                                reply_address=None)
-        elif workers.is_headless_codex(workers.for_session(target.get("session_id"))):
-            workers.deliver(workers.for_session(target.get("session_id")), content)
         else:
             adapters.to_codex(target.get("home"), str(target.get("session_id")), content)
     except adapters.DeliveryError as err:

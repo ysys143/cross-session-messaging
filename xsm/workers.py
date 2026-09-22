@@ -10,18 +10,21 @@ Where it runs follows from where the caller is (user decision, 2026-09-21):
 - Inside tmux, the worker is the real TUI in a pane split off the caller's own
   pane. A person can watch it and answer its prompts there, and closing the
   pane ends it.
-- Anywhere else it runs headless. Claude runs `claude -p` in stream-json mode,
-  reading turns from a FIFO it holds open itself, so no process has to stay
-  behind to keep it alive (measured: the FIFO opened read-write never reaches
-  EOF). Codex has no long-running headless mode, so each turn is a
-  `codex exec resume`, run by a short-lived pump that exits when the worker's
-  inbox is empty.
+- Anywhere else, or with --background, it runs in the background: the same
+  real TUI, in a window of a detached tmux session named xsm-workers. Nobody is
+  at its screen, but it is a live session all the same — it takes messages the
+  way any session does, and `tmux attach -t xsm-workers` shows it.
+
+A worker is never `claude -p` or `codex exec`. Those run one prompt and are
+gone: there is no session to send a message to, so there is nothing for xsm to
+connect (user decision, 2026-09-22; an earlier version ran such "headless"
+workers, and a headless Claude worker could not even be sent a message).
 - Inside a multi-agent framework (Orca, herdr) xsm starts and stops nothing:
   managing workers belongs to the framework, and xsm only carries the
   cross-session messages the framework does not (user decision, 2026-09-21).
 
-A headless worker has nobody at its screen, so its permission prompts go
-through xsm: its PermissionRequest hook records the request, tells the caller,
+A background Claude worker has nobody at its screen, so its permission prompts
+go through xsm: its PermissionRequest hook records the request, tells the caller,
 and waits for a person to answer with `xsm approve`/`xsm deny` in a terminal.
 The caller's agent is told, never asked — an agent approving its own worker is
 the permission laundering the skill forbids.
@@ -32,7 +35,6 @@ import glob
 import json
 import os
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -42,12 +44,13 @@ import time
 import uuid
 from contextlib import nullcontext
 
-from . import config, envelope, identity, install, paths, registry
+from . import config, identity, install, paths, registry
 
 WORKERS = "workers"
 APPROVALS = "approvals"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-APPROVAL_TIMEOUT = 600          # seconds a headless worker waits for a person
+APPROVAL_TIMEOUT = 600          # seconds a background worker waits for a person
+BACKGROUND_SESSION = "xsm-workers"
 CODEX_MODEL = "gpt-5.6-luna"    # the default for tests; --model overrides
 
 # How each framework marks the terminals it owns. Pane-level variables, not
@@ -138,13 +141,7 @@ def for_session(session_id: str | None) -> dict | None:
     return next((w for w in _INDEX["rows"] if w.get("session_id") == session_id), None)
 
 
-def is_headless_codex(worker: dict | None) -> bool:
-    return bool(worker) and worker.get("runtime") == "codex" and worker.get("mode") == "headless"
-
-
 def state(worker: dict) -> str:
-    if is_headless_codex(worker):
-        return "idle" if not _pump_alive(worker) else "working"
     pid = worker.get("pid")
     if not pid or not identity.pid_alive(pid) or identity.lstart(pid) != worker.get("lstart"):
         return "gone"
@@ -235,9 +232,9 @@ def _hook_command() -> str:
 def _claude_worker_settings(worker: dict) -> str:
     """Settings only this worker loads. `accept` so the caller's messages are
     not held for a person by Claude's own mode check; the PermissionRequest hook
-    so a headless worker's prompts reach a person through xsm."""
+    so a background worker's prompts reach a person through xsm."""
     settings = {"crossSessionInbound": "accept"}
-    if worker["mode"] == "headless" and not worker.get("full_access"):
+    if worker["mode"] == "background" and not worker.get("full_access"):
         settings["hooks"] = {"PermissionRequest": [{"hooks": [{
             "type": "command", "command": _hook_command(),
             "timeout": int(worker["approval_timeout"]) + 30}]}]}
@@ -253,14 +250,22 @@ def _env(worker: dict) -> dict:
         for k in keys:
             env.pop(k, None)
     env["XSM_WORKER"] = worker["name"]
-    env["CLAUDE_CONFIG_DIR" if worker["runtime"] == "claude" else "CODEX_HOME"] = worker["home"]
+    if worker["runtime"] == "claude" and os.path.realpath(worker["home"]) == \
+            os.path.realpath(os.path.expanduser("~/.claude")):
+        # The default home is not named. Claude Code reads folder trust from
+        # ~/.claude.json only when CLAUDE_CONFIG_DIR is unset; naming ~/.claude
+        # sends it to ~/.claude/.claude.json instead, where no folder is trusted,
+        # and every worker stopped at a trust prompt (measured 2026-09-22).
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR" if worker["runtime"] == "claude" else "CODEX_HOME"] = worker["home"]
     for k in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET"):
         env.pop(k, None)                # the caller's identity must not leak in
     return env
 
 
 def _claude_argv(worker: dict, settings: str) -> list:
-    # Reporting back must not wait for a person, in a pane or headless. Only
+    # Reporting back must not wait for a person, in a pane or in the background. Only
     # `send`: spawn, stop, install and the rest still ask, so a task cannot use
     # the worker to act on other sessions or on configuration unseen.
     argv = ["claude", "--name", worker["name"], "--settings", settings,
@@ -270,12 +275,9 @@ def _claude_argv(worker: dict, settings: str) -> list:
     if worker.get("effort"):
         argv += ["--effort", worker["effort"]]
     # Default mode in both: a pane worker asks its person in the pane, a
-    # headless one asks through xsm, whatever mode the user's config starts
+    # background one asks through xsm, whatever mode the user's config starts
     # sessions in (the same rule as Codex's explicit sandbox and approvals).
     argv += ["--permission-mode", "bypassPermissions" if worker.get("full_access") else "default"]
-    if worker["mode"] == "headless":
-        argv += ["-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                 "--verbose"]
     return argv
 
 
@@ -344,7 +346,7 @@ def check_concurrency(caller: dict | None) -> None:
 
 def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
           effort: str | None = None, cwd: str | None = None, home: str | None = None,
-          once: bool = False, headless: bool = False, approval_timeout: int = APPROVAL_TIMEOUT,
+          once: bool = False, background: bool = False, approval_timeout: int = APPROVAL_TIMEOUT,
           wait: float = 90.0, caller: dict | None = None,
           max_depth: int | None = None, full_access: bool = False, trust_hooks: bool = False,
           grant: str | None = None) -> dict:
@@ -370,10 +372,7 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
     home = os.path.realpath(os.path.expanduser(home)) if home else _default_home(runtime, caller)
     _check_installed(home, runtime)
     cwd = os.path.realpath(os.path.expanduser(cwd or (caller or {}).get("cwd") or os.getcwd()))
-    pane = None if headless else tmux_pane()
-    if trust_hooks and not pane:
-        raise WorkerError("--trust-hooks works only for a Codex worker in a tmux pane: the "
-                          "app-server that runs headless turns has no such option")
+    pane = None if background else tmux_pane()
     if runtime == "codex" and not trust_hooks:
         trust = install.codex_trust(home)
         if not trust or not all(trust.get(k) for k in ("SessionStart", "UserPromptSubmit")):
@@ -386,16 +385,16 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
     granted = None
     if dangerous and not human_terminal():
         granted = use_grant(grant, caller, runtime, cwd, dangerous)
+    if not shutil.which("tmux"):
+        raise WorkerError("a worker runs as a real session in tmux, and tmux is not installed")
     worker = {"name": name, "runtime": runtime, "home": home, "model": model, "effort": effort,
-              "cwd": cwd, "mode": "pane" if pane else "headless", "once": bool(once),
+              "cwd": cwd, "mode": "pane" if pane else "background", "once": bool(once),
               "approval_timeout": int(approval_timeout), "created": time.time(),
               "parent_ref": (caller or {}).get("ref"), "session_id": None,
               "depth": depth, "max_depth": limit, "full_access": full_access,
               "trust_hooks": trust_hooks, "grant": (granted or {}).get("id")}
     if runtime == "codex" and not worker["model"]:
         worker["model"] = CODEX_MODEL
-    if runtime == "codex":
-        worker["env"] = {k: os.environ[k] for k in PUMP_ENV if k in os.environ}
     os.makedirs(_dir(name), mode=0o700, exist_ok=True)
     try:
         from . import telemetry
@@ -410,12 +409,7 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
         if telemetry else nullcontext()
     try:
         with span_cm:
-            if pane:
-                _start_in_pane(worker, pane)
-            elif runtime == "claude":
-                _start_claude_headless(worker)
-            else:
-                _start_codex_headless(worker, wait)
+            _start_in_tmux(worker, pane)
             save(worker)
             _wait_for_registration(worker, wait)
     except BaseException:
@@ -430,7 +424,9 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
     return worker
 
 
-def _start_in_pane(worker: dict, pane: str) -> None:
+def _start_in_tmux(worker: dict, pane: str | None) -> None:
+    """Start the worker's TUI: in a pane split off the caller's, or, with no
+    pane to split, in a new window of the detached xsm-workers session."""
     env = _env(worker)
     assignments = " ".join("%s=%s" % (k, shlex.quote(env[k]))
                            for k in ("XSM_WORKER", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
@@ -440,19 +436,31 @@ def _start_in_pane(worker: dict, pane: str) -> None:
     if worker["runtime"] == "claude":
         argv = _claude_argv(worker, _claude_worker_settings(worker))
     else:
-        # The pane is where a person answers, so the worker asks there even if
-        # the user's own config runs Codex without approvals.
+        # A pane is where a person answers, so a pane worker asks there even if
+        # the user's own config runs Codex without approvals. A background one
+        # has nobody to ask and Codex has no hook to relay the question, so it
+        # does not ask: it stays in its workspace-write sandbox instead.
+        asks = ["-a", "on-request"] if worker["mode"] == "pane" else ["-a", "never"]
         argv = ["codex"] + _codex_config_args(worker) + (
             ["--dangerously-bypass-approvals-and-sandbox"] if worker.get("full_access")
-            else ["-s", "workspace-write", "-a", "on-request"]) + (
+            else ["-s", "workspace-write"] + asks) + (
             ["--dangerously-bypass-hook-trust"] if worker.get("trust_hooks") else [])
     # exec all the way down, so the pane's pid is the worker's own pid.
     command = "exec env %s %s %s" % (unset, assignments, " ".join(shlex.quote(a) for a in argv))
-    out = subprocess.run(["tmux", "split-window", "-t", pane, "-h", "-d", "-P", "-F",
-                          "#{pane_id} #{pane_pid}", "-c", worker["cwd"], command],
-                         capture_output=True, text=True, timeout=10)
+    fmt = ["-P", "-F", "#{pane_id} #{pane_pid}", "-c", worker["cwd"]]
+    if pane:
+        tmux = ["tmux", "split-window", "-t", pane, "-h", "-d"] + fmt + [command]
+    elif subprocess.run(["tmux", "has-session", "-t", BACKGROUND_SESSION],
+                        capture_output=True, timeout=5).returncode == 0:
+        tmux = ["tmux", "new-window", "-d", "-t", BACKGROUND_SESSION, "-n", worker["name"]] + \
+            fmt + [command]
+    else:
+        tmux = ["tmux", "new-session", "-d", "-s", BACKGROUND_SESSION, "-n", worker["name"],
+                "-x", "200", "-y", "50"] + fmt + [command]
+    out = subprocess.run(tmux, capture_output=True, text=True, timeout=10)
     if out.returncode != 0:
-        raise WorkerError("tmux could not split the pane: %s" % out.stderr.strip())
+        raise WorkerError("tmux could not open the worker's %s: %s" % (
+            "pane" if pane else "window", out.stderr.strip()))
     pane_id, pid = out.stdout.split()
     worker.update({"pane": pane_id, "pid": int(pid), "lstart": identity.lstart(int(pid))})
     if worker["runtime"] == "codex":
@@ -468,181 +476,8 @@ def _tmux_type(pane_id: str, text: str) -> None:
     subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], timeout=5)
 
 
-def _start_claude_headless(worker: dict) -> None:
-    d = _dir(worker["name"])
-    fifo = os.path.join(d, "in")
-    if not os.path.exists(fifo):
-        os.mkfifo(fifo, 0o600)
-    # Opened read-write by the worker itself: there is always a writer, so the
-    # worker never sees EOF when a sender closes its end.
-    fd = os.open(fifo, os.O_RDWR)
-    try:
-        with open(os.path.join(d, "out.jsonl"), "ab") as out, \
-                open(os.path.join(d, "err.log"), "ab") as err:
-            proc = subprocess.Popen(_claude_argv(worker, _claude_worker_settings(worker)),
-                                    stdin=fd, stdout=out, stderr=err, cwd=worker["cwd"],
-                                    env=_env(worker), start_new_session=True)
-    finally:
-        os.close(fd)
-    worker.update({"pid": proc.pid, "lstart": identity.lstart(proc.pid)})
-
-
-# How to answer each kind of approval request the Codex app-server sends.
-# Measured 2026-09-21: `codex exec` never asks (approval_policy is forced to
-# "never"), but the app-server — the interface IDE clients use — sends these
-# requests to its client and waits, so a headless worker driven through it
-# can ask a person.
-APPROVAL_ANSWERS = {
-    "item/commandExecution/requestApproval": ({"decision": "accept"}, {"decision": "decline"}),
-    "item/fileChange/requestApproval": ({"decision": "accept"}, {"decision": "decline"}),
-    "execCommandApproval": ({"decision": "approved"}, {"decision": "denied"}),
-    "applyPatchApproval": ({"decision": "approved"}, {"decision": "denied"}),
-}
-
-
-def _approval_summary(method: str, params: dict) -> tuple:
-    if "commandExecution" in method or method == "execCommandApproval":
-        command = params.get("command")
-        tool, detail = "shell", " ".join(command) if isinstance(command, list) else command
-    elif "fileChange" in method or method == "applyPatchApproval":
-        tool = "file change"
-        detail = params.get("grantRoot") or ", ".join(sorted((params.get("fileChanges") or {})))
-    else:
-        tool, detail = "permissions", json.dumps(params.get("permissions"), ensure_ascii=False)
-    if params.get("reason"):
-        detail = "%s (%s)" % (detail, params["reason"])
-    return tool, detail or "?"
-
-
-class _AppServer:
-    """One `codex app-server` process speaking newline-delimited JSON-RPC over
-    stdio. It lives for one turn: started by the pump, closed when the turn
-    completes, so nothing stays behind between turns."""
-
-    def __init__(self, worker: dict, log):
-        self.worker, self.log, self.next_id = worker, log, 0
-        d = _dir(worker["name"])
-        self.proc = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE,
-                                     stderr=open(os.path.join(d, "err.log"), "ab"),
-                                     cwd=worker["cwd"], env=_pump_env(worker), text=True,
-                                     bufsize=1)
-
-    def send(self, obj: dict) -> None:
-        self.proc.stdin.write(json.dumps(obj) + "\n")
-        self.proc.stdin.flush()
-
-    def request(self, method: str, params: dict) -> dict:
-        self.next_id += 1
-        rid = self.next_id
-        self.send({"id": rid, "method": method, "params": params})
-        while True:
-            msg = self.read()
-            if msg.get("id") == rid and "method" not in msg:
-                if "error" in msg:
-                    raise WorkerError("codex app-server %s failed: %s" % (method, msg["error"]))
-                return msg.get("result") or {}
-            self.handle(msg)
-
-    def read(self) -> dict:
-        line = self.proc.stdout.readline()
-        if not line:
-            raise WorkerError("codex app-server exited; see %s"
-                              % os.path.join(_dir(self.worker["name"]), "err.log"))
-        self.log.write(line if line.endswith("\n") else line + "\n")
-        self.log.flush()
-        return json.loads(line)
-
-    def handle(self, msg: dict) -> None:
-        method = msg.get("method")
-        if not method or "id" not in msg:
-            return                                   # a notification; the caller reads those
-        if method in APPROVAL_ANSWERS:
-            tool, detail = _approval_summary(method, msg.get("params") or {})
-            allow, _ = _await_person(self.worker, "codex", tool, detail)
-            self.send({"id": msg["id"], "result": APPROVAL_ANSWERS[method][0 if allow else 1]})
-        elif method == "item/permissions/requestApproval":
-            params = msg.get("params") or {}
-            allow, _ = _await_person(self.worker, "codex", *_approval_summary(method, params))
-            self.send({"id": msg["id"], "result": {
-                "permissions": params.get("permissions") if allow else {}}})
-        elif method == "mcpServer/elicitation/request":
-            self.send({"id": msg["id"], "result": {"action": "decline"}})
-        elif method == "item/tool/requestUserInput":
-            self.send({"id": msg["id"], "result": {"answers": {}}})
-        else:
-            self.send({"id": msg["id"], "error": {"code": -32601,
-                                                  "message": "xsm cannot answer %s" % method}})
-
-    def close(self) -> None:
-        try:
-            self.proc.stdin.close()
-            self.proc.terminate()
-            self.proc.wait(timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            self.proc.kill()
-
-
-def _codex_exec(worker: dict, prompt: str, resume: bool, timeout: float | None = None) -> list:
-    """One headless Codex turn through the app-server. Returns the items it
-    completed, as {"type": "item.completed", "item": {...}} events.
-
-    Every turn states its sandbox and approval policy: nothing falls back to the
-    user's config, which may be full access (measured: `exec resume` has no
-    --sandbox option and resumed turns ran danger-full-access)."""
-    d = _dir(worker["name"])
-    full = worker.get("full_access")
-    policy = {"approvalPolicy": "never" if full else "on-request",
-              "sandbox": "danger-full-access" if full else "workspace-write",
-              "model": worker.get("model") or CODEX_MODEL, "cwd": worker["cwd"]}
-    events, deadline = [], (time.time() + timeout) if timeout else None
-    with open(os.path.join(d, "out.jsonl"), "a", encoding="utf-8") as log:
-        server = _AppServer(worker, log)
-        try:
-            server.request("initialize", {"clientInfo": {"name": "xsm", "version": "1"}})
-            server.send({"method": "initialized"})
-            if resume:
-                server.request("thread/resume", dict(policy, threadId=worker["session_id"]))
-                thread = worker["session_id"]
-            else:
-                started = server.request("thread/start", policy)
-                thread = (started.get("thread") or {}).get("id")
-                events.append({"type": "thread.started", "thread_id": thread})
-            turn = {"threadId": thread, "input": [{"type": "text", "text": prompt}],
-                    "approvalPolicy": policy["approvalPolicy"]}
-            if worker.get("effort"):
-                turn["effort"] = worker["effort"]
-            server.request("turn/start", turn)
-            while True:
-                if deadline and time.time() > deadline:
-                    raise WorkerError("codex did not finish its first turn within %ds; see %s"
-                                      % (timeout, os.path.join(d, "err.log")))
-                msg = server.read()
-                server.handle(msg)
-                if msg.get("method") == "item/completed":
-                    item = (msg.get("params") or {}).get("item") or {}
-                    if item.get("type") == "agentMessage":
-                        events.append({"type": "item.completed",
-                                       "item": {"type": "agent_message", "text": item.get("text")}})
-                if msg.get("method") == "turn/completed":
-                    return events
-        finally:
-            server.close()
-
-
-def _start_codex_headless(worker: dict, wait: float) -> None:
-    events = _codex_exec(worker, (
-        "You are an xsm worker session named %s. Tasks will arrive as messages from other "
-        "sessions. Reply with exactly: ready" % worker["name"]), resume=False, timeout=wait)
-    thread = next((e.get("thread_id") for e in events if e.get("type") == "thread.started"), None)
-    if not thread:
-        raise WorkerError("codex did not start a thread; see %s"
-                          % os.path.join(_dir(worker["name"]), "err.log"))
-    worker.update({"session_id": thread, "pid": None, "lstart": None})
-
-
 def _register_named_thread(worker: dict) -> None:
-    """A pane worker's thread is the one carrying the name xsm typed into it and
+    """A Codex worker's thread is the one carrying the name xsm typed into it and
     created after the worker started — exact, where matching a process to the
     newest thread in its folder is a guess."""
     if worker.get("session_id"):
@@ -662,8 +497,7 @@ def _wait_for_registration(worker: dict, wait: float) -> None:
     deadline = time.time() + wait
     while time.time() < deadline:
         if worker["runtime"] == "codex":
-            if worker["mode"] == "pane":
-                _register_named_thread(worker)
+            _register_named_thread(worker)
             rec = next((r for r in registry.records() if r.get("runtime") == "codex" and (
                 r.get("session_id") == worker.get("session_id") or
                 (worker.get("pid") and r.get("pid") == worker["pid"]))), None)
@@ -676,165 +510,11 @@ def _wait_for_registration(worker: dict, wait: float) -> None:
             worker["ref"] = rec.get("ref")
             return
         if worker.get("pid") and not identity.pid_alive(worker["pid"]):
-            raise WorkerError("the worker exited before registering; see %s"
-                              % os.path.join(_dir(worker["name"]), "err.log"))
+            raise WorkerError("the worker exited before registering")
         time.sleep(0.5)
     raise WorkerError("the worker did not register within %ds (is a trust prompt waiting in "
-                      "its pane?)" % wait)
-
-
-# --- delivering to a headless Codex worker ----------------------------------------
-
-def deliver(worker: dict, content: str) -> None:
-    """Hand a message to a headless Codex worker: it becomes the next turn's
-    prompt, so the worker's own UserPromptSubmit hook gates it as usual."""
-    inbox = os.path.join(_dir(worker["name"]), "inbox")
-    os.makedirs(inbox, mode=0o700, exist_ok=True)
-    # Names sort in arrival order; milliseconds are too coarse for two sends in a row.
-    item = os.path.join(inbox, "%020d-%s.txt" % (time.time_ns(), uuid.uuid4().hex[:6]))
-    with open(item + ".tmp", "w", encoding="utf-8") as fh:
-        fh.write(content)
-    os.replace(item + ".tmp", item)
-    ensure_pump(worker)
-
-
-def _lock_path(worker: dict) -> str:
-    return os.path.join(_dir(worker["name"]), "pump.lock")
-
-
-def _pump_file(worker: dict) -> str:
-    return os.path.join(_dir(worker["name"]), "pump.json")
-
-
-def _try_lock(worker: dict):
-    """An exclusive lock held for as long as the returned handle is open. The
-    kernel drops it when the pump exits, however it exits."""
-    import fcntl
-    try:
-        os.makedirs(_dir(worker["name"]), mode=0o700, exist_ok=True)
-        fh = open(_lock_path(worker), "a")
-    except OSError:
-        return None
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fh.close()
-        return None
-    return fh
-
-
-def _pump_alive(worker: dict) -> bool:
-    fh = _try_lock(worker)
-    if fh is None:
-        return os.path.exists(_lock_path(worker))
-    fh.close()
-    return False
-
-
-def ensure_pump(worker: dict) -> None:
-    if _pump_alive(worker):
-        return                          # the running pump re-checks the inbox before it lets go
-    log = open(os.path.join(_dir(worker["name"]), "err.log"), "ab")
-    env = _pump_env(worker)
-    env["PYTHONPATH"] = install.REPO
-    subprocess.Popen([install.pinned_python(), "-m", "xsm", "pump", worker["name"]],
-                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
-                     start_new_session=True)
-    log.close()
-
-
-# Whoever sends the message that wakes the pump is some other session; its
-# environment (credentials, settings) must not reach the worker's turns.
-PUMP_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "SHELL",
-            "TMPDIR", "XSM_HOME", "XSM_PYTHON")
-
-
-def _pump_env(worker: dict) -> dict:
-    env = {k: v for k, v in (worker.get("env") or {}).items()}
-    env.update({"XSM_WORKER": worker["name"], "CODEX_HOME": worker["home"]})
-    return env
-
-
-def pump(name: str) -> int:
-    """Run queued turns for one headless Codex worker, one at a time, then exit."""
-    worker = load(name)
-    if not is_headless_codex(worker):
-        return 0
-    lock = _try_lock(worker)
-    if lock is None:
-        return 0
-    me = os.getpid()
-    paths.write_json(_pump_file(worker), {"pid": me, "lstart": identity.lstart(me)})
-    inbox = os.path.join(_dir(name), "inbox")
-    claimed = os.path.join(_dir(name), "claimed")
-    os.makedirs(claimed, mode=0o700, exist_ok=True)
-    try:
-        while True:
-            items = sorted(glob.glob(os.path.join(inbox, "*.txt")))
-            if not items:
-                lock.close()
-                lock = None
-                # A message may land after the last look but before the lock
-                # goes; its sender saw the lock held and did not start a pump.
-                if glob.glob(os.path.join(inbox, "*.txt")):
-                    lock = _try_lock(worker)
-                    if lock is not None:
-                        continue
-                return 0
-            item = os.path.join(claimed, os.path.basename(items[0]))
-            try:
-                os.rename(items[0], item)          # claim it; only one pump can
-            except OSError:
-                continue
-            with open(item, encoding="utf-8") as fh:
-                content = fh.read()
-            try:
-                events = _codex_exec(worker, content, resume=True)
-            except Exception:
-                os.rename(item, items[0])          # put it back rather than lose it
-                raise
-            os.unlink(item)
-            _auto_reply(worker, content, events)
-    finally:
-        if lock is not None:
-            lock.close()
-        try:
-            os.unlink(_pump_file(worker))
-        except OSError:
-            pass
-
-
-def _auto_reply(worker: dict, content: str, events: list) -> None:
-    """A headless Codex worker cannot reach xsm from inside its sandbox, so the
-    pump sends its final message back for it when the turn answered a task."""
-    parsed = envelope.parse(content)
-    header = parsed.header
-    if header.get("kind") != "task" or not header.get("ref") or not header.get("id"):
-        return
-    from . import ledger
-    if ledger.status(header["id"]).get("status") != "delivered":
-        return                          # the worker's gate refused it: nothing was answered
-    texts = [e["item"].get("text") for e in events if e.get("type") == "item.completed"
-             and (e.get("item") or {}).get("type") == "agent_message" and e["item"].get("text")]
-    me = registry.by_session("codex", worker["session_id"])
-    if not me:
-        return
-    from . import send as send_mod
-    target = "ref:%s" % header["ref"]
-    if header.get("origin"):
-        target += "@%s" % header["origin"]         # the task came from a paired machine
-    try:
-        from . import telemetry
-    except ImportError:
-        telemetry = None
-    # Continues the task's own trace, so the round trip a caller sees is one
-    # thing: their send, the worker's turn, and the answer coming back.
-    span_cm = telemetry.span("xsm.worker.auto_reply", {"xsm.worker.name": worker["name"]},
-                             traceparent=header.get("traceparent")) \
-        if telemetry else nullcontext()
-    with span_cm:
-        send_mod.send(target, texts[-1] if texts else "(the worker gave no answer)",
-                      sender=me, kind="reply", reply_to=header["id"])
+                      "its tmux %s?)" % (wait, "pane" if worker["mode"] == "pane" else
+                                         "window: tmux attach -t %s" % BACKGROUND_SESSION))
 
 
 # --- approvals --------------------------------------------------------------------
@@ -863,11 +543,11 @@ def summarize(tool: str, tool_input) -> str:
 
 
 def permission_request(data: dict, runtime: str) -> dict | None:
-    """The PermissionRequest hook of a headless Claude worker. Silent for
+    """The PermissionRequest hook of a background Claude worker. Silent for
     anything else, so it changes nothing for ordinary sessions."""
     name = os.environ.get("XSM_WORKER")
     worker = load(name) if name else None
-    if not worker or worker.get("mode") != "headless":
+    if not worker or worker.get("mode") != "background":
         return None                     # a pane worker's person answers in the pane
     allow, reason = _await_person(worker, runtime, data.get("tool_name") or "?",
                                   data.get("tool_input"))
@@ -894,7 +574,7 @@ def _await_person(worker: dict, runtime: str, tool: str, tool_input) -> tuple:
             return allowed, reason
     finally:
         if telemetry:
-            # How long a headless worker sat waiting for a person, and whether
+            # How long a background worker sat waiting for a person, and whether
             # anyone came: the number that says if this design is usable.
             telemetry.histogram("xsm.worker.approval_wait.duration", time.time() - start,
                                 {"xsm.approval.outcome": "approved" if allowed else "denied"})
@@ -1032,11 +712,7 @@ def stop(name: str, reason: str = "stopped") -> dict:
                             {"xsm.worker.runtime": worker.get("runtime")})
     if worker.get("pane"):
         subprocess.run(["tmux", "kill-pane", "-t", worker["pane"]], capture_output=True, timeout=5)
-    if is_headless_codex(worker):
-        rec = paths.read_json(_pump_file(worker)) or {}
-        if rec.get("pid") and rec.get("lstart"):
-            _terminate(rec["pid"], rec["lstart"])
-    elif worker.get("pid") and worker.get("lstart"):
+    if worker.get("pid") and worker.get("lstart"):
         _terminate(worker["pid"], worker["lstart"])
     for req in approvals():
         if req.get("worker") == name:
@@ -1052,7 +728,7 @@ def _terminate(pid: int, lstart: str) -> None:
         return                              # gone, or the pid now belongs to someone else
     for sig, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 2.0)):
         try:
-            os.killpg(pid, sig)             # a headless worker leads its own group
+            os.killpg(pid, sig)             # a tmux pane's process leads its own group
         except OSError:
             try:
                 os.kill(pid, sig)
@@ -1149,108 +825,21 @@ def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None
 
 # --- watching ---------------------------------------------------------------------
 
-def render(event: dict) -> str | None:
-    """One line a person can read for one stream event, or None to skip it."""
-    t = event.get("type")
-    if t == "assistant":                                    # Claude stream-json
-        parts = []
-        for block in (event.get("message") or {}).get("content") or []:
-            if block.get("type") == "text" and block.get("text", "").strip():
-                parts.append(block["text"].strip())
-            elif block.get("type") == "tool_use":
-                parts.append("[%s]" % summarize(block.get("name") or "tool", block.get("input")))
-        return "\n".join(parts) or None
-    if t == "result":
-        return "-- turn done --"
-    if t == "item.completed":                               # Codex exec --json
-        item = event.get("item") or {}
-        if item.get("type") == "agent_message":
-            return item.get("text")
-        if item.get("type") == "command_execution":
-            return "[shell: %s -> %s]" % (item.get("command"), item.get("exit_code"))
-    if t == "turn.completed":
-        return "-- turn done --"
-    method = event.get("method")                            # Codex app-server
-    if method == "item/completed":
-        item = (event.get("params") or {}).get("item") or {}
-        if item.get("type") == "agentMessage":
-            return item.get("text")
-        if item.get("type") == "commandExecution":
-            return "[shell: %s -> %s]" % (item.get("command"), item.get("exitCode")
-                                          if item.get("exitCode") is not None else item.get("status"))
-    if method == "turn/completed":
-        return "-- turn done --"
-    return None
-
-
-def human_input(worker: dict, text: str) -> None:
-    """A line typed in `xsm attach`: the person's own words, so no envelope."""
-    if worker["runtime"] == "claude":
-        line = json.dumps({"type": "user", "message": {"role": "user", "content": text}})
-        fd = os.open(os.path.join(_dir(worker["name"]), "in"), os.O_WRONLY | os.O_NONBLOCK)
-        try:
-            os.write(fd, (line + "\n").encode())
-        finally:
-            os.close(fd)
-    else:
-        deliver(worker, text)
-
-
-def attach(name: str, out=sys.stdout, inp=sys.stdin, backlog: int = 30) -> int:
+def attach(name: str, out=sys.stdout) -> int:
+    """Go to the worker's own screen. It is a real TUI in tmux, so watching it
+    and answering it both happen there; what it is doing at a glance is on the
+    statusline."""
     worker = load(name)
     if not worker:
         raise WorkerError("no worker named %s" % name)
+    target = worker.get("pane")
+    if not target:
+        raise WorkerError("%s has no tmux pane on record" % name)
     if worker["mode"] == "pane":
-        out.write("%s runs in tmux pane %s: tmux select-pane -t %s\n"
-                  % (name, worker.get("pane"), worker.get("pane")))
+        out.write("%s runs in tmux pane %s: tmux select-pane -t %s\n" % (name, target, target))
         return 0
-    log = os.path.join(_dir(name), "out.jsonl")
-    out.write("attached to %s (%s). Type to send it a message; y/n answers a pending "
-              "approval; Ctrl-C detaches, the worker keeps running.\n" % (name, worker["runtime"]))
-    pos, shown = 0, set()
-    lines = open(log, encoding="utf-8").read().splitlines() if os.path.exists(log) else []
-    for line in lines[-backlog:]:
-        _print_event(line, out)
-    pos = os.path.getsize(log) if os.path.exists(log) else 0
-    try:
-        while load(name):
-            if os.path.exists(log) and os.path.getsize(log) > pos:
-                with open(log, encoding="utf-8") as fh:
-                    fh.seek(pos)
-                    chunk = fh.read()
-                    pos = fh.tell()
-                for line in chunk.splitlines():
-                    _print_event(line, out)
-            pending = [r for r in approvals() if r.get("worker") == name]
-            for req in pending:
-                if req["id"] not in shown:
-                    shown.add(req["id"])
-                    out.write("?? approval [%s] %s  (y/n)\n" % (req["id"], req["summary"]))
-            out.flush()
-            ready, _, _ = select.select([inp], [], [], 0.5)
-            if ready:
-                text = inp.readline()
-                if not text:
-                    break
-                text = text.strip()
-                if pending and text.lower() in ("y", "yes", "n", "no"):
-                    answer(pending[0]["id"], text.lower().startswith("y"))
-                    out.write("-> %s\n" % ("approved" if text.lower().startswith("y") else "denied"))
-                elif text:
-                    try:
-                        human_input(worker, text)
-                    except OSError as exc:
-                        out.write("-- %s is not reading (%s) --\n" % (name, exc.strerror))
-    except KeyboardInterrupt:
-        pass
-    out.write("detached from %s\n" % name)
+    verb = "switch-client" if os.environ.get("TMUX") else "attach"
+    if human_terminal():
+        os.execvp("tmux", ["tmux", verb, "-t", target])
+    out.write("%s runs in the background: tmux %s -t %s\n" % (name, verb, target))
     return 0
-
-
-def _print_event(line: str, out) -> None:
-    try:
-        text = render(json.loads(line))
-    except ValueError:
-        return
-    if text:
-        out.write(text + "\n")

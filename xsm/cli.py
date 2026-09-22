@@ -603,11 +603,38 @@ def cmd_statusline(args) -> int:
         pass
     parts = ["xsm %d peer%s" % (len(others), "" if len(others) == 1 else "s")]
     if me:
-        parts.append("as %s" % me.get("name"))
+        parts.append("as %s" % (me.get("name") or "ref:%s" % me.get("ref")))
     if held:
         parts.append("%d held" % held)
+    parts.extend(_worker_status(me))
     print(" · ".join(parts))
     return OK
+
+
+def _worker_status(me: dict | None) -> list:
+    """The workers this session started, for the statusline: a background one
+    has no pane beside you, so this is where you see it is still there and
+    whether it is waiting for you. kill(pid, 0) only — no `ps` on every render."""
+    try:
+        from . import identity
+        mine = [w for w in workers.all_workers()
+                if not me or w.get("parent_ref") == me.get("ref")]
+        if not mine:
+            return []
+        waiting = {}
+        for req in workers.approvals():
+            waiting[req.get("worker")] = waiting.get(req.get("worker"), 0) + 1
+        shown = []
+        for w in mine:
+            alive = bool(w.get("pid")) and identity.pid_alive(w["pid"])
+            tags = [t for t in ("bg" if w.get("mode") == "background" else "",
+                                "" if alive else "gone",
+                                "%d asks" % waiting[w["name"]] if waiting.get(w["name"]) else "")
+                    if t]
+            shown.append("%s%s" % (w["name"], "(%s)" % ",".join(tags) if tags else ""))
+        return ["workers " + " ".join(shown)]
+    except Exception:                              # a statusline must never break the UI
+        return ["workers ?"]
 
 
 def cmd_spawn(args) -> int:
@@ -623,14 +650,16 @@ def cmd_spawn(args) -> int:
     try:
         worker = workers.spawn(args.runtime, name=args.name, model=args.model, effort=args.effort,
                                cwd=args.dir, home=args.home, once=args.once,
-                               headless=args.headless, approval_timeout=args.approval_timeout,
+                               background=args.background,
+                               approval_timeout=args.approval_timeout,
                                wait=args.wait, caller=caller, max_depth=args.max_depth,
                                full_access=args.full_access, trust_hooks=args.trust_hooks,
                                grant=args.grant)
     except workers.WorkerError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return REFUSED
-    where = "tmux pane %s" % worker["pane"] if worker.get("pane") else "headless"
+    where = ("tmux pane %s" if worker["mode"] == "pane" else
+             "background, tmux " + workers.BACKGROUND_SESSION + " %s") % worker.get("pane")
     print("started %s (%s, %s%s) [%s] in %s" % (
         worker["name"], worker["runtime"], where,
         ", model %s" % worker["model"] if worker.get("model") else "", worker.get("ref"),
@@ -645,8 +674,8 @@ def cmd_spawn(args) -> int:
                            wait=args.task_wait, msg_id=task_id)
         print("task %s: %s%s" % (result.msg_id or "-", result.status,
                                  ": " + result.reason if result.reason else ""))
-    if worker["mode"] == "headless":
-        print("watch it: xsm attach %s   stop it: xsm stop %s" % (worker["name"], worker["name"]))
+    if worker["mode"] == "background":
+        print("see it: xsm attach %s   stop it: xsm stop %s" % (worker["name"], worker["name"]))
     else:
         print("stop it: xsm stop %s" % worker["name"])
     if worker.get("once"):
@@ -732,10 +761,6 @@ def cmd_answer(args) -> int:
         return REFUSED
     print("%s %s: %s" % (req["status"], req["id"], req["summary"]))
     return OK
-
-
-def cmd_pump(args) -> int:
-    return workers.pump(args.name)
 
 
 def cmd_post(args) -> int:
@@ -910,7 +935,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--task", help="send this as a task once the worker is up")
     sp.add_argument("--task-wait", type=float, default=30.0)
     sp.add_argument("--once", action="store_true", help="stop the worker when its answer arrives")
-    sp.add_argument("--headless", action="store_true", help="headless even inside tmux")
+    sp.add_argument("--background", action="store_true",
+                    help="run in the detached tmux session %s even from inside tmux"
+                    % workers.BACKGROUND_SESSION)
     sp.add_argument("--approval-timeout", type=int, default=workers.APPROVAL_TIMEOUT)
     sp.add_argument("--wait", type=float, default=90.0, help="seconds to wait for it to register")
     sp.add_argument("--full-access", action="store_true",
@@ -928,8 +955,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--after-pid", type=int)
     rp.set_defaults(func=cmd_reap)
     for verb, helptext, func in (("stop", "stop a worker and remove its records", cmd_stop),
-                                 ("attach", "watch a headless worker and talk to it", cmd_attach),
-                                 ("pump", argparse.SUPPRESS, cmd_pump)):
+                                 ("attach", "go to a worker's tmux pane", cmd_attach)):
         sp = sub.add_parser(verb, help=helptext)
         sp.add_argument("name")
         if verb == "stop":
@@ -1086,17 +1112,17 @@ def main(argv=None) -> int:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
     paths.ensure_home()
-    if args.command not in ("hook", "statusline", "prune", "pump", "reap", "mcp"):
+    if args.command not in ("hook", "statusline", "prune", "reap", "mcp"):
         housekeeping.maybe_prune()
     try:
         from . import telemetry
     except ImportError:
         telemetry = None
-    # Long-running (mcp, pump) or redrawn on every prompt (statusline): a span
+    # Long-running (mcp) or redrawn on every prompt (statusline): a span
     # each would be noise, or would never close. And the two that read the
     # telemetry itself: each export would leave a span for the next export to
     # ship, and metrics would count its own calls.
-    if telemetry is None or args.command in ("mcp", "pump", "statusline",
+    if telemetry is None or args.command in ("mcp", "statusline",
                                              "metrics", "otlp-export"):
         return args.func(args)
     return _traced(telemetry, args)

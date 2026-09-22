@@ -318,7 +318,7 @@ class WorkerInstrumentationTest(TempState):
     def test_stopping_a_worker_records_its_lifetime(self):
         import time
         from xsm import paths, telemetry, workers
-        workers.save({"name": "w1", "runtime": "codex", "mode": "headless",
+        workers.save({"name": "w1", "runtime": "codex", "mode": "background",
                       "created": time.time() - 42})
         stopped = workers.stop("w1", reason="done")
         self.assertEqual(stopped["stopped"], "done", "unchanged: still the same record")

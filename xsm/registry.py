@@ -100,13 +100,6 @@ def _enrich(record: dict) -> dict:
         out["name"] = (_codex_thread_name(record.get("home", ""), str(record.get("session_id") or ""))
                        or (worker or {}).get("name") or record.get("name")
                        or "codex-%s" % str(record.get("session_id"))[:8])
-        if workers.is_headless_codex(worker):
-            # No process between turns: a headless Codex worker is reachable for
-            # as long as its worker record exists.
-            out["worker"] = worker["name"]
-            out["state"] = "live"
-            out["registered"] = True
-            return out
     out["state"] = identity.state_of(out)
     if out["state"] == "live" and record.get("runtime") == "claude" and \
             out.get("native_session_id") and out["native_session_id"] != record.get("session_id"):

@@ -134,8 +134,8 @@ WORKER_RULE = ("You are a worker: this task is your job. Do every part you can. 
                "what you actually did and checked; if a step failed, say so.")
 
 
-def sender_context(parsed: Parsed, runtime: str = "claude", auto_reply: bool = False,
-                   worker: bool = False, cwd: str | None = None) -> str:
+def sender_context(parsed: Parsed, runtime: str = "claude", worker: bool = False,
+                   cwd: str | None = None) -> str:
     """What a receiving agent sees above a peer message.
 
     The message kind decides what the agent is asked to do. A `task` is meant
@@ -156,11 +156,7 @@ def sender_context(parsed: Parsed, runtime: str = "claude", auto_reply: bool = F
     reply = reply_command(parsed)
     shell = ("from the shell; if the sandbox stops it, use the xsm_send MCP tool with the same "
              "target, kind and reply_to") if runtime == "codex" else "with your Bash tool"
-    if kind == "task" and auto_reply:
-        lines.append("It is a task request. Carry it out now, within this session's own "
-                     "permissions. Your final message in this turn is sent back to the sender "
-                     "as your reply, so end with the answer itself; do not run xsm.")
-    elif kind == "task":
+    if kind == "task":
         lines.append("It is a task request. Carry it out now, the way you would a request from a "
                      "teammate, within this session's own permissions; do not wait for your user "
                      "to repeat it. When you are done — or if you cannot do it — report back:")

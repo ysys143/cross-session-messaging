@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from contextlib import nullcontext
 
-from . import adapters, config, envelope, ledger, paths, registry, resolve, workers
+from . import adapters, config, envelope, ledger, paths, registry, resolve
 
 
 class SendResult:
@@ -123,8 +123,6 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
             adapters.to_claude(target["socket"], content, msg_id, priority=priority,
                                reply_address=("uds:%s" % sender["socket"]) if sender.get("socket")
                                else None)
-        elif workers.is_headless_codex(workers.for_session(target.get("session_id"))):
-            workers.deliver(workers.for_session(target.get("session_id")), content)
         else:
             adapters.to_codex(target.get("home", os.path.expanduser("~/.codex")),
                               str(target.get("session_id")), content)

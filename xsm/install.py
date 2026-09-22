@@ -28,10 +28,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # SessionEnd lets a clean exit read as `ended` rather than `stale`. Codex has
 # no SessionEnd event, so a stopped Codex session always reads as stale.
 CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "SessionEnd")
-# No PermissionRequest for Codex: `codex exec` never asks for approval, so a
-# headless Codex worker has no request to relay (measured 2026-09-21), and a
-# hook that can never fire should not cost the user a trust prompt. Headless
-# Claude workers get theirs from their own --settings.
+# No PermissionRequest for Codex: Codex has no such hook event to relay a
+# question through, so a background Codex worker runs with approvals off
+# inside its sandbox instead. Background Claude workers get theirs from their
+# own --settings.
 CODEX_EVENTS = ("SessionStart", "UserPromptSubmit")
 TIMEOUTS = {"PermissionRequest": 660}
 
