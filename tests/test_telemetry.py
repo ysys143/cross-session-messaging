@@ -285,6 +285,26 @@ class ReceiveInstrumentationTest(TempState):
                          "the gate only opens a span for peer messages")
 
 
+@needs_telemetry
+class WorkerInstrumentationTest(TempState):
+    def test_stopping_a_worker_records_its_lifetime(self):
+        import time
+        from xsm import paths, telemetry, workers
+        workers.save({"name": "w1", "runtime": "codex", "mode": "headless",
+                      "created": time.time() - 42})
+        stopped = workers.stop("w1", reason="done")
+        self.assertEqual(stopped["stopped"], "done", "unchanged: still the same record")
+        points = {r["name"]: r for r in paths.read_jsonl(telemetry.METRICS)}
+        self.assertEqual(points["xsm.worker.stopped"]["attributes"],
+                         {"xsm.worker.runtime": "codex", "xsm.stop.reason": "done"})
+        self.assertGreaterEqual(points["xsm.worker.lifetime"]["value"], 42_000)
+
+    def test_a_worker_that_never_existed_still_raises(self):
+        from xsm import workers
+        with self.assertRaises(workers.WorkerError):
+            workers.stop("no-such-worker")
+
+
 class SendIsUnchangedByTelemetryTest(TempState):
     """The claim the whole design rests on, checked field by field."""
 

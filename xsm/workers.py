@@ -40,6 +40,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import nullcontext
 
 from . import config, envelope, identity, install, paths, registry
 
@@ -397,14 +398,26 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
         worker["env"] = {k: os.environ[k] for k in PUMP_ENV if k in os.environ}
     os.makedirs(_dir(name), mode=0o700, exist_ok=True)
     try:
-        if pane:
-            _start_in_pane(worker, pane)
-        elif runtime == "claude":
-            _start_claude_headless(worker)
-        else:
-            _start_codex_headless(worker, wait)
-        save(worker)
-        _wait_for_registration(worker, wait)
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    # Only the part that takes time: the checks above either pass at once or
+    # raise, and timing them would say nothing about how long a worker takes
+    # to come up.
+    span_cm = telemetry.span("xsm.worker.spawn",
+                             {"xsm.worker.runtime": runtime, "xsm.worker.name": name,
+                              "xsm.worker.mode": worker["mode"], "xsm.worker.depth": depth}) \
+        if telemetry else nullcontext()
+    try:
+        with span_cm:
+            if pane:
+                _start_in_pane(worker, pane)
+            elif runtime == "claude":
+                _start_claude_headless(worker)
+            else:
+                _start_codex_headless(worker, wait)
+            save(worker)
+            _wait_for_registration(worker, wait)
     except BaseException:
         if worker.get("pane"):
             subprocess.run(["tmux", "kill-pane", "-t", worker["pane"]], capture_output=True,
@@ -810,8 +823,18 @@ def _auto_reply(worker: dict, content: str, events: list) -> None:
     target = "ref:%s" % header["ref"]
     if header.get("origin"):
         target += "@%s" % header["origin"]         # the task came from a paired machine
-    send_mod.send(target, texts[-1] if texts else "(the worker gave no answer)",
-                  sender=me, kind="reply", reply_to=header["id"])
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    # Continues the task's own trace, so the round trip a caller sees is one
+    # thing: their send, the worker's turn, and the answer coming back.
+    span_cm = telemetry.span("xsm.worker.auto_reply", {"xsm.worker.name": worker["name"]},
+                             traceparent=header.get("traceparent")) \
+        if telemetry else nullcontext()
+    with span_cm:
+        send_mod.send(target, texts[-1] if texts else "(the worker gave no answer)",
+                      sender=me, kind="reply", reply_to=header["id"])
 
 
 # --- approvals --------------------------------------------------------------------
@@ -854,6 +877,30 @@ def permission_request(data: dict, runtime: str) -> dict | None:
 def _await_person(worker: dict, runtime: str, tool: str, tool_input) -> tuple:
     """Record a request, tell the parent, and wait for a person's answer.
     Returns (allowed, reason)."""
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    span_cm = telemetry.span("xsm.worker.approval_wait",
+                             {"xsm.worker.name": worker["name"], "xsm.tool": tool}) \
+        if telemetry else nullcontext()
+    start = time.time()
+    allowed, reason = False, None
+    try:
+        with span_cm as span:
+            allowed, reason = _await_person_inner(worker, runtime, tool, tool_input)
+            if span is not None:
+                span.set_attribute("xsm.approval.allowed", allowed)
+            return allowed, reason
+    finally:
+        if telemetry:
+            # How long a headless worker sat waiting for a person, and whether
+            # anyone came: the number that says if this design is usable.
+            telemetry.histogram("xsm.worker.approval_wait.duration", time.time() - start,
+                                {"xsm.approval.outcome": "approved" if allowed else "denied"})
+
+
+def _await_person_inner(worker: dict, runtime: str, tool: str, tool_input) -> tuple:
     summary = summarize(tool, tool_input) if not isinstance(tool_input, str) \
         else "%s: %s" % (tool, tool_input)
     req = {"id": uuid.uuid4().hex[:8], "worker": worker["name"], "runtime": runtime,
@@ -973,6 +1020,16 @@ def stop(name: str, reason: str = "stopped") -> dict:
     worker = load(name)
     if not worker:
         raise WorkerError("no worker named %s" % name)
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    if telemetry:
+        telemetry.counter("xsm.worker.stopped", 1,
+                          {"xsm.worker.runtime": worker.get("runtime"), "xsm.stop.reason": reason})
+        telemetry.histogram("xsm.worker.lifetime", time.time() - (worker.get("created") or
+                                                                  time.time()),
+                            {"xsm.worker.runtime": worker.get("runtime")})
     if worker.get("pane"):
         subprocess.run(["tmux", "kill-pane", "-t", worker["pane"]], capture_output=True, timeout=5)
     if is_headless_codex(worker):
