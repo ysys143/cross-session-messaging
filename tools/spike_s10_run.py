@@ -152,12 +152,14 @@ def _screen(pane: str) -> str:
         return ""
 
 
-def start(runtime: str, model: str, name: str, root: str, home: str, log_dir: str) -> dict:
+def start(runtime: str, model: str, name: str, root: str, home: str, log_dir: str,
+          effort: str = "") -> dict:
     """Spawn one live worker and give it the brief. Returns its record, or
     {"name", "error"}: a failed start is reported, never replaced with another
     kind of session."""
     out = subprocess.run([os.path.join(REPO, "bin", "xsm"), "spawn", runtime, "--background",
-                          "--name", name, "--model", model, "--dir", root, "--wait", "90"],
+                          "--name", name, "--model", model, "--dir", root, "--wait", "90"] +
+                         (["--effort", effort] if effort else []),
                          env=_env(home), cwd=root, capture_output=True, text=True, timeout=150)
     with open(os.path.join(log_dir, "%s.spawn.log" % name), "w") as fh:
         fh.write("exit %d\n%s%s" % (out.returncode, out.stdout, out.stderr))
@@ -299,7 +301,8 @@ def main() -> int:
     if not shutil.which("tmux"):
         print("tmux is required: the workers are real sessions in tmux", file=sys.stderr)
         return 2
-    agents = [a.split(":", 1) for a in args.agents.split(",")]
+    # runtime:model[:effort] — effort keeps a scarce quota going further.
+    agents = [(a.split(":") + [""])[:3] for a in args.agents.split(",")]
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=False)
     run = os.path.basename(out)
@@ -314,9 +317,9 @@ def main() -> int:
     started = [{}] * len(agents)
 
     def launch(i):
-        runtime, model = agents[i]
+        runtime, model, effort = agents[i]
         name = "%s-%s-%d" % (run, model.split("-")[-1], i)
-        started[i] = start(runtime, model, name, roots[i], homes[roots[i]], out)
+        started[i] = start(runtime, model, name, roots[i], homes[roots[i]], out, effort)
         started[i]["root"] = roots[i]
 
     threads = [threading.Thread(target=launch, args=(i,)) for i in range(len(agents))]
