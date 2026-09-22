@@ -213,12 +213,14 @@ def codex_command_skill(source: str) -> tuple:
             template = "\n".join("[output of command %d]" % next(n)
                                   if ln.startswith("!`") and ln.endswith("`") else ln
                                   for ln in block.splitlines())
+            # No <<< >>> around the layout: Codex copied the markers into
+            # its reply (2026-09-23).
             text = ("This is a display command. There is nothing to decide.\n\n"
                     "Run these shell commands, exactly as written:\n\n%s\n\n"
-                    "Then reply with the text between the markers, each [output of command N] "
-                    "replaced by that command's output copied exactly, %s. Nothing before it, "
-                    "nothing after it. Do not translate, reword, summarise or explain it, and "
-                    "run nothing else.\n\n<<<\n%s\n>>>\n" % (
+                    "Then reply with the layout below, each [output of command N] replaced by "
+                    "that command's output copied exactly, %s. Nothing before it, nothing after "
+                    "it. Do not translate, reword, summarise or explain it, and run nothing "
+                    "else.\n\n## Layout\n\n%s\n" % (
                         "\n".join("%d. `%s`" % (i + 1, c) for i, c in enumerate(commands)),
                         wrap, template))
     else:

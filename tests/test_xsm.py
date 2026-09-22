@@ -886,6 +886,26 @@ class CompactOutputTest(TempState):
                 self.assertNotIn("```", text)
         self.assertIn("a \\| b", _run_cli(["ledger", "--table"]), "a pipe stays inside its cell")
 
+    def test_tables_stay_narrow_enough_to_stay_tables(self):
+        """Past the pane's width Codex draws each row as a stacked card: ten
+        ledger rows came out as fifty lines (2026-09-23)."""
+        from unittest import mock
+        from xsm import install, ledger, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        me = registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="me")
+        far = {"name": "x" * 40, "alias": "codex", "ref": "zzzzzz", "runtime": "codex"}
+        ledger.queued("m1", me, far, "dir:x", "note", "y" * 200)
+        ledger.queued("m2", far, far, "dir:x", "note", "not mine")
+        with mock.patch.object(registry, "me", lambda: me):
+            text = _run_cli(["ledger", "--table", "--mine"])
+        rows = text.splitlines()[2:]
+        self.assertEqual(len(rows), 1, "only this session's messages")
+        self.assertIn(" | you → xxxxxxxx", rows[0])
+        self.assertLess(max(len(line) for line in text.splitlines()), 90)
+        skill, _ = install.codex_command_skill(os.path.join(REPO, "commands", "xsm-inbox.md"))
+        self.assertNotIn("<<<", skill, "Codex copied the markers into its reply")
+
     def test_list_compact_groups_by_folder_this_one_first(self):
         """A path on every line wrapped each entry in a narrow Codex pane."""
         from xsm import cli, registry

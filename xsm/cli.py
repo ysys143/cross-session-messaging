@@ -226,6 +226,13 @@ def _md(text) -> str:
     return str("" if text is None else text).replace("|", "\\|").replace("\n", " ")
 
 
+def _short(text, width: int = 20) -> str:
+    """Narrow cells keep a table a table: past the pane's width Codex draws
+    each row as a stacked card, and ten messages became fifty lines."""
+    text = str(text or "").replace("\n", " ")
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
 def _md_table(headers: list, rows: list) -> list:
     """A Markdown table for a session's TUI to draw (Claude Code and Codex
     both render them). The display commands pass it through bare."""
@@ -450,15 +457,27 @@ def _mark_undelivered(rows: list) -> list:
 
 
 def cmd_ledger(args) -> int:
-    rows = _mark_undelivered(ledger.recent(args.last))
+    if getattr(args, "mine", False):
+        me = registry.me()
+        mine = (me or {}).get("ref")
+        rows = [r for r in _mark_undelivered(ledger.recent(10 ** 6))
+                if mine and mine in ((r.get("from") or {}).get("ref"),
+                                     (r.get("to") or {}).get("ref"))][:args.last]
+    else:
+        rows = _mark_undelivered(ledger.recent(args.last))
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1))
         return OK
     if getattr(args, "table", False):
-        print("\n".join(_md_table(["status", "from", "to", "message", "id"], [
-            (row.get("status"), (row.get("from") or {}).get("name"),
-             (row.get("to") or {}).get("name"),
-             (row.get("preview") or "").replace("\n", " ")[:50], "`%s`" % row.get("id"))
+        # Three narrow columns. The id is left out: `xsm ledger` has it, and a
+        # sixteen-character cell was what pushed the table past the pane.
+        me_ref = (registry.me() or {}).get("ref") if getattr(args, "mine", False) else None
+
+        def who(side: dict) -> str:
+            return "you" if me_ref and side.get("ref") == me_ref else _short(side.get("name"), 18)
+        print("\n".join(_md_table(["status", "from → to", "message"], [
+            (row.get("status"), "%s → %s" % (who(row.get("from") or {}), who(row.get("to") or {})),
+             _short(row.get("preview"), 36))
             for row in rows])) if rows else "no messages")
         return OK
     if args.compact:
@@ -538,10 +557,9 @@ def cmd_held(args) -> int:
         for p in entries:
             entry = paths.read_json(p, {}) or {}
             body = (entry.get("body") or "").replace("\n", " ")
-            rows.append((entry.get("from") or "unknown", entry.get("reason"),
-                         body[:50] + ("…" if len(body) > 50 else ""),
-                         "`%s`" % os.path.basename(p)[:-5]))
-        print("\n".join(_md_table(["from", "why it was held", "message", "id"], rows))
+            rows.append((_short(entry.get("from") or "unknown", 18),
+                         _short(entry.get("reason"), 30), _short(body, 24)))
+        print("\n".join(_md_table(["from", "why it was held", "message"], rows))
               if rows else "nothing held")
         return OK
     for p in entries:
@@ -1278,6 +1296,8 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("--last", type=int, default=20)
     lg.add_argument("--json", action="store_true")
     lg.add_argument("--compact", action="store_true")
+    lg.add_argument("--mine", action="store_true",
+                    help="only messages to or from the session running this")
     lg.set_defaults(func=cmd_ledger)
 
     mt = sub.add_parser("metrics", help="what xsm's own telemetry has recorded here")

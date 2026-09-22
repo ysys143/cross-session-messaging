@@ -11,11 +11,11 @@ code block, so the tables show as tables. Nothing before it, nothing after it.
 Do not translate, reword, summarise or explain it, and do not call any tool.
 
 <<<
-**Recent messages**
+**Recent messages to and from this session**
 
-!`{{XSM}} ledger --table --last 10`
+!`{{XSM}} ledger --table --mine --last 5`
 
-**Held by the gate**
+**Held by the gate** (ids and full text: `xsm held list`)
 
 !`{{XSM}} held list --table`
 >>>
