@@ -221,6 +221,18 @@ def cmd_list(args) -> int:
     return OK
 
 
+def _md(text) -> str:
+    """One Markdown table cell: pipes escaped, newlines folded."""
+    return str("" if text is None else text).replace("|", "\\|").replace("\n", " ")
+
+
+def _md_table(headers: list, rows: list) -> list:
+    """A Markdown table for a session's TUI to draw (Claude Code and Codex
+    both render them). The display commands pass it through bare."""
+    return (["| %s |" % " | ".join(headers), "|%s|" % "|".join("---" for _ in headers)] +
+            ["| %s |" % " | ".join(_md(c) for c in row) for row in rows])
+
+
 def cmd_who(args) -> int:
     me = registry.me()
     if not me:
@@ -231,6 +243,14 @@ def cmd_who(args) -> int:
         return REFUSED
     if args.json:
         print(json.dumps(me, ensure_ascii=False, indent=1))
+        return OK
+    if getattr(args, "table", False):
+        auto = me.get("name_source") and me["name_source"] != "user"
+        rows = [("name", me["name"] + (" (%s: can change)" % me["name_source"] if auto else "")),
+                ("address", "`%s@%s`, or stable: `ref:%s`" % (me["name"], me["alias"], me["ref"])),
+                ("runtime", "%s, home %s" % (me["runtime"], _home_tilde(me.get("home") or ""))),
+                ("folder", _home_tilde(me.get("cwd") or ""))]
+        print("\n".join(_md_table(["this session", ""], rows)))
         return OK
     print("%s@%s [%s] %s %s" % (me["name"], me["alias"], me["ref"],
                                 me["runtime"], me.get("cwd") or ""))
@@ -331,6 +351,18 @@ def cmd_block(args) -> int:
 def cmd_projects(args) -> int:
     here = _here(args)
     root = config.project_root(here)
+    if getattr(args, "table", False):
+        table = [("**this folder**", _home_tilde(root), ", ".join(_memberships(here)))]
+        for scope in config.projects():
+            for i, m in enumerate(scope.get("members", [])):
+                mine = os.path.realpath(m.get("root", "")) == root
+                table.append((scope.get("id") if i == 0 else "",
+                              _home_tilde(m.get("root", "")) + (" (this folder)" if mine else ""),
+                              ""))
+        print("\n".join(_md_table(["project", "folder", "member of"], table)))
+        if not config.projects():
+            print("\nNo named projects yet. Join one with `/xsm-join <name>` (Codex: `$xsm-join`).")
+        return OK
     print("this folder (%s) is in: %s" % (_home_tilde(root), ", ".join(_memberships(here))))
     rows = config.projects()
     if not rows:
@@ -422,6 +454,13 @@ def cmd_ledger(args) -> int:
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1))
         return OK
+    if getattr(args, "table", False):
+        print("\n".join(_md_table(["status", "from", "to", "message", "id"], [
+            (row.get("status"), (row.get("from") or {}).get("name"),
+             (row.get("to") or {}).get("name"),
+             (row.get("preview") or "").replace("\n", " ")[:50], "`%s`" % row.get("id"))
+            for row in rows])) if rows else "no messages")
+        return OK
     if args.compact:
         for row in rows:
             print("%s %s->%s %s: %s" % (row.get("status"), (row.get("from") or {}).get("name"),
@@ -493,6 +532,17 @@ def cmd_held(args) -> int:
         if not os.path.exists(target):
             return REFUSED
         os.unlink(target)
+        return OK
+    if getattr(args, "table", False):
+        rows = []
+        for p in entries:
+            entry = paths.read_json(p, {}) or {}
+            body = (entry.get("body") or "").replace("\n", " ")
+            rows.append((entry.get("from") or "unknown", entry.get("reason"),
+                         body[:50] + ("…" if len(body) > 50 else ""),
+                         "`%s`" % os.path.basename(p)[:-5]))
+        print("\n".join(_md_table(["from", "why it was held", "message", "id"], rows))
+              if rows else "nothing held")
         return OK
     for p in entries:
         entry = paths.read_json(p, {}) or {}
@@ -619,6 +669,9 @@ def cmd_doctor(args) -> int:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=1))
         return OK
+    if getattr(args, "table", False):
+        print("\n".join(_md_table(["check", "result"], _doctor_rows(report))))
+        return OK
     print("state      %s" % report["xsm_home"])
     print("python     %s%s" % (report["interpreter"], "" if report["interpreter_ok"] else "  TOO OLD"))
     print("codex      %s" % (report["codex_binary"] or "not found on PATH"))
@@ -644,6 +697,31 @@ def cmd_doctor(args) -> int:
     for note in report["limits"]:
         print("limit      %s" % note)
     return OK
+
+
+def _doctor_rows(report: dict) -> list:
+    rows = [("state", _home_tilde(report["xsm_home"])),
+            ("python", report["interpreter"] + ("" if report["interpreter_ok"] else " **TOO OLD**")),
+            ("codex", report["codex_binary"] or "not found on PATH"),
+            ("sessions", "%(registered)d registered, %(live)d live, %(unregistered)d unregistered"
+             % report["sessions"]),
+            ("hooks", "%d decision(s) recorded, %d internal error(s)"
+             % (report["decisions_seen"], report["hook_errors_recent"])),
+            ("held", "%d message(s)" % report["held"])]
+    for plan in report["installs"]:
+        rows.append(("install", "%s: %s" % (_home_tilde(plan["file"]), plan["error"])
+                     if plan.get("error") else "%s: %s" % (
+                         _home_tilde(plan["file"]),
+                         ", ".join("%s %s" % (a["event"], a["action"]) for a in plan["actions"]))))
+    for home, trust in (report.get("codex_trust") or {}).items():
+        missing = [e for e, ok in (trust or {}).items() if not ok]
+        rows.append(("codex trust", "%s: %s" % (_home_tilde(home), (
+            "xsm hooks not installed" if not trust else "hooks trusted" if not missing else
+            "**NOT trusted** for %s: start codex there and choose 'Trust all and continue'"
+            % ", ".join(missing)))))
+    for note in report["limits"]:
+        rows.append(("limit", note))
+    return rows
 
 
 def cmd_selftest(args) -> int:
@@ -1054,6 +1132,7 @@ def build_parser() -> argparse.ArgumentParser:
     ls.set_defaults(func=cmd_list)
 
     who = sub.add_parser("who", help="identity of the session running this command")
+    who.add_argument("--table", action="store_true", help="a Markdown table (for a session's TUI)")
     who.add_argument("--json", action="store_true")
     who.set_defaults(func=cmd_who)
 
@@ -1157,6 +1236,7 @@ def build_parser() -> argparse.ArgumentParser:
         bp.add_argument("ref")
         bp.set_defaults(func=cmd_block)
     pj = sub.add_parser("projects", help="named xsm projects and their member folders")
+    pj.add_argument("--table", action="store_true", help="a Markdown table (for a session's TUI)")
     pj.add_argument("--dir", help="mark membership relative to this folder")
     pj.set_defaults(func=cmd_projects)
 
@@ -1194,6 +1274,7 @@ def build_parser() -> argparse.ArgumentParser:
     st.set_defaults(func=cmd_status)
 
     lg = sub.add_parser("ledger", help="recent messages and their delivery state")
+    lg.add_argument("--table", action="store_true", help="a Markdown table (for a session's TUI)")
     lg.add_argument("--last", type=int, default=20)
     lg.add_argument("--json", action="store_true")
     lg.add_argument("--compact", action="store_true")
@@ -1215,6 +1296,7 @@ def build_parser() -> argparse.ArgumentParser:
     ox.set_defaults(func=cmd_otlp_export)
 
     hd = sub.add_parser("held", help="messages this machine refused and kept")
+    hd.add_argument("--table", action="store_true", help="a Markdown table (for a session's TUI)")
     hd.add_argument("action", nargs="?", default="list", choices=["list", "show", "drop"])
     hd.add_argument("id", nargs="?")
     hd.set_defaults(func=cmd_held)
@@ -1238,6 +1320,7 @@ def build_parser() -> argparse.ArgumentParser:
     un.set_defaults(func=cmd_uninstall)
 
     doc = sub.add_parser("doctor", help="what is installed, what is running, what is not covered")
+    doc.add_argument("--table", action="store_true", help="a Markdown table (for a session's TUI)")
     doc.add_argument("--json", action="store_true")
     doc.set_defaults(func=cmd_doctor)
 

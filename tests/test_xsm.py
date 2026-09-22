@@ -19,6 +19,14 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 
+def _run_cli(argv: list) -> str:
+    from xsm import cli
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        cli.main(argv)
+    return out.getvalue()
+
+
 class TempState(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="xsm-test-")
@@ -836,6 +844,31 @@ class CompactOutputTest(TempState):
         self.assertEqual(lines[1], "|---|---|---|---|---|")
         self.assertEqual([l.split("|")[1].strip() for l in lines[2:]], ["here", ""])
         self.assertIn("one\\|two", out.getvalue(), "a pipe in a name does not split a cell")
+
+    def test_every_display_command_asks_for_a_table_its_output_provides(self):
+        """/xsm-list, /xsm-who, /xsm-inbox, /xsm-projects, /xsm-doctor all pass
+        Markdown tables through for the TUI to draw."""
+        import re
+        from unittest import mock
+        from xsm import cli, ledger, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        me = registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="me")
+        ledger.queued("m1", me, me, "dir:x", "note", "a | b")
+        for name in ("xsm-list", "xsm-who", "xsm-inbox", "xsm-projects", "xsm-doctor"):
+            body = open(os.path.join(REPO, "commands", name + ".md")).read()
+            self.assertIn("not in a\ncode block", body, name)
+            for command in re.findall(r"!`\{\{XSM\}\} ([^`]*)`", body):
+                self.assertIn("--table", command, name)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), \
+                        mock.patch.object(registry, "me", lambda: me):
+                    cli.main(command.split())
+                text = out.getvalue()
+                self.assertTrue(text.startswith("| ") or text.startswith("no ")
+                                or text.startswith("nothing"), (name, text[:80]))
+                self.assertNotIn("```", text)
+        self.assertIn("a \\| b", _run_cli(["ledger", "--table"]), "a pipe stays inside its cell")
 
     def test_list_compact_groups_by_folder_this_one_first(self):
         """A path on every line wrapped each entry in a narrow Codex pane."""

@@ -192,19 +192,35 @@ def codex_command_skill(source: str) -> tuple:
     shell = [line[2:-1] for line in body.splitlines()
              if line.startswith("!`") and line.endswith("`")]
     if shell:
-        steps = "\n".join("    %s" % c.replace("{{XSM}}", xsm) for c in shell)
         # A Markdown table is passed through bare so the TUI draws it; anything
         # else goes in a code block so its spacing survives.
-        wrap = ("as it is, not in a code block, so it shows as a table"
-                if any("--table" in c for c in shell) else "inside one code block")
-        text = ("This is a display command. There is nothing to decide.\n\n"
-                "Run %s, exactly as written:\n\n%s\n\n"
-                "Then reply with %s, copied exactly, %s%s. Nothing before "
-                "it, nothing after it. Do not translate, reword, summarise or explain it, and "
-                "run nothing else.\n" % (
-                    "this shell command" if len(shell) == 1 else "these shell commands in order",
-                    steps, "its output" if len(shell) == 1 else "their outputs", wrap,
-                    "" if len(shell) == 1 else ", separated by a line `---`"))
+        tables = any("--table" in c for c in shell)
+        wrap = ("as it is, not in a code block, so the tables show as tables" if tables
+                else "inside one code block")
+        commands = [c.replace("{{XSM}}", xsm) for c in shell]
+        block = body[body.index("<<<") + 3:body.index(">>>")].strip("\n") \
+            if "<<<" in body and ">>>" in body else ""
+        layout = [ln for ln in block.splitlines() if ln.strip()]
+        if len(commands) == 1 and len(layout) == 1:
+            text = ("This is a display command. There is nothing to decide.\n\n"
+                    "Run this shell command, exactly as written:\n\n    %s\n\n"
+                    "Then reply with its output, copied exactly, %s. Nothing before it, "
+                    "nothing after it. Do not translate, reword, summarise or explain it, and "
+                    "run nothing else.\n" % (commands[0], wrap))
+        else:
+            # Headings between the outputs stay; each command's place is marked.
+            n = iter(range(1, len(commands) + 1))
+            template = "\n".join("[output of command %d]" % next(n)
+                                  if ln.startswith("!`") and ln.endswith("`") else ln
+                                  for ln in block.splitlines())
+            text = ("This is a display command. There is nothing to decide.\n\n"
+                    "Run these shell commands, exactly as written:\n\n%s\n\n"
+                    "Then reply with the text between the markers, each [output of command N] "
+                    "replaced by that command's output copied exactly, %s. Nothing before it, "
+                    "nothing after it. Do not translate, reword, summarise or explain it, and "
+                    "run nothing else.\n\n<<<\n%s\n>>>\n" % (
+                        "\n".join("%d. `%s`" % (i + 1, c) for i, c in enumerate(commands)),
+                        wrap, template))
     else:
         text = body.replace("{{XSM}}", xsm).replace("Bash command", "shell command")
         text = text.replace("/" + name, "$" + name)
