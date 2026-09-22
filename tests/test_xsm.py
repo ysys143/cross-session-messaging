@@ -590,6 +590,46 @@ class InstallRefreshTest(TempState):
         self.assertIsNone(install._read_text(os.path.join(home, "settings.json")))
 
 
+class LeftoverTest(TempState):
+    """A home that moves from `xsm install` to the plugin keeps the files the
+    install wrote, and a stale copy of them reads as ours (2026-09-23)."""
+
+    def test_a_home_on_the_plugin_reports_leftovers_instead_of_staleness(self):
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "claude-home")
+        os.makedirs(os.path.join(home, "commands"))
+        install.install_commands(home)
+        install.install_skill(home)
+        self.assertEqual(install.leftovers(home), [], "not on the plugin yet")
+        paths.write_json(os.path.join(home, "plugins", "installed_plugins.json"),
+                         {"version": 2, "plugins": {"xsm@xsm": [{"version": "0.3.1"}]}})
+        self.assertEqual(len(install.leftovers(home)), len(install.command_files()) + 1)
+        self.assertEqual(install.stale_copies(home), [], "the plugin keeps itself current")
+        self.assertTrue(install.remove_skill(home))
+        self.assertEqual(install.remove_commands(home), len(install.command_files()))
+        self.assertEqual(install.leftovers(home), [])
+
+    def test_a_copied_skill_is_removed_on_uninstall_too(self):
+        from xsm import install
+        home = os.path.join(self.tmp, "claude-copy")
+        skills = os.path.join(home, "skills", "xsm")
+        os.makedirs(skills)
+        with open(os.path.join(skills, "SKILL.md"), "w") as fh:
+            fh.write("---\nname: xsm\n---\nour copy\n")
+        self.assertTrue(install.remove_skill(home))
+        self.assertFalse(os.path.exists(skills))
+
+    def test_someone_elses_skill_of_the_same_name_survives(self):
+        from xsm import install
+        home = os.path.join(self.tmp, "claude-foreign")
+        skills = os.path.join(home, "skills", "xsm")
+        os.makedirs(skills)
+        with open(os.path.join(skills, "SKILL.md"), "w") as fh:
+            fh.write("---\nname: xsm-theirs\n---\nnot ours\n")
+        self.assertFalse(install.remove_skill(home))
+        self.assertTrue(os.path.exists(skills))
+
+
 class StuckReportTest(TempState):
     """`xsm doctor` said nothing while a worker waited ten minutes on a
     permission and two messages sat queued to a closed Codex thread."""

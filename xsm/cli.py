@@ -785,6 +785,11 @@ def cmd_doctor(args) -> int:
         if files:
             print("stale      %s: %d file(s) behind the repo; refresh with `xsm install --refresh`"
                   % (_home_tilde(home), len(files)))
+    for home, files in (report.get("leftovers") or {}).items():
+        if files:
+            print("leftover   %s: %d file(s) from an earlier `xsm install`; the plugin provides "
+                  "them now. Remove with `xsm uninstall --claude-home %s`"
+                  % (_home_tilde(home), len(files), _home_tilde(home)))
     for line in _stuck_lines(report.get("stuck") or {}):
         print("stuck      %s" % line)
     for note in report["limits"]:

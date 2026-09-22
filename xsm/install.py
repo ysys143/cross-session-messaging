@@ -325,12 +325,28 @@ def remove_codex_commands(home: str) -> int:
     return removed
 
 
+def leftovers(home: str) -> list:
+    """Files an earlier `xsm install` left in a Claude home that has since
+    moved to the plugin. The plugin carries its own commands and skill, so
+    these are dead weight — and a stale copy of them reads as ours."""
+    if not plugin_installed(home):
+        return []
+    found = [p for p in glob.glob(os.path.join(home, "commands", "xsm-*.md"))
+             if FILE_MARKER in (_read_text(p) or "")]
+    skill = os.path.join(home, "skills", "xsm")
+    if os.path.exists(skill):
+        found.append(skill)
+    return found
+
+
 def stale_copies(home: str, runtime: str = "claude") -> list:
     """Files we installed into a home that no longer match the repository.
     A copied skill in a second profile sat eight versions behind for a day
     before anyone noticed (2026-09-23), because nothing compared them."""
     out = []
     if runtime == "claude":
+        if plugin_installed(home):
+            return []                   # the plugin keeps itself current
         for source in command_files():
             target = os.path.join(home, "commands", os.path.basename(source))
             body = _read_text(target)
@@ -545,6 +561,13 @@ def remove_skill(home: str) -> bool:
     if os.path.islink(target) and os.path.realpath(target) == os.path.realpath(source):
         os.unlink(target)
         return True
+    # A copy we wrote (install_skill --refresh writes one where a home cannot
+    # take our link). Its first line is ours, so it is not someone else's file.
+    state, detail = skill_state(home)
+    if state in ("copy-current", "copy-stale") and \
+            (_read_text(detail) or "").startswith("---\nname: xsm\n"):
+        shutil.rmtree(target, ignore_errors=True)
+        return True
     return False
 
 
@@ -714,6 +737,8 @@ def doctor() -> dict:
                     if h.get("runtime") == "claude"},
         "stale": {h["path"]: stale_copies(h["path"], h.get("runtime") or "claude")
                   for h in config.homes()},
+        "leftovers": {h["path"]: leftovers(h["path"]) for h in config.homes()
+                      if h.get("runtime") == "claude"},
         "stuck": stuck(),
         "limits": [
             "A peer message without the xsm envelope cannot be told apart from your own typing "
