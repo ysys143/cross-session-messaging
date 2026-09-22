@@ -243,6 +243,48 @@ class SendInstrumentationTest(TempState):
         self.assertEqual(point["attributes"]["xsm.delivery.outcome"], "sandbox-blocked")
 
 
+@needs_telemetry
+class ReceiveInstrumentationTest(TempState):
+    def _gate(self, prompt):
+        from xsm import receive
+        receive.register = lambda data, runtime: None        # identity unknown: blocks
+        return receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "r1",
+                               "cwd": self.tmp, "prompt": prompt, "session_title": "recv"})
+
+    def test_the_receiver_joins_the_trace_the_sender_started(self):
+        from xsm import envelope, paths, telemetry
+        sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa", "session_id": "s1"}
+        with telemetry.span("xsm.send") as sending:
+            wire = envelope.build("hi", msg_id="m1", sender=sender, scope="dir:x",
+                                  traceparent=sending.traceparent())
+            sent = (sending.trace_id, sending.span_id)
+        self._gate(wire)
+        gate = [r for r in paths.read_jsonl(telemetry.SPANS) if r["name"] == "xsm.receive.gate"][0]
+        self.assertEqual(gate["trace_id"], sent[0], "one trace across both processes")
+        self.assertEqual(gate["parent_id"], sent[1])
+        self.assertEqual(gate["kind"], "CONSUMER")
+        self.assertEqual(gate["attributes"]["xsm.msg.id"], "m1")
+
+    def test_a_blocked_message_is_marked_and_counted(self):
+        from xsm import envelope, paths, telemetry
+        sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa", "session_id": "s1"}
+        out = self._gate(envelope.build("hi", msg_id="m1", sender=sender, scope="dir:x"))
+        self.assertEqual(out["decision"], "block", "unchanged: still refused")
+        gate = [r for r in paths.read_jsonl(telemetry.SPANS) if r["name"] == "xsm.receive.gate"][0]
+        self.assertEqual(gate["status"], "ERROR")
+        self.assertEqual(gate["attributes"]["xsm.receive.decision"], "held")
+        self.assertIn("cannot identify this session", gate["message"])
+        point = [r for r in paths.read_jsonl(telemetry.METRICS)
+                 if r["name"] == "xsm.receive.count"][0]
+        self.assertEqual(point["attributes"], {"xsm.receive.decision": "held"})
+
+    def test_a_human_prompt_is_not_a_span(self):
+        from xsm import paths, telemetry
+        self.assertIsNone(self._gate("my own prompt"))
+        self.assertEqual(paths.read_jsonl(telemetry.SPANS), [],
+                         "the gate only opens a span for peer messages")
+
+
 class SendIsUnchangedByTelemetryTest(TempState):
     """The claim the whole design rests on, checked field by field."""
 

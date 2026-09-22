@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import time
+from contextlib import nullcontext
 
 from . import config, envelope, housekeeping, identity, ledger, paths, registry, workers
 
@@ -156,6 +157,26 @@ def handle(data: dict) -> dict | None:
     parsed = envelope.parse(data.get("prompt") or "")
     if not parsed.peer:
         return None                      # ordinary human input: say nothing
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    # Opened here, not in main(): the traceparent is only known once the
+    # envelope is parsed, and main()'s catch-all must stay the outermost thing
+    # in this file.
+    span_cm = telemetry.span("xsm.receive.gate", {"xsm.msg.id": parsed.header.get("id")},
+                             kind="CONSUMER",
+                             traceparent=parsed.header.get("traceparent")) \
+        if telemetry else nullcontext()
+    with span_cm as span:
+        out = _gate(data, runtime, me, parsed, span)
+        if telemetry and span is not None:
+            telemetry.counter("xsm.receive.count", 1,
+                              {"xsm.receive.decision": span.attributes.get("xsm.receive.decision")})
+        return out
+
+
+def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict | None:
     cfg = config.load()
     msg_id = parsed.header.get("id")
     decision, reason = "pass", ""
@@ -204,6 +225,9 @@ def handle(data: dict) -> dict | None:
 
     if decision == "block":
         stored = hold(runtime, reason, data, me, parsed)
+        if span is not None:
+            span.set_attribute("xsm.receive.decision", "held" if stored else "blocked")
+            span.set_status("ERROR", reason)
         paths.append_jsonl("decisions.jsonl", {
             "event": "UserPromptSubmit", "runtime": runtime, "decision": "block",
             "reason": reason, "held": stored, "id": msg_id,
@@ -217,6 +241,8 @@ def handle(data: dict) -> dict | None:
                                       "be stored, so it was delivered with this warning." % reason)
         return block(runtime, reason + " (kept: xsm held list)")
 
+    if span is not None:
+        span.set_attribute("xsm.receive.decision", "pass")
     paths.append_jsonl("decisions.jsonl", {
         "event": "UserPromptSubmit", "runtime": runtime, "decision": "pass", "reason": reason,
         "id": msg_id, "receiver": me and me.get("name"), "from": parsed.header.get("from")})
