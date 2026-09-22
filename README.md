@@ -12,59 +12,99 @@ Claude Code와 Codex 에이전트 세션들이 서로를 인식하고 메시지�
 - **설정 독립적**: 각 세션의 `CONFIG_HOME`(`~/.claude`, `~/.codex` 등)에 관계없이 통신 가능
 - **오케스트레이션 기반**: 별도의 런타임 없이 기존 Claude Code/Codex에서 자연스럽게 동작
 - **신뢰 기반**: 프로젝트 범위의 세션 그룹 정의 및 권한 관리
-- **프로토콜 표준화**: JSON 기반 메시지 봉투와 인증 메커니즘
+- **런타임 자체 경로 사용**: 전달은 각 런타임이 이미 가진 수단(Claude의 인박스 소켓,
+  `codex queue`)으로만 하므로, 계속 띄워둬야 할 우리 쪽 프로세스가 없음
+- **관측 가능**: 스팬·메트릭을 OTLP 형식으로 기록하며, SDK 의존성은 없음
 
 ## 구조
 
 ```
-├── xsm/                          # 메인 구현 (Python)
-│   ├── cli.py                   # CLI 인터페이스
-│   ├── registry.py              # 세션 레지스트리 관리
-│   ├── send.py                  # 메시지 송신
-│   ├── receive.py               # 메시지 수신
-│   ├── envelope.py              # 메시지 형식
-│   └── config.py                # 설정 관리
+├── bin/xsm                       # 런처 (PYTHONPATH 설정 후 python3 -m xsm)
+├── xsm/                          # 구현 전체 (Python, stdlib만)
+│   ├── cli.py                   # 서브커맨드 전부
+│   ├── registry.py              # 세션 레지스트리 (훅이 기록, 조회 시 런타임에서 보강)
+│   ├── send.py / receive.py     # 송신, 그리고 훅이 부르는 수신 게이트
+│   ├── envelope.py              # 메시지 봉투와 헤더
+│   ├── adapters.py              # 두 가지 네이티브 전달 경로 (UDS 소켓, codex queue)
+│   ├── config.py                # 프로젝트·범위·차단 설정
+│   ├── remote.py                # 다른 머신 (양방향 SSH, ADR-0007)
+│   ├── workers.py               # 워커 생성·승인·종료 (ADR-0010)
+│   ├── channel.py / doc.py      # 채널 기록 (0005), 공동 문서 (0006)
+│   ├── telemetry.py             # 스팬·메트릭 기록 (ADR-0011)
+│   ├── otlp_export.py           # OTLP/HTTP+JSON 전송
+│   ├── install.py               # 훅 설치·진단
+│   └── mcp.py                   # MCP 서버
+├── hooks/                        # 런타임이 부르는 훅 진입점
+├── commands/                     # 슬래시 명령
 ├── docs/
-│   ├── list-agents-cross-session-messaging.md  # 에이전트 목록 및 메시징
-│   ├── adr/                     # 아키텍처 결정 기록
-│   ├── plan/                    # 구현 계획
-│   └── references/              # 참조 자료
-├── tools/mesh/                  # 원격 메싱 도구
-├── tests/                       # 테스트 및 벡터
-├── hooks/                       # Git/세션 훅
-└── skills/                      # 에이전트 스킬
+│   ├── adr/                     # 아키텍처 결정 기록 (0001–0011)
+│   ├── xsm/                     # 프로토콜·테스트 계획
+│   ├── references/              # 조사 자료, 오버헤드 실측
+│   ├── plan/ · spikes/ · reviews/
+│   └── list-agents-cross-session-messaging.md
+├── tests/                        # unittest, 벡터 포함
+└── tools/                        # 스파이크·벤치마크 스크립트
 ```
 
 ## 빠른 시작
 
 ### 설치
 
+패키지 설치는 없습니다. 의존성이 stdlib뿐이라 `bin/xsm`이 `PYTHONPATH`를 잡고 바로 실행합니다.
+여기서 설치란 각 `CONFIG_DIR`에 훅을 심는 일을 말합니다.
+
 ```bash
-pip install -e .
+bin/xsm install                      # ~/.claude 와 ~/.codex 에 훅 설치
+bin/xsm install --claude-home ~/.claude-2   # 프로필이 여러 개면 각각
+bin/xsm doctor                       # 무엇이 설치됐고 무엇이 안 됐는지
 ```
+
+`~/.local/bin` 등 PATH에 `bin/xsm`을 링크해두면 이후 `xsm`으로 부를 수 있습니다.
 
 ### 세션 등록
 
+따로 등록하지 않습니다. 훅이 설치된 세션은 시작할 때와 프롬프트를 낼 때 스스로 등록합니다.
+등록이 곧 동의이므로, 훅을 돌린 적 없는 세션은 목록에 `unregistered`로만 보이고
+주소로 쓸 수 없습니다 (ADR-0001).
+
 ```bash
-xsm register --session-id my-session --config-home ~/.claude
+xsm who                              # 이 세션이 누구로 보이는지
+xsm list                             # 이 프로젝트에서 말을 걸 수 있는 세션들
+```
+
+### 통신 범위
+
+같은 폴더의 세션끼리는 그냥 통합니다. 다른 폴더까지 묶으려면 양쪽이 같은 이름으로 참여해야 합니다.
+
+```bash
+xsm join my-project                  # 양쪽에서 각각 실행
+xsm projects                         # 어떤 폴더들이 묶여 있는지
 ```
 
 ### 메시지 송신
 
 ```bash
-xsm send --to recipient-session --body "작업 요청"
+xsm send agent-name --text "이것 좀 봐줘"
+xsm send agent-name --text "이 테스트 고쳐줘" --kind task --wait 15
+xsm send ref:a1b2c3 --text "..."     # 이름이 겹칠 때는 ref로
+xsm send agent@hostB --text "..."    # 다른 머신 (xsm remote add 후)
 ```
 
 ### 메시지 수신
 
+받는 쪽은 아무것도 실행하지 않습니다. 훅이 게이트 역할을 해서 범위와 발신자를 확인한 뒤
+메시지를 세션의 프롬프트로 직접 넣습니다. 거절된 메시지는 버려지지 않고 보관됩니다.
+
 ```bash
-xsm receive --from sender-session
+xsm ledger                           # 최근 메시지와 전달 상태
+xsm status <message-id>              # 한 건의 상태
+xsm held                             # 이 머신이 거절하고 보관한 것
 ```
 
 ## 관측 (텔레메트리)
 
-xsm은 자신의 송수신을 스팬과 메트릭으로 기록한다. OpenTelemetry SDK를 설치하지 않고
-OTLP의 형식만 직접 만들기 때문에, 의존성은 여전히 stdlib뿐이면서 표준 백엔드와 붙는다
+xsm은 자신의 송수신을 스팬과 메트릭으로 기록합니다. OpenTelemetry SDK를 설치하지 않고
+OTLP의 형식만 직접 만들기 때문에, 의존성은 여전히 stdlib뿐이면서 표준 백엔드와 붙습니다
 (ADR-0011).
 
 ```bash
@@ -81,9 +121,9 @@ xsm otlp-export --follow --interval 5
 ```
 
 기록은 `$XSM_HOME/otel-spans.jsonl`과 `otel-metrics.jsonl`에 append되고, 전송은 별도
-명령이 할 때만 일어난다. 송수신 경로에서 네트워크를 타는 일은 없다.
+명령이 할 때만 일어납니다. 송수신 경로에서 네트워크를 타는 일은 없습니다.
 
-실제 OpenTelemetry Collector(v0.161.0)로 검증했다:
+실제 OpenTelemetry Collector(v0.161.0)로 검증했습니다:
 
 ```bash
 docker run --rm -p 4318:4318 otel/opentelemetry-collector:latest
@@ -91,9 +131,9 @@ xsm otlp-export --once
 ```
 
 한 메시지의 전 구간(발신 → SSH → 수신 머신 → 대상 세션의 훅)이 하나의 trace로 이어지므로,
-Jaeger나 Grafana Tempo에서 "이 메시지가 어디서 멈췄는지"를 그대로 볼 수 있다.
+Jaeger나 Grafana Tempo에서 "이 메시지가 어디서 멈췄는지"를 그대로 볼 수 있습니다.
 
-끄려면 `XSM_NO_TELEMETRY=1`. 계측 비용은 send 1회당 약 0.175ms로 측정됐다
+끄려면 `XSM_NO_TELEMETRY=1`. 계측 비용은 send 1회당 약 0.175ms로 측정됐습니다
 ([telemetry-overhead.md](docs/references/telemetry-overhead.md)).
 
 ## 설계 원칙
@@ -122,22 +162,33 @@ Claude Code Session A → XSM → Claude Code Session B
 
 ### 2. 크로스 런타임 메시징
 ```
-Claude Code ↔ Codex ↔ Custom Runtime
+Claude Code ↔ Codex        (서로 다른 CONFIG_DIR 사이에서도)
 ```
 
 ### 3. 원격 서버 메싱
 ```
-Local Machine → SSH → Remote Server (XSM enabled)
+Local Machine → SSH → Remote Server (양쪽 다 xsm 설치, xsm remote add 로 페어링)
+```
+
+### 4. 워커에게 일 시키기
+```
+xsm spawn codex --task "이 테스트 고쳐줘"    # 띄우고, 지시하고, 결과를 답장으로 받음
 ```
 
 ## 테스트
 
 ```bash
-# 프로토콜 벡터 테스트
-python -m pytest tests/
+python3 -m unittest discover -s tests -v      # 전체 (임시 XSM_HOME 위에서 실행됨)
+python3 -m unittest tests.test_remote         # 두 머신 (가짜 ssh로 한 박스에서)
 
-# 메시징 통합 테스트
-xsm test --vectors tests/vectors.json
+XSM_NO_TELEMETRY=1 python3 -m unittest discover -s tests   # 계측을 꺼도 결과는 같아야 함
+```
+
+설치된 실제 환경을 점검하려면:
+
+```bash
+xsm selftest                                  # 훅이 실제로 도는지
+xsm doctor                                    # 설치 상태, 보류 건수, 한도
 ```
 
 ## 참고 자료
