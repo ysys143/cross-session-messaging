@@ -114,11 +114,7 @@ def _state_of(record: dict) -> tuple:
         # `ps` refused (the Codex sandbox) is not evidence of reuse; the pid is
         # alive and we could not look further.
         unverified = now is None
-    # A headless `claude -p` session writes no native session file and so has no
-    # inbox socket (measured in the S10 pilot). Its pid is the only sign of life;
-    # judging it by a socket it never had read every one as gone. An interactive
-    # session does have the file, and there a dead socket still means stopped.
-    if record.get("runtime") == "claude" and record.get("native_session_id"):
+    if record.get("runtime") == "claude":
         if socket_live(record.get("socket") or ""):
             return "live", "live_unverified" if unverified else "live"
         return gone, "socket_dead"

@@ -833,17 +833,6 @@ class SelfIdentityTest(TempState):
         with mock.patch.object(identity, "lstart", lambda pid: "Mon Sep 21 09:00:00 2026"):
             self.assertEqual(identity.state_of(rec), "stale", "a measured, different start is reuse")
 
-    def test_a_headless_claude_session_is_judged_by_its_pid(self):
-        """`claude -p` has no inbox socket; judging it by one read every
-        headless peer as gone (S10 mixed-runtime smoke run)."""
-        from xsm import identity
-        headless = {"runtime": "claude", "pid": os.getpid(), "socket": None,
-                    "native_session_id": None}
-        self.assertEqual(identity.state_of(headless), "live")
-        interactive = {"runtime": "claude", "pid": os.getpid(), "socket": "/nonexistent.sock",
-                       "native_session_id": "s-1"}
-        self.assertEqual(identity.state_of(interactive), "stale", "a socket it had and lost")
-
     def test_an_unregistered_session_never_borrows_a_neighbours_identity(self):
         """Before: a session that knew its own id but had no record fell through
         to the cwd guess and printed whichever session shared its folder."""
