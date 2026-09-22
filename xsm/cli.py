@@ -1039,7 +1039,23 @@ def cmd_workers(args) -> int:
             list(workers.CLAUDE_WORKER_TOOLS) + list(workers.CLAUDE_WORKER_MCP)))
         print("  codex:        -s workspace-write -a never, xsm store writable, MCP approved")
         return OK
+    if getattr(args, "action", "list") == "read":
+        return _cmd_workers_read(args)
     return _cmd_workers(args)
+
+
+def _cmd_workers_read(args) -> int:
+    """The worker's screen, for a caller that cannot go to its pane."""
+    if not args.name:
+        print("which worker? xsm workers read <name>", file=sys.stderr)
+        return USAGE
+    try:
+        text = workers.screen(args.name, args.lines)
+    except workers.WorkerError as exc:
+        print("refused: %s" % exc, file=sys.stderr)
+        return REFUSED
+    print(text if text.strip() else "(no screen: the tmux pane is gone)")
+    return OK
 
 
 def _cmd_workers(args) -> int:
@@ -1305,7 +1321,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-depth", type=int, help="worker levels this worker's subtree may use "
                     "(default: XSM_MAX_DEPTH or config max_depth, 1; a worker can only lower it)")
     sp.set_defaults(func=cmd_spawn)
-    wk = sub.add_parser("workers", help="workers xsm started")
+    wk = sub.add_parser("workers", help="workers xsm started, and what one's screen says")
+    wk.add_argument("action", nargs="?", default="list", choices=["list", "read"])
+    wk.add_argument("name", nargs="?", help="the worker to read")
+    wk.add_argument("--lines", type=int, default=80,
+                    help="how far back into its screen to read (max %d)" % workers.MAX_READ_LINES)
     wk.add_argument("--policy", action="store_true",
                     help="what a background worker may do without asking")
     wk.set_defaults(func=cmd_workers)

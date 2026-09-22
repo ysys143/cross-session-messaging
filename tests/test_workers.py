@@ -169,6 +169,81 @@ class ApprovalTest(TempState):
         self.assertEqual(printed, "")
 
 
+class ScreenReadTest(TempState):
+    """A parent could not see a worker at all: `xsm attach` takes a person to
+    the pane, and nothing else looked. The failure that costs most is the
+    silent one (orca-benchmark 2.1)."""
+
+    def _worker(self, **extra):
+        from xsm import workers
+        rec = {"name": "w1", "runtime": "claude", "mode": "background", "pane": "%7",
+               "created": 0}
+        rec.update(extra)
+        workers.save(rec)
+        return rec
+
+    def test_read_returns_the_panes_text(self):
+        from unittest import mock
+        from xsm import workers
+        self._worker()
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return mock.Mock(returncode=0, stdout="line one\nline two\n\n\n", stderr="")
+        with mock.patch.object(workers.subprocess, "run", run):
+            text = workers.screen("w1", 40)
+        self.assertEqual(text, "line one\nline two", "tmux pads the capture; the tail goes")
+        self.assertEqual(seen[0][:3], ["tmux", "capture-pane", "-p"])
+        self.assertEqual(seen[0][3:], ["-S", "-40", "-t", "%7"], "reaches into the scrollback")
+
+    def test_lines_is_clamped_and_the_output_never_exceeds_it(self):
+        from unittest import mock
+        from xsm import workers
+        self._worker()
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return mock.Mock(returncode=0, stdout="\n".join("l%d" % i for i in range(50)),
+                             stderr="")
+        with mock.patch.object(workers.subprocess, "run", run):
+            text = workers.screen("w1", 5)
+            self.assertEqual(text.splitlines(), ["l45", "l46", "l47", "l48", "l49"])
+            workers.screen("w1", 99999)
+        self.assertEqual(seen[-1][3:5], ["-S", "-%d" % workers.MAX_READ_LINES],
+                         "an unbounded read is not a read")
+
+    def test_reading_a_worker_without_a_pane_is_refused(self):
+        from xsm import workers
+        self._worker(pane=None)
+        with self.assertRaises(workers.WorkerError) as cm:
+            workers.screen("w1")
+        self.assertIn("pane", str(cm.exception))
+        with self.assertRaises(workers.WorkerError):
+            workers.screen("nobody")
+
+    def test_a_dead_pane_says_so_and_is_not_an_error(self):
+        """Reading a stopped worker's last screen is the point of the command."""
+        from unittest import mock
+        from xsm import cli, workers
+        self._worker()
+        out = io.StringIO()
+        with mock.patch.object(workers.subprocess, "run",
+                               lambda *a, **k: mock.Mock(returncode=1, stdout="", stderr="")), \
+                contextlib.redirect_stdout(out):
+            code = cli.main(["workers", "read", "w1"])
+        self.assertEqual(code, 0)
+        self.assertIn("no screen", out.getvalue())
+
+    def test_the_command_says_which_worker_it_wants(self):
+        from xsm import cli
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["workers", "read"]), 4)
+        self.assertIn("which worker", err.getvalue())
+
+
 class OnceTest(TempState):
     def test_once_worker_stops_when_its_answer_arrives(self):
         from xsm import workers

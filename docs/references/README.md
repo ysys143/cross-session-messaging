@@ -3,7 +3,7 @@
 - 목적: `INTENT.md`의 목표(G1~G8)를 설계하는 데 쓸 레퍼런스를 한 곳에 정리한다.
 - 대상: orca, herdr, moai-adk, buzz, agent-comms(소스 코드), agora(arXiv 2609.18094), Claude Code 2.1.278(바이너리), Codex CLI 0.155.1(로컬 CLI)
 - 작성일: 2026-09-19 (v2: 적대적 리뷰와 보강 조사 반영)
-- 개별 보고서: 이 디렉터리의 `orca.md`, `herdr.md`, `moai-adk.md`, `buzz.md`, `agent-comms.md`, `agora.md`. Claude Code는 `../list-agents-cross-session-messaging.md`.
+- 개별 보고서: 이 디렉터리의 `orca.md`, `herdr.md`, `moai-adk.md`, `buzz.md`, `agent-comms.md`, `agora.md`. Claude Code는 `../list-agents-cross-session-messaging.md`. orca의 후속 조사(CLI·스킬 표면, 2026-09-23)는 `orca-benchmark.md`.
 
 ## 0. 조사 방법과 출처
 

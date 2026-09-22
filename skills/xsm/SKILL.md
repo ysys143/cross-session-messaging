@@ -159,7 +159,8 @@ do not widen it yourself.
 xsm spawn claude --model haiku --once --task "Run the tests in ./pkg and report failures"
 xsm spawn codex --effort high --task "Review docs/plan.md for gaps"     # Codex default model: gpt-5.6-luna
 xsm workers                 # what xsm started and whether it is running
-xsm attach <worker>         # go to its tmux pane
+xsm workers read <worker>   # what its screen says — is it working or stuck?
+xsm attach <worker>         # go to its tmux pane (a person; read only looks)
 xsm stop <worker>           # stop it and remove its records
 ```
 

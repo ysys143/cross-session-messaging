@@ -53,6 +53,7 @@ WORKERS = "workers"
 APPROVALS = "approvals"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 APPROVAL_TIMEOUT = 600          # seconds a background worker waits for a person
+MAX_READ_LINES = 2000           # `xsm workers read` never prints more than this
 BACKGROUND_SESSION = "xsm-workers"
 CLAUDE_SOCKETS = "/tmp/cc-socks"    # where every Claude session opens its inbox socket
 
@@ -640,10 +641,12 @@ class _WaitingForTrust(Exception):
     pass
 
 
-def _screen(pane: str) -> str:
+def _screen(pane: str, lines: int | None = None) -> str:
+    """The pane as text. With `lines`, reach that far back into its scrollback."""
+    argv = ["tmux", "capture-pane", "-p"] + (["-S", "-%d" % lines] if lines else []) + \
+        ["-t", pane]
     try:
-        return subprocess.run(["tmux", "capture-pane", "-p", "-t", pane], capture_output=True,
-                              text=True, timeout=5).stdout
+        return subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -1074,6 +1077,26 @@ def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None
 
 
 # --- watching ---------------------------------------------------------------------
+
+def screen(name: str, lines: int = 80) -> str:
+    """What the worker's own screen says, as text. Read-only.
+
+    A parent had no way to see a worker at all: `xsm attach` takes a person to
+    the tmux pane, and everything else waited for the worker to report. The
+    failure that costs most is the silent one — Orca's own guide records a
+    worker that sat in `dispatched` for a whole session because nobody could
+    look (orca-benchmark 2.1)."""
+    worker = load(name)
+    if not worker:
+        raise WorkerError("no worker named %s" % name)
+    target = worker.get("pane")
+    if not target:
+        raise WorkerError("%s has no tmux pane on record" % name)
+    lines = max(1, min(int(lines), MAX_READ_LINES))
+    # tmux pads the capture to the pane's height, so the last real line would
+    # otherwise scroll off the end of what we print.
+    return "\n".join(_screen(target, lines).rstrip("\n").splitlines()[-lines:])
+
 
 def attach(name: str, out=sys.stdout) -> int:
     """Go to the worker's own screen. It is a real TUI in tmux, so watching it
