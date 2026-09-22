@@ -48,7 +48,8 @@ def _fields(text: str) -> dict:
 
 
 def build(body: str, *, msg_id: str, sender: dict, scope: str, kind: str = "note",
-          reply_to: str | None = None, origin: str | None = None) -> str:
+          reply_to: str | None = None, origin: str | None = None,
+          traceparent: str | None = None) -> str:
     """Wrap a body for delivery. `sender` is a registry record, so from-mode is
     the mode that session actually reported, not a self-claim."""
     if kind not in KINDS:
@@ -61,6 +62,11 @@ def build(body: str, *, msg_id: str, sender: dict, scope: str, kind: str = "note
         # Written by the receiving machine's xsm from the SSH key, never by
         # the sender (ADR-0007).
         header.append("origin=%s" % origin)
+    if traceparent:
+        # W3C Trace Context, so the receiver's span joins the sender's trace
+        # instead of starting its own. Left out entirely when telemetry is off:
+        # an absent field reads the same to every version of the receiver.
+        header.append("traceparent=%s" % traceparent)
     head = " ".join(header) + "]"
     mode = sender.get("permission_mode")
     mode = "bypass" if mode == "bypassPermissions" else "prompting" if mode else None

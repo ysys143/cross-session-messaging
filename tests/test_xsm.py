@@ -71,6 +71,17 @@ class EnvelopeTest(TempState):
         self.assertTrue(parsed.peer)
         self.assertEqual(parsed.header, {})
 
+    def test_traceparent_rides_along_when_there_is_one(self):
+        from xsm import envelope
+        sender = {"name": "a", "alias": "claude-4", "ref": "aaaaaa"}
+        tp = "00-%s-%s-01" % ("a" * 32, "b" * 16)
+        wire = envelope.build("hi", msg_id="m1", sender=sender, scope="s", traceparent=tp)
+        self.assertEqual(envelope.parse(wire).header["traceparent"], tp)
+        self.assertEqual(envelope.parse(wire).body, "hi")
+        plain = envelope.build("hi", msg_id="m1", sender=sender, scope="s")
+        self.assertNotIn("traceparent", plain)
+        self.assertNotIn("traceparent", envelope.parse(plain).header)
+
 
 class ScopeTest(TempState):
     def test_same_directory_is_in_scope_and_different_ones_are_not(self):
