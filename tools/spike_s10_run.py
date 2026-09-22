@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -141,39 +142,104 @@ def _thread_of(stdout: str) -> str | None:
     return None
 
 
+STARTUP_WATCHDOG = int(os.environ.get("S10_STARTUP_WATCHDOG", "60"))   # seconds to turn.started
+START_RETRIES = 2
+
+
+def _sample_group(pgid: int, path: str, why: str) -> None:
+    """A stack sample of every process in the turn's group, taken while it is
+    stuck. The one start-up hang seen so far (2026-09-22) left nothing behind:
+    its stderr was discarded and the process was killed before anyone looked."""
+    pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
+    with open(path, "a") as fh:
+        fh.write("===== %s at %s; group %s: %s\n" % (why, time.strftime("%H:%M:%S"), pgid, pids))
+        for pid in pids:
+            cmd = subprocess.run(["ps", "-o", "command=", "-p", pid],
+                                 capture_output=True, text=True).stdout.strip()
+            fh.write("\n----- pid %s: %s\n" % (pid, cmd[:300]))
+            try:
+                fh.write(subprocess.run(["sample", pid, "3"], capture_output=True, text=True,
+                                        timeout=30).stdout)
+            except (OSError, subprocess.SubprocessError) as err:
+                fh.write("sample failed: %s\n" % err)
+
+
+def _stop_group(proc: subprocess.Popen) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _turn(argv: list, root: str, env: dict, deadline: float, out_path: str, err,
+          hang_path: str) -> tuple:
+    """One codex turn, watched. Returns (outcome, exit code): outcome is done,
+    deadline (the agent kept working until time ran out: the expected end), or
+    hung (no turn.started within STARTUP_WATCHDOG — sampled, then stopped)."""
+    start = time.time()
+    with open(out_path, "w") as out:
+        proc = subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=err, start_new_session=True)
+        started = False
+        while proc.poll() is None:
+            time.sleep(2)
+            if not started:
+                with open(out_path) as fh:
+                    started = '"turn.started"' in fh.read()
+                if not started and time.time() - start > STARTUP_WATCHDOG:
+                    _sample_group(proc.pid, hang_path, "no turn.started after %ds" % STARTUP_WATCHDOG)
+                    _stop_group(proc)
+                    return "hung", None
+            if time.time() > deadline:
+                _stop_group(proc)
+                return "deadline", None
+    return "done", proc.returncode
+
+
 def slot(n: int, root: str, home: str, condition: int, deadline: float, log_dir: str) -> None:
-    env = dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1")
+    env = dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1", RUST_LOG="info")
     for k in [k for k in env if k.startswith(("CLAUDE_", "ORCA_", "CODEX_COMPANION"))]:
         del env[k]                          # this harness runs inside a Claude session
-    thread, turns = None, 0
-    with open(os.path.join(log_dir, "slot%d.jsonl" % n), "a") as log:
+    thread, turns, hangs = None, 0, 0
+    hang_path = os.path.join(log_dir, "slot%d.hang.txt" % n)
+    with open(os.path.join(log_dir, "slot%d.jsonl" % n), "a") as log, \
+            open(os.path.join(log_dir, "slot%d.stderr.log" % n), "a") as err:
         while time.time() < deadline - 20:
             prompt = brief(condition) if thread is None else RESUME
             turns += 1
-            log.write(json.dumps({"harness": "turn", "n": turns, "t": time.time()}) + "\n")
+            log.write(json.dumps({"harness": "turn", "n": turns, "t": time.time(),
+                                  "resume": bool(thread)}) + "\n")
             log.flush()
-            try:
-                proc = subprocess.run(codex_args(root, thread, prompt), cwd=root, env=env,
-                                      stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                                      timeout=max(30, deadline - time.time()))
-            except subprocess.TimeoutExpired as exc:
-                # The expected ending: the agent kept working until the deadline.
-                partial = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-                log.write(partial)
-                thread = thread or _thread_of(partial)
-                log.write(json.dumps({"harness": "timeout", "t": time.time()}) + "\n")
+            err.write("===== turn %d %s\n" % (turns, time.strftime("%H:%M:%S")))
+            err.flush()
+            out_path = os.path.join(log_dir, "slot%d.turn.jsonl" % n)
+            outcome, code = _turn(codex_args(root, thread, prompt), root, env, deadline,
+                                  out_path, err, hang_path)
+            with open(out_path) as fh:
+                text = fh.read()
+            os.remove(out_path)
+            log.write(text)
+            thread = thread or _thread_of(text)
+            log.write(json.dumps({"harness": outcome, "code": code, "t": time.time()}) + "\n")
+            log.flush()
+            if outcome == "hung":
+                hangs += 1
+                if hangs > START_RETRIES:
+                    break
+                continue                    # a fresh start, or the same thread resumed
+            if outcome == "deadline":
                 break
-            log.write(proc.stdout)
-            if proc.returncode != 0:
-                log.write(json.dumps({"harness": "exit", "code": proc.returncode,
-                                      "stderr": proc.stderr[-2000:]}) + "\n")
-            thread = thread or _thread_of(proc.stdout)
             if not thread:
-                log.write(json.dumps({"harness": "no-thread", "stderr": proc.stderr[-2000:]}) + "\n")
+                log.write(json.dumps({"harness": "no-thread", "code": code}) + "\n")
                 break
-            log.flush()
     with open(os.path.join(log_dir, "slot%d.done" % n), "w") as fh:
-        json.dump({"thread": thread, "turns": turns, "ended": time.time()}, fh)
+        json.dump({"thread": thread, "turns": turns, "hangs": hangs, "ended": time.time()}, fh)
 
 
 def main() -> int:
