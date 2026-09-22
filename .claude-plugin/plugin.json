@@ -1,7 +1,7 @@
 {
   "name": "xsm",
   "displayName": "Cross-Session Messaging",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Message the other Claude Code and Codex sessions on this machine: list them, send a task, answer one, start workers, and see what was delivered.",
   "author": {
     "name": "jaesolshin"

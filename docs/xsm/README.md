@@ -83,6 +83,23 @@ Codex에서는 `/xsm-list` 대신 `$xsm-list`로 부른다. Claude의 `!`명령`
 메시지가 사라진다. `xsm install`은 플러그인이 있는 홈을 거부한다. `xsm doctor`가 어느 홈이 어느 길인지,
 복사본이 낡았는지, 지금 무엇이 막혀 있는지 보여 준다.
 
+### eval 스위트
+
+`evals/`에 케이스 세 개가 있다. 각각 이 세션들이 반복해서 틀렸던 것을 고정한다: 세션 목록과 전송 문법,
+샌드박스에서 Codex로 보낼 때의 MCP 경로, 아직 프롬프트가 없는 Codex 스레드.
+
+```bash
+git archive HEAD | tar -x -C /tmp/xsm-clean && cp -R evals /tmp/xsm-clean/
+cd /tmp/xsm-clean && claude plugin eval . --runs 1 --model haiku --judge-model haiku --trust-plugin
+```
+
+깨끗한 사본에서 돌리는 이유: eval은 폴더 전체를 플러그인으로 싣는데, 작업 중인 저장소에는 git이 무시하는
+파일(`.omc/`의 하드 링크 등)이 있고 eval은 하드 링크가 있으면 케이스를 거부한다.
+
+실측 2026-09-23: 스킬 **설명문**만 보고 답한 모델이 `/xsm send <session-id> <message>`라는 없는 문법을
+지어냈다(세 케이스 0점). 설명문에 실제 명령 모양을 넣자 세 케이스 모두 1.00이 됐고, 플러그인 없는
+대조군은 0.00이다(Δ +1.00). 스킬 설명문은 모델이 본문을 열기 전에 보는 유일한 것이므로 명령 모양을 담는다.
+
 ### 플러그인을 고칠 때 알아야 할 것 (실측 2026-09-23)
 
 - **MCP 서버는 플러그인 루트의 `.mcp.json`에서만 읽는다.** `plugin.json`에 `mcpServers`를 직접 쓰거나 다른
