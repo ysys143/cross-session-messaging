@@ -67,9 +67,11 @@ TOOLS = [
          "reply_to": {"type": "string"},
          "wait": {"type": "number", "default": 15}}, "required": ["target", "text"]}},
     {"name": "xsm_inbox",
-     "description": ("Read messages other sessions sent you that are still waiting. Codex takes "
-                     "them only between turns; while you are working, call this whenever an xsm "
-                     "result says messages are waiting, and before you wait on a peer."),
+     "description": ("Codex sessions: read messages other sessions sent you that are still "
+                     "waiting. Codex takes them only between turns; while you are working, call "
+                     "this whenever an xsm result says messages are waiting, and before you wait "
+                     "on a peer. A Claude session never needs it: its messages arrive on their "
+                     "own."),
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "xsm_join",
      "description": ("Ask your user to let this session's folder join (or leave) a named xsm "

@@ -291,7 +291,7 @@ def _claude_worker_settings(worker: dict) -> str:
         # (S10 collab run 4). Writing stays inside the folder.
         settings["permissions"] = {"allow": ["Bash", "Monitor", "Read", "Glob", "Grep"] + [
             "mcp__%s__%s" % (install.MCP_NAME, tool)
-            for tool in ("xsm_send", "xsm_post", "xsm_channel")]}
+            for tool in ("xsm_send", "xsm_post", "xsm_channel", "xsm_inbox")]}
         settings["hooks"] = {"PermissionRequest": [{"hooks": [{
             "type": "command", "command": _hook_command(),
             "timeout": int(worker["approval_timeout"]) + 30}]}]}
