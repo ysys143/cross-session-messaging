@@ -222,8 +222,8 @@ def next_text(doc: str, limit: int = 0) -> str:
     if len(shown) < len(picked):
         out.append("… and %d more" % (len(picked) - len(shown)))
     out.append("")
-    out.append("In the order they were written. xsm does not rank them and does not assign "
-               "them; pick one and say so with `--tag wip --parent <id>`.")
+    out.append("In the document's own order, oldest first. xsm does not rank them and does not "
+               "assign them; pick one and say so with `--tag wip --parent <id>`.")
     return "\n".join(out)
 
 
