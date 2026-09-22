@@ -28,6 +28,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 
 from . import config, envelope, identity, install, ledger, paths, registry
 
@@ -181,6 +182,31 @@ def ssh_argv(host: str, use_xsm_key: bool = True) -> list:
 
 def call(peer: str, request: dict, timeout: float = 60) -> dict:
     """Run the peer's forced command with one JSON request; returns its reply."""
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    span_cm = telemetry.span("xsm.remote.ssh", {"xsm.remote.peer": peer,
+                                                "xsm.remote.op": request.get("op")},
+                             kind="CLIENT") if telemetry else nullcontext()
+    start = time.time()
+    try:
+        with span_cm as span:
+            if span is not None:
+                # Stamped here rather than by the caller: the far side should
+                # hang off the hop that actually reached it, not off whatever
+                # assembled the request earlier.
+                request = dict(request, traceparent=span.traceparent())
+            return _call(peer, request, timeout)
+    finally:
+        if telemetry:
+            # Every hop, not just the ones that answered: a round trip that
+            # timed out is the one worth seeing on a latency chart.
+            telemetry.histogram("xsm.remote.ssh.duration", time.time() - start,
+                                {"xsm.remote.peer": peer})
+
+
+def _call(peer: str, request: dict, timeout: float) -> dict:
     pairing = pairing_for(peer)
     if not pairing:
         raise RemoteError("%s is not a paired remote; pair it first: xsm remote add %s"
@@ -283,6 +309,28 @@ def _require_named(project: str, here: str) -> None:
 def serve(peer: str, request: dict) -> dict:
     """What `xsm-remote.py <peer>` does for one request. `peer` comes from the
     authorized_keys line, so it is who holds the key."""
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    # A forced command is a fresh process every time, so the request's own
+    # traceparent is the only thing tying this side to the caller's trace.
+    span_cm = telemetry.span("xsm.remote.serve", {"xsm.remote.peer": peer,
+                                                  "xsm.remote.op": request.get("op")},
+                             kind="SERVER", traceparent=request.get("traceparent")) \
+        if telemetry else nullcontext()
+    with span_cm as span:
+        reply = _serve(peer, request, span)
+        if span is not None:
+            span.set_attribute("xsm.result.ok", bool(reply.get("ok")))
+            if reply.get("status"):
+                span.set_attribute("xsm.result.status", reply["status"])
+            if not reply.get("ok"):
+                span.set_status("ERROR", str(reply.get("error") or ""))
+        return reply
+
+
+def _serve(peer: str, request: dict, span=None) -> dict:
     pairing = pairing_for(peer)
     op = request.get("op")
     if op == "unpair":
@@ -326,7 +374,9 @@ def serve(peer: str, request: dict) -> dict:
     msg_id = request["id"]
     content = envelope.build(request.get("body") or "", msg_id=msg_id, sender=sender,
                              scope="remote:%s" % peer, kind=request.get("kind") or "note",
-                             reply_to=request.get("reply_to"), origin=peer)
+                             reply_to=request.get("reply_to"), origin=peer,
+                             traceparent=span.traceparent() if span is not None
+                             else request.get("traceparent"))
     # The gate trusts a remote message only if this receiver recorded it.
     paths.write_json(paths.path(REMOTE, "inbound-%s.json" % msg_id),
                      {"id": msg_id, "peer": peer, "t": time.time()})
@@ -380,7 +430,7 @@ def split_target(spec: str) -> tuple:
 
 
 def send(sender: dict, spec: str, peer: str, body: str, kind: str, reply_to: str | None,
-         wait: float, msg_id: str | None = None) -> dict:
+         wait: float, msg_id: str | None = None, traceparent: str | None = None) -> dict:
     pairing = pairing_for(peer)
     from . import channel
     if not _project_members(pairing["local_project"], sender.get("cwd") or "/"):
@@ -390,6 +440,7 @@ def send(sender: dict, spec: str, peer: str, body: str, kind: str, reply_to: str
     msg_id = msg_id or envelope.new_id()
     request = {"op": "send", "id": msg_id, "target": spec, "body": body, "kind": kind,
                "reply_to": reply_to, "wait": wait, "project": pairing["local_project"],
+               "traceparent": traceparent,
                "sender": {k: sender.get(k) for k in ("name", "alias", "ref", "session_id",
                                                      "permission_mode")}}
     ledger.queued(msg_id, sender, {"name": spec, "alias": peer, "ref": None, "runtime": "remote"},

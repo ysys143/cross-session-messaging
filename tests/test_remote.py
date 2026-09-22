@@ -142,6 +142,39 @@ print(remote.add("hostB", "demo", here=%r)["peer"])""" % self.m["hostA"]["proj"]
         self.assertIn(back["status"], ("sent-unconfirmed", "delivered"), back)
         self.assertIn("origin=hostB", self.inboxes["hostA"].frames[-1])
 
+    def spans(self, name):
+        """Every span that machine recorded, in the order it finished them."""
+        path = os.path.join(self.m[name]["home"], "otel-spans.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    @unittest.skipIf(os.environ.get("XSM_NO_TELEMETRY"), "telemetry is switched off")
+    def test_one_trace_spans_both_machines(self):
+        """Three hops, three processes, two XSM_HOMEs: still one trace."""
+        self.py("hostA", 'from xsm import remote; remote.add("hostB", "demo", here=%r)'
+                % self.m["hostA"]["proj"])
+        sent = self.send("hostA", "agent@claude@hostB", "hello from A", kind="task")
+        self.assertIn(sent["status"], ("sent-unconfirmed", "delivered"), sent)
+        self.gate("hostB", json.loads(self.inboxes["hostB"].frames[-1])["message"]["content"])
+
+        a = {s["name"]: s for s in self.spans("hostA")}
+        b = {s["name"]: s for s in self.spans("hostB")}
+        self.assertIn("xsm.send", a)
+        self.assertIn("xsm.remote.ssh", a)
+        self.assertIn("xsm.remote.serve", b)
+        self.assertIn("xsm.receive.gate", b)
+        trace = a["xsm.send"]["trace_id"]
+        for where, span in (("hostA ssh", a["xsm.remote.ssh"]), ("hostB serve", b["xsm.remote.serve"]),
+                            ("hostB gate", b["xsm.receive.gate"])):
+            self.assertEqual(span["trace_id"], trace, where)
+        self.assertEqual(a["xsm.remote.ssh"]["parent_id"], a["xsm.send"]["span_id"])
+        self.assertEqual(b["xsm.remote.serve"]["parent_id"], a["xsm.remote.ssh"]["span_id"],
+                         "the far side hangs off the ssh call that reached it")
+        self.assertEqual(b["xsm.receive.gate"]["parent_id"], b["xsm.remote.serve"]["span_id"])
+        self.assertEqual(b["xsm.receive.gate"]["attributes"]["xsm.receive.decision"], "pass")
+
     def test_unpaired_and_wrong_project_are_refused(self):
         refused = self.send("hostA", "agent@claude@hostB", "x")
         self.assertNotIn(refused["status"], ("sent-unconfirmed", "delivered"),

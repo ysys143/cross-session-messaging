@@ -80,7 +80,8 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
     if peer:
         if sender.get("ref") in config.blocked():
             return SendResult("refused", "this session is blocked (xsm block)")
-        reply = remote.send(sender, local_spec, peer, body, kind, reply_to, wait, msg_id)
+        reply = remote.send(sender, local_spec, peer, body, kind, reply_to, wait, msg_id,
+                            traceparent=span.traceparent() if span is not None else None)
         status = reply.get("status") or ("queued" if reply.get("ok") else "error")
         status = {"queued": "sent-unconfirmed"}.get(status, status)
         return SendResult(status, reply.get("error") or ("on %s" % peer), reply.get("id"),
