@@ -668,9 +668,10 @@ class CommandInstallTest(TempState):
                          sorted(os.path.basename(f)[:-3] for f in install.command_files()))
         skill = open(os.path.join(home, "skills", "xsm-list", "SKILL.md")).read()
         self.assertIn("name: xsm-list\n", skill)
-        self.assertIn(install.launcher() + " list --compact", skill,
+        self.assertIn(install.launcher() + " list --table", skill,
                       "Codex does not run !`cmd`; the model is told to")
         self.assertNotIn("!`", skill)
+        self.assertIn("not in a code block", skill, "a table is left for the TUI to draw")
         self.assertNotIn("{{XSM}}", skill)
         policy = open(os.path.join(home, "skills", "xsm-list", "agents", "openai.yaml")).read()
         self.assertIn("allow_implicit_invocation: false", policy)
@@ -819,6 +820,22 @@ class CompactOutputTest(TempState):
         self.assertTrue(lines[1].startswith(" worker@codex ["), lines)
         self.assertNotIn(self.tmp, lines[1], "the folder is said once, above its sessions")
         self.assertFalse(any("  " in line for line in lines))
+
+    def test_list_table_is_markdown_the_folder_said_once(self):
+        """For the TUI to draw: both Claude Code and Codex render tables."""
+        from xsm import cli, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="one|two")
+        registry.upsert("codex", home, "t2", os.getpid(), self.tmp, name="three")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["list", "--table", "--dir", self.tmp])
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "| folder | session | runtime | ref | note |")
+        self.assertEqual(lines[1], "|---|---|---|---|---|")
+        self.assertEqual([l.split("|")[1].strip() for l in lines[2:]], ["here", ""])
+        self.assertIn("one\\|two", out.getvalue(), "a pipe in a name does not split a cell")
 
     def test_list_compact_groups_by_folder_this_one_first(self):
         """A path on every line wrapped each entry in a narrow Codex pane."""

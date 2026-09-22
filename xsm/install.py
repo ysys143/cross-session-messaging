@@ -193,13 +193,17 @@ def codex_command_skill(source: str) -> tuple:
              if line.startswith("!`") and line.endswith("`")]
     if shell:
         steps = "\n".join("    %s" % c.replace("{{XSM}}", xsm) for c in shell)
+        # A Markdown table is passed through bare so the TUI draws it; anything
+        # else goes in a code block so its spacing survives.
+        wrap = ("as it is, not in a code block, so it shows as a table"
+                if any("--table" in c for c in shell) else "inside one code block")
         text = ("This is a display command. There is nothing to decide.\n\n"
                 "Run %s, exactly as written:\n\n%s\n\n"
-                "Then reply with %s, copied exactly, inside one code block%s. Nothing before "
+                "Then reply with %s, copied exactly, %s%s. Nothing before "
                 "it, nothing after it. Do not translate, reword, summarise or explain it, and "
                 "run nothing else.\n" % (
                     "this shell command" if len(shell) == 1 else "these shell commands in order",
-                    steps, "its output" if len(shell) == 1 else "their outputs",
+                    steps, "its output" if len(shell) == 1 else "their outputs", wrap,
                     "" if len(shell) == 1 else ", separated by a line `---`"))
     else:
         text = body.replace("{{XSM}}", xsm).replace("Bash command", "shell command")

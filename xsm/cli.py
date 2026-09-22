@@ -98,14 +98,53 @@ def _compact_groups(rows: list, me: dict | None, here: str) -> list:
             return "./" + os.path.relpath(real, here)
         return (cwd or "?").replace(home, "~", 1)
 
+    lines = []
+    for folder, members in _folder_groups(rows, me, here, label):
+        lines.append(folder)
+        for r, flags in members:
+            lines.append(" %s@%s [%s]%s" % (r.get("name"), r.get("alias"), r.get("ref"),
+                                            (" (" + ", ".join(flags) + ")") if flags else ""))
+    return lines
+
+
+def _table(rows: list, me: dict | None, here: str) -> list:
+    """The same list as a Markdown table, for a TUI to draw: Claude Code and
+    Codex both render tables with borders and aligned columns, so the model
+    passes it through as it is instead of copying it into a code block."""
+    home = os.path.expanduser("~")
+    here = os.path.realpath(here)
+
+    def label(cwd: str) -> str:
+        real = os.path.realpath(cwd) if cwd else ""
+        if real == here:
+            return "here"
+        if real.startswith(here + os.sep):
+            return "./" + os.path.relpath(real, here)
+        return (cwd or "?").replace(home, "~", 1)
+
+    def cell(text: str) -> str:
+        return (text or "").replace("|", "\\|")
+
+    lines = ["| folder | session | runtime | ref | note |", "|---|---|---|---|---|"]
+    for folder, members in _folder_groups(rows, me, here, label):
+        for i, (r, flags) in enumerate(members):
+            lines.append("| %s | %s | %s | `%s` | %s |" % (
+                cell(folder) if i == 0 else "", cell(r.get("name") or ""),
+                cell(r.get("alias") or ""), r.get("ref"), cell(", ".join(flags))))
+    return lines
+
+
+def _folder_groups(rows: list, me: dict | None, here: str, label) -> list:
+    """[(folder label, [(row, flags)])], this folder first, then folders under
+    it, then the rest; within a folder, this session first."""
     groups: dict = {}
     for r in rows:
         groups.setdefault(r.get("cwd") or "", []).append(r)
     order = sorted(groups, key=lambda c: (os.path.realpath(c) != here if c else True,
                                           not (c and os.path.realpath(c).startswith(here)), c))
-    lines = []
+    out = []
     for cwd in order:
-        lines.append(label(cwd))
+        members = []
         mine = sorted(groups[cwd], key=lambda r: not (me and r.get("ref") == me.get("ref")))
         for r in mine:
             flags = [f for f in (
@@ -116,9 +155,9 @@ def _compact_groups(rows: list, me: dict | None, here: str) -> list:
                 r.get("state") if r.get("state") != "live" else "") if f]
             if r.get("why"):
                 flags.append(r["why"])
-            lines.append(" %s@%s [%s]%s" % (r.get("name"), r.get("alias"), r.get("ref"),
-                                            (" (" + ", ".join(flags) + ")") if flags else ""))
-    return lines
+            members.append((r, flags))
+        out.append((label(cwd), members))
+    return out
 
 
 def cmd_list(args) -> int:
@@ -149,6 +188,9 @@ def cmd_list(args) -> int:
             print("no live sessions in this project (%s)%s" % (
                 config.default_project(_here(args, me))[0],
                 "; xsm list -a shows %d elsewhere" % others if others else ""))
+        return OK
+    if getattr(args, "table", False):
+        print("\n".join(_table(rows, me, _here(args, me))))
         return OK
     if args.compact:
         # For a model to copy back verbatim: no alignment padding (every space
@@ -1007,6 +1049,8 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--home", help="alias or path")
     ls.add_argument("--json", action="store_true")
     ls.add_argument("--compact", action="store_true", help="short lines, no padding (for agents)")
+    ls.add_argument("--table", action="store_true",
+                    help="a Markdown table, for a session's TUI to draw (the slash command uses it)")
     ls.set_defaults(func=cmd_list)
 
     who = sub.add_parser("who", help="identity of the session running this command")
