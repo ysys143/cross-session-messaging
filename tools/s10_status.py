@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """One statusline line for the S10 run in progress, or nothing.
 
+With --compose (how this repo's .claude/settings.local.json runs it), the
+statusline that would apply without that file — this project's settings,
+else the user's — runs first with the same input and prints unchanged, and
+the S10 line goes under it: a dashboard, Orca's line, anything, keeps its
+place (user decision, 2026-09-22).
+
     S10 collab1 | 2/4 분석 4:12 | luna:busy haiku:idle sonnet:busy | msg 3 ch 1 doc v2
 
 Picks the newest .local/s10/*/run.json whose deadline is less than two
@@ -49,7 +55,36 @@ def _state(pane: str) -> str:
     return "busy" if BUSY.search(text) else "idle"
 
 
+def _base_command() -> str | None:
+    home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    for settings in (os.path.join(REPO, ".claude", "settings.json"),
+                     os.path.join(home, "settings.json")):
+        try:
+            with open(settings) as fh:
+                command = ((json.load(fh) or {}).get("statusLine") or {}).get("command")
+        except (OSError, ValueError):
+            continue
+        if command and "s10_status" not in command:
+            return command
+    return None
+
+
+def compose() -> None:
+    raw = "" if sys.stdin.isatty() else sys.stdin.read()
+    command = _base_command()
+    if command:
+        try:
+            out = subprocess.run(["/bin/sh", "-c", command], input=raw, capture_output=True,
+                                 text=True, timeout=5).stdout
+            if out.strip():
+                print(out.rstrip("\n"))
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
 def main() -> int:
+    if "--compose" in sys.argv:
+        compose()
     now = time.time()
     runs = []
     for p in glob.glob(os.path.join(REPO, ".local", "s10", "*", "run.json")):

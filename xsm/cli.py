@@ -477,7 +477,7 @@ def cmd_install(args) -> int:
             print("  statusLine: %s" % {
                 "installed": "set to `xsm statusline` (no model call)",
                 "already": "already set",
-                "kept-existing": "left alone: this home already has its own statusLine",
+                "composed": "kept yours and added one xsm line under it",
             }[outcome])
         if not args.no_mcp:
             outcome = install.install_mcp(home, runtime)
@@ -578,9 +578,16 @@ def cmd_selftest(args) -> int:
 
 
 def cmd_statusline(args) -> int:
-    """One short line for Claude's statusLine, which runs on every render and
-    calls no model. Deliberately cheap: pointer files plus a kill(pid, 0) each,
-    no socket probes and no `ps`, so it costs nothing to show continuously."""
+    """xsm's line for Claude's statusLine, which runs on every render and calls
+    no model. Deliberately cheap: pointer files plus a kill(pid, 0) each, no
+    socket probes and no `ps`, so it costs nothing to show continuously.
+
+    With --base, the user's own statusLine (kept at install) runs first with
+    the same input and its output goes out unchanged; xsm adds one line under
+    it and nothing else — a dashboard or Orca's line stays exactly as it was."""
+    raw = "" if sys.stdin.isatty() else sys.stdin.read()
+    if getattr(args, "base", None):
+        _run_base_statusline(args.base, raw)
     try:
         rows = registry.cheap_records()
     except Exception:                              # a statusline must never break the UI
@@ -589,11 +596,10 @@ def cmd_statusline(args) -> int:
     # Claude hands a statusLine command the session as JSON on stdin; fall back
     # to the environment when run by hand.
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if not sys.stdin.isatty():
-        try:
-            session_id = (json.loads(sys.stdin.read() or "{}") or {}).get("session_id") or session_id
-        except ValueError:
-            pass
+    try:
+        session_id = (json.loads(raw or "{}") or {}).get("session_id") or session_id
+    except ValueError:
+        pass
     me = next((r for r in rows if r.get("session_id") == session_id), None)
     others = [r for r in rows if r is not me]
     held = 0
@@ -609,6 +615,22 @@ def cmd_statusline(args) -> int:
     parts.extend(_worker_status(me))
     print(" · ".join(parts))
     return OK
+
+
+def _run_base_statusline(settings_file: str, raw: str) -> None:
+    """Print what the user's own statusLine prints. Its failure or slowness
+    must not take xsm's line with it, and it must not print xsm's line twice."""
+    try:
+        original = (install.statusline_base(settings_file) or {}).get("command")
+        if not original or install.MARKER in original:
+            return
+        import subprocess
+        out = subprocess.run(["/bin/sh", "-c", original], input=raw, capture_output=True,
+                             text=True, timeout=5).stdout
+        if out.strip():
+            print(out.rstrip("\n"))
+    except Exception:                              # a statusline must never break the UI
+        pass
 
 
 def _worker_status(me: dict | None) -> list:
@@ -1125,6 +1147,8 @@ def build_parser() -> argparse.ArgumentParser:
     doc.set_defaults(func=cmd_doctor)
 
     sl = sub.add_parser("statusline", help="one line for Claude's statusLine (no model call)")
+    sl.add_argument("--base", help=argparse.SUPPRESS)      # the settings file whose own
+                                                            # statusLine runs first
     sl.set_defaults(func=cmd_statusline)
 
     stest = sub.add_parser("selftest", help="check the hook fails closed for peer messages")

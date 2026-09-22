@@ -641,13 +641,43 @@ class StatuslineTest(TempState):
         self.assertTrue(install.remove_statusline(home))
         self.assertEqual(paths.read_json(os.path.join(home, "settings.json")), {"model": "opus"})
 
-    def test_an_existing_statusline_is_never_replaced(self):
+    def test_an_existing_statusline_is_kept_and_xsm_adds_one_line_under_it(self):
+        """A dashboard, Orca's line, anything: its output goes out unchanged and
+        xsm adds exactly one line; uninstall gives the original back."""
         from xsm import install, paths
-        mine = {"type": "command", "command": "~/my-status.sh"}
+        script = os.path.join(self.tmp, "mine.sh")
+        with open(script, "w") as fh:
+            fh.write("#!/bin/sh\nread x\necho \"DASH line1\"\necho \"DASH line2 $x\"\n")
+        os.chmod(script, 0o755)
+        mine = {"type": "command", "command": script, "refreshInterval": 7, "padding": 1}
         home = self._home({"statusLine": mine})
-        self.assertEqual(install.install_statusline(home), "kept-existing")
-        self.assertFalse(install.remove_statusline(home))
+        self.assertEqual(install.install_statusline(home), "composed")
+        now = paths.read_json(os.path.join(home, "settings.json"))["statusLine"]
+        self.assertIn("--base", now["command"])
+        self.assertEqual((now["refreshInterval"], now["padding"]), (7, 1), "its settings carry over")
+        self.assertEqual(install.install_statusline(home), "already")
+        env = dict(os.environ, XSM_HOME=self.tmp)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        out = subprocess.run(["/bin/sh", "-c", now["command"].split(" #")[0]],
+                             input='{"session_id": "t1"}', capture_output=True, text=True, env=env)
+        lines = out.stdout.splitlines()
+        self.assertEqual(lines[:2], ["DASH line1", 'DASH line2 {"session_id": "t1"}'],
+                         "the user's statusline gets the same input and prints unchanged")
+        self.assertEqual(len(lines), 3, "xsm adds one line, no more")
+        self.assertTrue(lines[2].startswith("xsm "))
+        self.assertTrue(install.remove_statusline(home))
         self.assertEqual(paths.read_json(os.path.join(home, "settings.json"))["statusLine"], mine)
+
+    def test_a_broken_base_statusline_does_not_take_xsms_line_with_it(self):
+        from xsm import install, paths
+        home = self._home({"statusLine": {"type": "command", "command": "exit 3"}})
+        install.install_statusline(home)
+        now = paths.read_json(os.path.join(home, "settings.json"))["statusLine"]
+        env = dict(os.environ, XSM_HOME=self.tmp)
+        out = subprocess.run(["/bin/sh", "-c", now["command"].split(" #")[0]], input="{}",
+                             capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 0)
+        self.assertTrue(out.stdout.startswith("xsm "))
 
 
 class CompactOutputTest(TempState):

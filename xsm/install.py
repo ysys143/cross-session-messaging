@@ -16,6 +16,7 @@ import datetime
 import glob
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -233,35 +234,71 @@ def codex_trust(home: str, approvals: bool = False) -> dict:
     return out
 
 
-def statusline_command() -> str:
-    return "%s statusline %s" % (launcher(), MARKER)
+STATUSLINE_BASE = "statusline-base"      # the statusLine a user had before xsm's
+
+
+def statusline_command(base: str | None = None) -> str:
+    """`xsm statusline`, or with `base` (a settings file) the composed form:
+    that file's original statusLine first, then xsm's one line under it."""
+    extra = " --base %s" % shlex.quote(base) if base else ""
+    return "%s statusline%s %s" % (launcher(), extra, MARKER)
+
+
+def _base_path(target: str) -> str:
+    import hashlib
+    key = hashlib.sha256(os.path.realpath(target).encode()).hexdigest()[:16]
+    return paths.path(STATUSLINE_BASE, key + ".json")
+
+
+def statusline_base(target: str) -> dict | None:
+    """The statusLine this settings file had before xsm composed onto it."""
+    return paths.read_json(_base_path(target))
 
 
 def install_statusline(home: str) -> str:
-    """Opt-in. Claude has one statusLine per home, so an existing one is never
-    replaced — the user would lose theirs without asking."""
+    """Opt-in. Claude has one statusLine per home, and the user's own — a
+    dashboard, Orca's, anything — is never replaced: it is kept, run first
+    with the same input, and xsm's line goes under it (user decision,
+    2026-09-22). Its refresh interval and padding carry over."""
     target = _settings_file(home, "claude")
     data = paths.read_json(target, {}) or {}
     current = data.get("statusLine")
-    if current and MARKER not in json.dumps(current):
-        return "kept-existing"
-    want = {"type": "command", "command": statusline_command()}
-    if current == want:
+    if current and MARKER in json.dumps(current):
         return "already"
+    if current:
+        os.makedirs(paths.path(STATUSLINE_BASE), mode=0o700, exist_ok=True)
+        paths.write_json(_base_path(target), current)
+        want = {"type": "command", "command": statusline_command(target)}
+        for key in ("refreshInterval", "padding"):
+            if key in current:
+                want[key] = current[key]
+        outcome = "composed"
+    else:
+        want = {"type": "command", "command": statusline_command()}
+        outcome = "installed"
     if os.path.exists(target):
         _backup(target)
     data["statusLine"] = want
     paths.write_json(target, data, mode=0o644)
-    return "installed"
+    return outcome
 
 
 def remove_statusline(home: str) -> bool:
+    """Take xsm's line out, and give back the statusLine it was composed onto."""
     target = _settings_file(home, "claude")
     data = paths.read_json(target)
     if not data or MARKER not in json.dumps(data.get("statusLine") or {}):
         return False
     _backup(target)
-    del data["statusLine"]
+    original = statusline_base(target)
+    if original:
+        data["statusLine"] = original
+        try:
+            os.unlink(_base_path(target))
+        except OSError:
+            pass
+    else:
+        del data["statusLine"]
     paths.write_json(target, data, mode=0o644)
     return True
 
