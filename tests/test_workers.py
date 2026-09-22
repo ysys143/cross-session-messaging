@@ -638,6 +638,8 @@ class DangerousFlagsTest(TempState):
             launch = next(a for a in seen if a[0] == "tmux" and a[1] in ("split-window", "new-session"))
             command = " ".join(shlex.split(launch[-1]))
             self.assertEqual("sandbox_workspace_write.writable_roots" in command, expect, mode)
+            self.assertEqual("mcp_servers.%s.env={XSM_HOME=" % install.MCP_NAME in command, expect,
+                             "the xsm MCP server must look in the worker's store, not ~/.xsm")
             self.assertEqual('mcp_servers.%s.default_tools_approval_mode="approve"'
                              % install.MCP_NAME in command, expect, mode)
 
@@ -652,6 +654,8 @@ class DangerousFlagsTest(TempState):
                 cfg = _json.loads(argv[argv.index("--mcp-config") + 1])
                 self.assertEqual(cfg["mcpServers"][install.MCP_NAME]["args"],
                                  install.mcp_command()[1:])
+                from xsm import paths
+                self.assertEqual(cfg["mcpServers"][install.MCP_NAME]["env"], {"XSM_HOME": paths.HOME})
 
     def test_the_default_claude_home_is_never_named_to_claude(self):
         """CLAUDE_CONFIG_DIR=~/.claude sends Claude to ~/.claude/.claude.json,

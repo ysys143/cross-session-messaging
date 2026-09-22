@@ -329,7 +329,8 @@ def _claude_argv(worker: dict, settings: str) -> list:
         # outside the shell sandbox. (Registration was also found landing in
         # ~/.claude/.claude.json, which no session reads — see install.)
         argv += ["--mcp-config", json.dumps({"mcpServers": {install.MCP_NAME: {
-            "command": install.mcp_command()[0], "args": install.mcp_command()[1:]}}})]
+            "command": install.mcp_command()[0], "args": install.mcp_command()[1:],
+            "env": {"XSM_HOME": paths.HOME}}}})]
     if worker.get("model"):
         argv += ["--model", worker["model"]]
     if worker.get("effort"):
@@ -523,7 +524,12 @@ def _start_in_tmux(worker: dict, pane: str | None) -> None:
         # shell still needs XSM_HOME writable for the ledger it keeps.
         reach = [] if worker.get("full_access") or worker["mode"] == "pane" else [
             "-c", "sandbox_workspace_write.writable_roots=[%s]" % json.dumps(paths.HOME),
-            "-c", 'mcp_servers.%s.default_tools_approval_mode="approve"' % install.MCP_NAME]
+            "-c", 'mcp_servers.%s.default_tools_approval_mode="approve"' % install.MCP_NAME,
+            # Codex starts MCP servers with an environment of its own, not the
+            # worker's: without this the xsm server looked in ~/.xsm and told
+            # the worker "this session is not registered" (measured, S10 run 2
+            # under a run-local XSM_HOME).
+            "-c", 'mcp_servers.%s.env={XSM_HOME=%s}' % (install.MCP_NAME, json.dumps(paths.HOME))]
         argv = ["codex"] + _codex_config_args(worker) + (
             ["--dangerously-bypass-approvals-and-sandbox"] if worker.get("full_access")
             else ["-s", "workspace-write"] + asks + reach) + (
