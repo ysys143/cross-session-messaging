@@ -7,7 +7,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tests.test_telemetry import needs_telemetry  # noqa: E402
+from tests.test_telemetry import needs_telemetry, opened  # noqa: E402
 from tests.test_xsm import TempState  # noqa: E402
 
 
@@ -27,7 +27,7 @@ class Collector:
                 self.end_headers()
                 self.wfile.write(b"{}")
 
-            def log_message(self, *args):
+            def log_message(self, format, *args):  # noqa: A002 - the base class's name
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -46,7 +46,7 @@ class Collector:
 class PayloadTest(TempState):
     def test_a_span_becomes_an_otlp_span(self):
         from xsm import otlp_export, paths, telemetry
-        with telemetry.span("xsm.send", {"xsm.msg.kind": "task", "retries": 2, "ok": True},
+        with opened("xsm.send", {"xsm.msg.kind": "task", "retries": 2, "ok": True},
                             kind="PRODUCER") as parent:
             with telemetry.span("xsm.deliver"):
                 pass

@@ -33,6 +33,8 @@ def pairs() -> list:
 
 def load(path: str):
     spec = importlib.util.spec_from_file_location("candidate", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit("cannot load %s as a Python module" % path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.lcs_len
@@ -51,7 +53,7 @@ def main() -> int:
     if wrong:
         print(json.dumps({"ok": False, "wrong_pairs": wrong[:5]}))
         return 1
-    best = None
+    best = float("inf")
     for _ in range(3):
         # A fresh module each time: the correctness pass above would otherwise
         # have filled any in-memory cache, and "fast" would mean "remembered".

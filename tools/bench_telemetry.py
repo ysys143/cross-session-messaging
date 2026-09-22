@@ -57,7 +57,8 @@ def bench_span(n: int) -> float:
 
     def one():
         with telemetry.span("xsm.send", {"xsm.msg.kind": "task"}, kind="PRODUCER") as span:
-            span.set_attribute("xsm.result.status", "sent-unconfirmed")
+            if span is not None:            # the same guard every caller in xsm uses
+                span.set_attribute("xsm.result.status", "sent-unconfirmed")
     return _us(timeit.timeit(one, number=n) / n)
 
 

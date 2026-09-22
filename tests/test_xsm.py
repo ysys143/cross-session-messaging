@@ -796,7 +796,9 @@ class SelfIdentityTest(TempState):
         install.apply(self.home, "claude")
         install.remove(self.home, "claude")
         self.assertIsNone(registry.me())
-        self.assertIn("missing", registry.self_consent(registry.claude_home_here()))
+        reason = registry.self_consent(registry.claude_home_here())
+        assert reason is not None, "hooks were removed, so there must be a reason"
+        self.assertIn("missing", reason)
 
     def test_a_sandboxed_codex_session_finds_itself_by_thread_id(self):
         """The Codex sandbox refuses `ps`, so the process walk cannot identify a
