@@ -252,6 +252,57 @@ def adopt_open_codex() -> list:
     return adopted
 
 
+def claude_home_here() -> str:
+    """The Claude home of the session running this command."""
+    return os.path.realpath(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"))
+
+
+def self_consent(home: str) -> str | None:
+    """Why the calling Claude session cannot be adopted, or None if it can.
+
+    The consent test is the one adopt_open_codex applies to Codex: xsm is
+    installed in that home. Only declared homes count, so an XSM_HOME that
+    never installed anything (a test's, a spike's) adopts nothing.
+    """
+    if not any(h.get("runtime") == "claude" and os.path.realpath(h.get("path", "")) == home
+               for h in config.homes()):
+        return "xsm is not installed in %s; run: xsm install --claude-home %s" % (home, home)
+    from . import install                          # lazy: keeps hook imports small
+    plan = install.plan(home, "claude")
+    ours = [a for a in plan.get("actions", []) if a["event"] == "UserPromptSubmit"]
+    if plan.get("error") or not ours or ours[0]["action"] == "add":
+        return "the xsm hooks are missing from %s; run: xsm install --claude-home %s" % (
+            plan.get("file", home), home)
+    return None
+
+
+def adopt_self() -> dict | None:
+    """Register the Claude session running this command when its hook has not
+    run yet.
+
+    Installing xsm into a home whose sessions are already open leaves each one
+    unregistered until its next prompt, and a display command like /xsm-who
+    runs its shell before that prompt's hook fires — so the first thing a
+    person tried after installing reported "not registered" (2026-09-22).
+    Registration is consent (ADR-0001), and here it was already given: the
+    xsm hook is in this session's own settings (see self_consent). The next
+    prompt's hook re-registers the session properly and clears "adopted".
+    """
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    home = claude_home_here()
+    if not sid or self_consent(home):
+        return None
+    native = next((d for d in (paths.read_json(p, {}) or {}
+                               for p in glob.glob(os.path.join(home, "sessions", "*.json")))
+                   if str(d.get("sessionId")) == sid), None)
+    if not native or not identity.pid_alive(native.get("pid")):
+        return None
+    rec = upsert("claude", home, sid, native["pid"], native.get("cwd") or os.getcwd())
+    rec["adopted"] = True
+    paths.write_json(_record_path("claude", sid), rec)
+    return by_session("claude", sid) or rec
+
+
 def unregistered() -> list:
     """Sessions visible in a declared home that never ran the hook. Shown for
     diagnosis only — they have no pointer, so they are not addressable."""
@@ -336,10 +387,12 @@ def me(session_id: str | None = None, cwd: str | None = None):
 
     Environment first: two sessions can share a working directory, and only the
     session id (or its inbox socket) tells them apart. cwd is the fallback for
-    a shell that inherited neither.
+    a shell that inherited neither — never for one that knows its session id,
+    where a cwd match would be some other session's identity.
     """
     rows = records()
-    session_id = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    own_session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    session_id = session_id or own_session
     if session_id:
         for rec in rows:
             if rec.get("session_id") == session_id:
@@ -357,6 +410,8 @@ def me(session_id: str | None = None, cwd: str | None = None):
         for rec in rows:
             if rec.get("pid") == own:
                 return rec
+    if own_session and session_id == own_session:
+        return adopt_self()
     cwd = os.path.realpath(cwd or os.getcwd())
     live = [r for r in rows if r.get("cwd") == cwd and r.get("state") == "live"]
     return live[0] if len(live) == 1 else None

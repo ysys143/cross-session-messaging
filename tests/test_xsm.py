@@ -740,6 +740,74 @@ class SupersededSessionTest(TempState):
             self.assertNotIn("unless", body, name)
 
 
+class SelfIdentityTest(TempState):
+    """A session asking who it is, before its own hook has ever run.
+
+    Measured 2026-09-22: xsm was installed into a home whose session was
+    already open, and /xsm-who — whose shell runs before that prompt's hook —
+    said "not registered". The next prompt registered it; the command was just
+    too early."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "claude-home")
+        os.makedirs(os.path.join(self.home, "sessions"))
+        for key in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MESSAGING_SOCKET"):
+            self.addCleanup(lambda k=key, v=os.environ.get(key):
+                            os.environ.__setitem__(k, v) if v is not None else os.environ.pop(k, None))
+        os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+        os.environ["CLAUDE_CONFIG_DIR"] = self.home
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "s-mine"
+        paths_json = os.path.join(self.home, "sessions", "%d.json" % os.getpid())
+        from xsm import paths
+        paths.write_json(paths_json, {"pid": os.getpid(), "sessionId": "s-mine", "cwd": self.tmp,
+                                      "name": "mine", "nameSource": "auto"})
+
+    def _who(self):
+        from xsm import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["who"])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_installed_but_not_yet_hooked_is_adopted(self):
+        from xsm import install, registry
+        install.apply(self.home, "claude")
+        me = registry.me()
+        self.assertIsNotNone(me, "xsm is in this session's own settings: that is the consent")
+        self.assertEqual(me["session_id"], "s-mine")
+        self.assertTrue(me.get("adopted"))
+        code, out, _ = self._who()
+        self.assertEqual(code, 0)
+        self.assertIn("mine@", out)
+        # The real hook, at the next prompt, takes over the record.
+        registry.upsert("claude", self.home, "s-mine", os.getpid(), self.tmp)
+        self.assertNotIn("adopted", registry.me())
+
+    def test_a_home_without_xsm_is_not_adopted_and_says_how_to_fix_it(self):
+        from xsm import registry
+        self.assertIsNone(registry.me())
+        code, _, err = self._who()
+        self.assertEqual(code, 2)
+        self.assertIn("xsm install --claude-home", err)
+
+    def test_hooks_removed_from_a_declared_home_is_not_consent(self):
+        from xsm import install, registry
+        install.apply(self.home, "claude")
+        install.remove(self.home, "claude")
+        self.assertIsNone(registry.me())
+        self.assertIn("missing", registry.self_consent(registry.claude_home_here()))
+
+    def test_an_unregistered_session_never_borrows_a_neighbours_identity(self):
+        """Before: a session that knew its own id but had no record fell through
+        to the cwd guess and printed whichever session shared its folder."""
+        from xsm import registry
+        other = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(other)
+        registry.upsert("codex", other, "t-neighbour", os.getpid(), self.tmp, name="neighbour")
+        self.assertIsNone(registry.me(), "not someone else's record")
+
+
 class LifecycleTest(TempState):
     """What happens to a session after it stops (ADR-0001 addendum)."""
 

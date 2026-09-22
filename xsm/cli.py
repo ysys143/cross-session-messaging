@@ -157,7 +157,10 @@ def cmd_list(args) -> int:
 def cmd_who(args) -> int:
     me = registry.me()
     if not me:
-        print("this session is not registered (no hook record for this cwd)", file=sys.stderr)
+        why = (registry.self_consent(registry.claude_home_here())
+               if os.environ.get("CLAUDE_CODE_SESSION_ID") else None)
+        print("this session is not registered: %s" % (why or "no hook record for this cwd"),
+              file=sys.stderr)
         return REFUSED
     if args.json:
         print(json.dumps(me, ensure_ascii=False, indent=1))
