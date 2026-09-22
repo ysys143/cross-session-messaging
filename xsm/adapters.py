@@ -18,6 +18,8 @@ import os
 import shutil
 import socket
 import subprocess
+import time
+from contextlib import contextmanager
 
 
 class DeliveryError(Exception):
@@ -34,8 +36,39 @@ def codex_bin() -> str | None:
         (p for p in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex") if os.path.exists(p)), None)
 
 
+@contextmanager
+def _timed(transport: str):
+    """One span and one duration per delivery attempt, tagged with how it went.
+
+    How often a send is refused by a sandbox rather than delivered is the
+    question this exists to answer, so the reason is recorded and the error
+    re-raised untouched.
+    """
+    try:
+        from . import telemetry
+    except ImportError:
+        yield
+        return
+    start, outcome = time.time(), "ok"
+    try:
+        with telemetry.span("xsm.deliver", {"xsm.transport": transport}):
+            yield
+    except DeliveryError as err:
+        outcome = err.reason
+        raise
+    finally:
+        telemetry.histogram("xsm.deliver.duration", time.time() - start,
+                            {"xsm.transport": transport, "xsm.delivery.outcome": outcome})
+
+
 def to_claude(socket_path: str, content: str, msg_id: str, priority: str = "next",
               reply_address: str | None = None) -> None:
+    with _timed("uds"):
+        _to_claude(socket_path, content, msg_id, priority, reply_address)
+
+
+def _to_claude(socket_path: str, content: str, msg_id: str, priority: str,
+               reply_address: str | None) -> None:
     frame = {"type": "user", "msg_id": msg_id, "priority": priority,
              "message": {"role": "user", "content": content}}
     if reply_address:
@@ -59,6 +92,11 @@ def to_claude(socket_path: str, content: str, msg_id: str, priority: str = "next
 def to_codex(codex_home: str, thread_id: str, content: str) -> str:
     """Always addressed by thread UUID: name lookup fails outright once a home
     holds more than a hundred threads (S7)."""
+    with _timed("codex-queue"):
+        return _to_codex(codex_home, thread_id, content)
+
+
+def _to_codex(codex_home: str, thread_id: str, content: str) -> str:
     binary = codex_bin()
     if not binary:
         raise DeliveryError("no-codex-binary", "codex is not on PATH")

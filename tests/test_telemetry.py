@@ -1,4 +1,5 @@
 """Spans, counters and the promise that none of it can break a caller."""
+import contextlib
 import os
 import sys
 import unittest
@@ -7,7 +8,30 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.test_xsm import TempState  # noqa: E402
 
+# Read at import, before any test can change it: these assert on recorded
+# output, which the kill switch is supposed to remove.
+needs_telemetry = unittest.skipIf(os.environ.get("XSM_NO_TELEMETRY"),
+                                  "XSM_NO_TELEMETRY is set; there is nothing to record")
 
+
+@contextlib.contextmanager
+def kill_switch(value):
+    """Set XSM_NO_TELEMETRY and put back whatever was there, so a run under the
+    switch does not lose it partway through the suite."""
+    before = os.environ.get("XSM_NO_TELEMETRY")
+    os.environ["XSM_NO_TELEMETRY"] = value
+    for mod in [m for m in list(sys.modules) if m.startswith("xsm")]:
+        del sys.modules[mod]
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("XSM_NO_TELEMETRY", None)
+        else:
+            os.environ["XSM_NO_TELEMETRY"] = before
+
+
+@needs_telemetry
 class SpanTest(TempState):
     def test_ids_have_the_w3c_shape_and_do_not_repeat(self):
         from xsm import telemetry
@@ -79,6 +103,7 @@ class SpanTest(TempState):
         self.assertIn("ValueError", row["message"])
 
 
+@needs_telemetry
 class MetricTest(TempState):
     def test_counters_and_histograms_land_in_their_own_log(self):
         from xsm import paths, telemetry
@@ -116,10 +141,7 @@ class MetricTest(TempState):
 
 class NeverBreaksTheCallerTest(TempState):
     def test_the_kill_switch_yields_no_span_and_writes_nothing(self):
-        os.environ["XSM_NO_TELEMETRY"] = "1"
-        try:
-            for mod in [m for m in list(sys.modules) if m.startswith("xsm")]:
-                del sys.modules[mod]
+        with kill_switch("1"):
             from xsm import paths, telemetry
             paths.HOME = self.tmp
             self.assertTrue(telemetry.DISABLED)
@@ -129,20 +151,19 @@ class NeverBreaksTheCallerTest(TempState):
             telemetry.histogram("xsm.deliver.duration", 1.0)
             self.assertFalse(os.path.exists(paths.path(telemetry.SPANS)))
             self.assertFalse(os.path.exists(paths.path(telemetry.METRICS)))
-        finally:
-            os.environ.pop("XSM_NO_TELEMETRY", None)
+
+    @needs_telemetry
+    def test_an_unserializable_attribute_is_dropped_not_raised(self):
+        from xsm import paths, telemetry
+        with telemetry.span("xsm.send") as s:
+            s.set_attribute("bad", object())
+        self.assertEqual(paths.read_jsonl(telemetry.SPANS), [], "nothing written, nothing raised")
 
     def test_a_span_that_cannot_start_yields_none_instead_of_raising(self):
         from xsm import telemetry
         with mock.patch("os.urandom", side_effect=OSError("no entropy")):
             with telemetry.span("xsm.send") as s:
                 self.assertIsNone(s)
-
-    def test_an_unserializable_attribute_is_dropped_not_raised(self):
-        from xsm import paths, telemetry
-        with telemetry.span("xsm.send") as s:
-            s.set_attribute("bad", object())
-        self.assertEqual(paths.read_jsonl(telemetry.SPANS), [], "nothing written, nothing raised")
 
     def test_a_body_inside_a_span_still_returns_its_value(self):
         from xsm import telemetry
@@ -151,6 +172,117 @@ class NeverBreaksTheCallerTest(TempState):
             with telemetry.span("x"):
                 return "answer"
         self.assertEqual(work(), "answer")
+
+
+@needs_telemetry
+class SendInstrumentationTest(TempState):
+    """What a send actually records, end to end."""
+
+    def _pair(self):
+        from xsm import registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        sender = registry.upsert("codex", home, "s-1", os.getpid(), self.tmp, name="sender")
+        registry.upsert("codex", home, "t-1", os.getpid(), self.tmp, name="target")
+        return sender
+
+    def _deliver(self, sender):
+        """Send to a live target with the queue call stubbed out, returning
+        (result, envelope-that-would-have-been-delivered)."""
+        from xsm import send as send_mod
+        seen = []
+        # The inner one: patching to_codex itself would take the instrumentation
+        # wrapper with it and there would be nothing left to observe.
+        with mock.patch("xsm.adapters._to_codex", side_effect=lambda h, t, c: seen.append(c)):
+            result = send_mod.send("target", "hello", sender=sender)
+        return result, (seen[0] if seen else "")
+
+    def test_the_envelope_carries_the_sending_spans_traceparent(self):
+        from xsm import envelope, paths, telemetry
+        result, wire = self._deliver(self._pair())
+        self.assertEqual(result.status, "sent-unconfirmed")
+        tp = envelope.parse(wire).header.get("traceparent")
+        self.assertIsNotNone(tp, "the receiver has nothing to continue without it")
+        row = [r for r in paths.read_jsonl(telemetry.SPANS) if r["name"] == "xsm.send"][0]
+        self.assertEqual(tp, "00-%s-%s-01" % (row["trace_id"], row["span_id"]))
+        self.assertEqual(row["attributes"]["xsm.result.status"], "sent-unconfirmed")
+        self.assertEqual(row["attributes"]["xsm.msg.id"], result.msg_id)
+
+    def test_delivery_is_timed_under_the_send_that_asked_for_it(self):
+        from xsm import paths, telemetry
+        self._deliver(self._pair())
+        spans = {r["name"]: r for r in paths.read_jsonl(telemetry.SPANS)}
+        self.assertEqual(spans["xsm.deliver"]["trace_id"], spans["xsm.send"]["trace_id"])
+        self.assertEqual(spans["xsm.deliver"]["parent_id"], spans["xsm.send"]["span_id"])
+        durations = [r for r in paths.read_jsonl(telemetry.METRICS)
+                     if r["name"] == "xsm.deliver.duration"]
+        self.assertEqual(durations[0]["attributes"]["xsm.delivery.outcome"], "ok")
+
+    def test_a_refusal_is_counted_and_marked_without_being_changed(self):
+        from xsm import paths, send as send_mod, telemetry
+        result = send_mod.send("nobody-is-called-this", "hello", sender=self._pair())
+        self.assertEqual(result.status, "refused")
+        row = [r for r in paths.read_jsonl(telemetry.SPANS) if r["name"] == "xsm.send"][0]
+        self.assertEqual(row["status"], "ERROR")
+        self.assertEqual(row["attributes"]["xsm.result.status"], "refused")
+        point = [r for r in paths.read_jsonl(telemetry.METRICS) if r["name"] == "xsm.send.count"][0]
+        self.assertEqual(point["attributes"], {"xsm.result.status": "refused"})
+
+    def test_a_failed_delivery_records_the_reason_and_still_raises_it(self):
+        from xsm import adapters, paths, send as send_mod, telemetry
+        sender = self._pair()
+        blocked = adapters.DeliveryError("sandbox-blocked", "read-only database")
+        with mock.patch("xsm.adapters._to_codex", side_effect=blocked):
+            result = send_mod.send("target", "hello", sender=sender)
+        self.assertEqual(result.status, "error")
+        self.assertIn("sandbox-blocked", result.reason)
+        deliver = [r for r in paths.read_jsonl(telemetry.SPANS) if r["name"] == "xsm.deliver"][0]
+        self.assertEqual(deliver["status"], "ERROR")
+        point = [r for r in paths.read_jsonl(telemetry.METRICS)
+                 if r["name"] == "xsm.deliver.duration"][0]
+        self.assertEqual(point["attributes"]["xsm.delivery.outcome"], "sandbox-blocked")
+
+
+class SendIsUnchangedByTelemetryTest(TempState):
+    """The claim the whole design rests on, checked field by field."""
+
+    def _result_fields(self):
+        from xsm import registry, send as send_mod
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        sender = registry.upsert("codex", home, "s-1", os.getpid(), self.tmp, name="sender")
+        registry.upsert("codex", home, "t-1", os.getpid(), self.tmp, name="target")
+        seen = []
+        with mock.patch("xsm.adapters._to_codex", side_effect=lambda h, t, c: seen.append(c)):
+            ok = send_mod.send("target", "hello", sender=sender)
+        refused = send_mod.send("nobody-is-called-this", "hello", sender=sender)
+        body = seen[0].split("\n", 2)[2] if seen else ""
+        return [(r.status, r.reason, bool(r.target)) for r in (ok, refused)] + [body]
+
+    def test_the_same_results_with_telemetry_missing(self):
+        baseline = self._result_fields()
+        self.setUp()
+        sys.modules["xsm.telemetry"] = None                  # what an ImportError looks like
+        try:
+            self.assertEqual(self._result_fields(), baseline)
+        finally:
+            sys.modules.pop("xsm.telemetry", None)
+
+    def test_the_same_results_when_telemetry_itself_fails(self):
+        baseline = self._result_fields()
+        self.setUp()
+        # Only telemetry's own ids: os.urandom outright would also break the
+        # uuid4 behind envelope.new_id, which is not what this is testing.
+        with mock.patch("xsm.telemetry._new_id", side_effect=OSError("no entropy")):
+            self.assertEqual(self._result_fields(), baseline)
+
+    def test_the_same_results_with_the_kill_switch_on(self):
+        baseline = self._result_fields()
+        self.setUp()
+        with kill_switch("1"):
+            from xsm import paths
+            paths.HOME = self.tmp
+            self.assertEqual(self._result_fields(), baseline)
 
 
 if __name__ == "__main__":

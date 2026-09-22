@@ -12,6 +12,7 @@ until the receiving hook writes a receipt.
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 
 from . import adapters, config, envelope, ledger, paths, registry, resolve, workers
 
@@ -38,6 +39,38 @@ class SendResult:
 def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
          reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
          msg_id: str | None = None) -> SendResult:
+    """One span around the whole attempt, refusals included.
+
+    A refusal is as worth timing as a delivery: "out of scope" and "target has
+    no inbox socket" are the two things a caller actually hits, and neither
+    shows up in a log that only records what succeeded.
+    """
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    span_cm = telemetry.span("xsm.send", {"xsm.msg.kind": kind},
+                             kind="PRODUCER") if telemetry else nullcontext()
+    with span_cm as span:
+        result = _send(target_spec, body, sender=sender, kind=kind, reply_to=reply_to,
+                       priority=priority, wait=wait, msg_id=msg_id, span=span)
+        if span is not None:
+            span.set_attribute("xsm.result.status", result.status)
+            if result.msg_id:
+                span.set_attribute("xsm.msg.id", result.msg_id)
+            if result.target:
+                span.set_attribute("xsm.target.ref", result.target.get("ref"))
+                span.set_attribute("xsm.target.runtime", result.target.get("runtime"))
+            if result.status in ("refused", "error"):
+                span.set_status("ERROR", result.reason)
+        if telemetry:
+            telemetry.counter("xsm.send.count", 1, {"xsm.result.status": result.status})
+        return result
+
+
+def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
+          reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
+          msg_id: str | None = None, span=None) -> SendResult:
     sender = sender or registry.me()
     if not sender:
         return SendResult("refused", "this session is not registered; run `xsm doctor`")
@@ -78,7 +111,8 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
 
     msg_id = msg_id or envelope.new_id()
     content = envelope.build(body, msg_id=msg_id, sender=sender, scope=scope, kind=kind,
-                             reply_to=reply_to)
+                             reply_to=reply_to,
+                             traceparent=span.traceparent() if span is not None else None)
     ledger.queued(msg_id, sender, target, scope, kind, body)
 
     try:
