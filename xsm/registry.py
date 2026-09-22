@@ -25,7 +25,8 @@ def _record_path(runtime: str, session_id: str) -> str:
 
 
 def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
-           permission_mode: str | None = None, name: str | None = None) -> dict:
+           permission_mode: str | None = None, name: str | None = None,
+           mcp_pid: int | None = None) -> dict:
     home = os.path.realpath(os.path.expanduser(home))
     record = paths.read_json(_record_path(runtime, session_id), {}) or {}
     record.update({
@@ -48,6 +49,15 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
         record["permission_mode"] = permission_mode
     if name:
         record["name"] = name
+    if runtime == "codex":
+        # The xsm MCP server serving this thread, or none known (no beacon:
+        # the MCP server is not installed in that home, or this is adoption).
+        if mcp_pid:
+            record["mcp_pid"] = int(mcp_pid)
+            record["mcp_lstart"] = identity.lstart(mcp_pid)
+        else:
+            record.pop("mcp_pid", None)
+            record.pop("mcp_lstart", None)
     paths.write_json(_record_path(runtime, session_id), record)
     if not any(h.get("path") == home for h in config.homes()):
         config.add_home(home, runtime)
@@ -100,7 +110,11 @@ def _enrich(record: dict) -> dict:
         out["name"] = (_codex_thread_name(record.get("home", ""), str(record.get("session_id") or ""))
                        or (worker or {}).get("name") or record.get("name")
                        or "codex-%s" % str(record.get("session_id"))[:8])
-    out["state"] = identity.state_of(out)
+    out["state"], why = identity.state_reason(out)
+    if why == "thread_replaced":
+        # The TUI is alive but opened another thread (Codex /new, resume);
+        # this one is closed inside it and takes nothing from its queue.
+        out["end_reason"] = out.get("end_reason") or "thread_replaced"
     if out["state"] == "live" and record.get("runtime") == "claude" and \
             out.get("native_session_id") and out["native_session_id"] != record.get("session_id"):
         # The process is alive but now runs another session: /clear and
@@ -296,6 +310,54 @@ def adopt_self() -> dict | None:
     return by_session("claude", sid) or rec
 
 
+def mcp_beacons() -> list:
+    """Running xsm MCP servers, from the beacons they wrote; a beacon whose
+    process is gone is removed here."""
+    out = []
+    for p in glob.glob(paths.path(paths.MCP, "*.json")):
+        rec = paths.read_json(p) or {}
+        if rec.get("pid") and identity.pid_alive(rec["pid"]):
+            out.append(rec)
+        else:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    return out
+
+
+def beacon_for(codex_pid) -> int | None:
+    """The newest xsm MCP server under this Codex process: the one serving
+    the thread the TUI has open now."""
+    mine = [b for b in mcp_beacons() if b.get("ppid") == int(codex_pid)]
+    return max(mine, key=lambda b: b.get("started", 0))["pid"] if mine else None
+
+
+def fresh_codex_threads() -> list:
+    """Threads a Codex TUI has open that xsm cannot address yet: it has an xsm
+    MCP server (so the thread is open) but no record points at that server.
+    Codex writes nothing else about a thread until its first prompt or
+    /rename, so this is the only sign of it. Read once per command, not in
+    hooks: it runs `ps` for each beacon whose parent has no record."""
+    recs = records()
+    served = {r.get("mcp_pid") for r in recs if r.get("runtime") == "codex"}
+    claude_pids = {r.get("pid") for r in recs if r.get("runtime") == "claude"}
+    out = []
+    for b in mcp_beacons():
+        ppid = b.get("ppid")
+        if not ppid or b["pid"] in served or ppid in claude_pids or not identity.pid_alive(ppid):
+            continue
+        if not any(r.get("pid") == ppid for r in recs) and identity.comm(ppid) != "codex":
+            continue
+        age = int(time.time() - b.get("started", time.time()))
+        out.append({"runtime": "codex", "home": "", "alias": "codex", "session_id": None,
+                    "pid": ppid, "name": "codex-%d" % ppid, "cwd": b.get("cwd"),
+                    "registered": False, "state": "unknown", "ref": None, "fresh": True,
+                    "why": "a thread open for %dm%02ds with no prompt yet; it can be addressed "
+                           "after its first prompt or /rename" % (age // 60, age % 60)})
+    return out
+
+
 def unregistered() -> list:
     """Sessions visible in a declared home that never ran the hook. Shown for
     diagnosis only — they have no pointer, so they are not addressable."""
@@ -339,6 +401,7 @@ def unregistered() -> list:
                    "ref": identity.ref_of("claude", home["path"], sid)}
             rec["state"] = identity.state_of(rec)
             out.append(rec)
+    out += fresh_codex_threads()
     return out
 
 

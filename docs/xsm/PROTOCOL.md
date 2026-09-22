@@ -92,7 +92,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
   동시에 읽어도 한 번만 넘긴다. Codex 세션이 부르는 xsm 명령과 MCP 도구는 대기 중인 사본 수를 알린다
   (명령은 stderr). 근거: S10 collab4에서 Codex 워커가 `sleep` 폴링으로 턴을 끝내지 않아 15분 동안 받은
   메시지 6건을 하나도 읽지 못했다.
-- `readonly database` 오류는 샌드박스 발신이다.
+- `readonly database` 오류는 샌드박스 발신이다. 발신 셸이 샌드박스 안이면(`CODEX_SANDBOX`, 또는 xsm이 Claude 워커 설정 `env`에 넣는 `XSM_SANDBOXED=1`) `codex queue`를 시도하지 않고 바로 거부하며 MCP `xsm_send`를 안내한다. `codex queue`는 상태 DB 쓰기와 내장 app server 기동이 필요해 두 샌드박스 모두에서 실패한다(S10 orch1 실측: 워커마다 1회씩 헛시도).
 
 ## 3. 상태 파일
 
@@ -100,6 +100,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 
 | 경로 | 스키마 |
 |---|---|
+| `mcp/<pid>.json` | `{"pid", "ppid", "lstart", "started", "cwd"}`: 실행 중인 xsm MCP 서버의 비콘(§4.3). 서버가 끝나면 지우고, 죽은 pid의 비콘은 읽을 때 정리한다 |
 | `inbox/<thread-uuid>/<id>.json` | `{"id", "t", "content"}`: Codex 대상 메시지의 봉투 사본(§2.2). 어느 경로로든 넘겨지면 지우고, 읽히지 않은 사본은 세션 포인터 보존 기간이 지나면 정리한다 |
 | `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다 |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
@@ -153,12 +154,16 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 | 런타임 | 판정 |
 |---|---|
 | Claude | pid 생존 + `ps lstart` 일치 + inbox 소켓 연결 성공 |
-| Codex | pid 생존 + `ps lstart` 일치 |
+| Codex | pid 생존 + `ps lstart` 일치 + **xsm MCP 서버 생존**(`mcp_pid`, 있을 때) |
 
 - 수신 세션은 자기 pid를 `CLAUDE_CODE_MESSAGING_SOCKET`(경로에 pid가 들어 있다)이나 조상 프로세스 탐색으로 얻고, 둘 다 실패하면 같은 `session_id`로 이미 남아 있는 포인터에서 되찾는다. 그래도 알 수 없으면 5.1절 3번 규칙이 적용된다.
 - 종료 훅에 의존하지 않는다. 강제 종료 시 `SessionEnd`는 실행되지 않는다(S3).
 - **주의:** Claude가 자기 레코드에 쓰는 `procStart`는 UTC이고 `ps lstart`는 로컬 시간이다. 두 값을 직접 비교하면 안 된다. 우리가 등록한 포인터의 `lstart`만 `ps` 출력과 비교한다.
 
+
+**Codex 스레드 교체.** 한 Codex TUI 프로세스는 `/new`나 resume으로 스레드를 바꾼다. 옛 스레드는 그 프로세스 안에서 약 60초 뒤 `Shutdown`되고, 그 뒤로는 자기 대기열을 읽지 않는다(실측 2026-09-23: 살아 있는 pid 앞으로 보낸 메시지 2건이 영원히 `queued`). Codex는 스레드가 열릴 때마다 MCP 서버를 새로 띄우고 닫힐 때 죽이므로, **xsm MCP 서버의 pid가 곧 스레드의 생존이다.** MCP 서버는 시작할 때 비콘(`mcp/<pid>.json`: pid, ppid, lstart, started, cwd)을 쓰고 끝날 때 지운다. Codex 훅은 등록할 때 자기 Codex pid 아래 가장 최근 비콘의 pid를 `mcp_pid`로 적는다. 그 프로세스가 죽었으면 기록은 pid가 살아 있어도 `ended`(`end_reason: thread_replaced`)다. 비콘이 없으면(MCP 서버 미설치, adopt) pid 판정만 쓴다.
+
+**첫 프롬프트 전의 Codex 스레드.** Codex는 첫 프롬프트나 `/rename` 전에는 스레드 행도 rollout도 쓰지 않는다. 그런 스레드의 유일한 흔적은 MCP 서버 비콘이다. `xsm list`는 어떤 기록도 가리키지 않는 비콘(부모가 살아 있는 `codex` 프로세스)을 `codex-<pid>@codex [-] (a thread open for … with no prompt yet …)`로 보여 준다. 주소는 없다.
 
 한 Claude 프로세스는 `/clear`나 `--resume`으로 세션 id를 바꾼다. 그래서 같은 pid의 기록이 여럿 생긴다. 네이티브 기록(`<홈>/sessions/<pid>.json`)의 `sessionId`와 기록의 id가 다르면, 그 기록은 프로세스가 살아 있어도 `ended`(`end_reason: superseded`)로 본다.
 

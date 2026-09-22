@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -473,6 +474,111 @@ class SessionFolderTest(TempState):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CLAUDE_PROJECT_DIR", None)
             self.assertEqual(receive.session_folder("claude", data), data["cwd"])
+
+
+class CodexThreadLivenessTest(TempState):
+    """A Codex TUI keeps its process while it changes thread (/new, resume);
+    the old thread shuts down and reads its queue no more. 2026-09-23: two
+    messages sat queued to codex-orch's closed thread, reported live, for an
+    hour. The xsm MCP server is started per thread and stopped with it, so
+    its pid is the thread's liveness."""
+
+    def _beacon(self, pid, ppid, started=None):
+        from xsm import paths
+        paths.write_json(paths.path(paths.MCP, "%d.json" % pid),
+                         {"pid": pid, "ppid": ppid, "started": started or time.time(),
+                          "cwd": self.tmp})
+
+    def test_a_thread_whose_mcp_server_is_gone_is_ended_not_live(self):
+        from xsm import identity, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        with mock.patch.object(identity, "lstart", lambda pid: None):
+            registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="orch",
+                            mcp_pid=os.getpid())
+            rec = registry.by_session("codex", "t1") or {}
+            self.assertEqual(rec["state"], "live")
+            registry.upsert("codex", home, "t1", os.getpid(), self.tmp, name="orch",
+                            mcp_pid=999999)
+            rec = registry.by_session("codex", "t1") or {}
+        self.assertEqual(rec["state"], "ended")
+        self.assertEqual(rec["end_reason"], "thread_replaced")
+        self.assertIn("opened another thread", resolve_hint(rec))
+
+    def test_the_hook_records_the_newest_mcp_server_under_its_codex(self):
+        from xsm import receive, registry
+        self._beacon(4001, os.getpid(), started=100)
+        self._beacon(4002, os.getpid(), started=200)          # the thread open now
+        self._beacon(4003, 1, started=300)                    # someone else's TUI
+        with mock.patch.object(registry.identity, "pid_alive", lambda pid: True), \
+                mock.patch.object(receive, "pid_of", lambda runtime: os.getpid()), \
+                mock.patch.object(receive, "home_of", lambda r, d: self.tmp):
+            rec = receive.register({"session_id": "t9", "cwd": self.tmp}, "codex") or {}
+        self.assertEqual(rec["mcp_pid"], 4002)
+
+    def test_a_fresh_thread_shows_in_the_list_as_not_yet_addressable(self):
+        """Codex writes nothing about a thread before its first prompt; its
+        MCP servers are the only sign. The list says so instead of nothing."""
+        from xsm import cli, registry
+        self._beacon(os.getpid(), os.getpid())        # both alive: this process
+        with mock.patch.object(registry.identity, "comm", lambda pid: "codex"):
+            rows = registry.fresh_codex_threads()
+            self.assertEqual(len(rows), 1)
+            self.assertIn("first prompt or /rename", rows[0]["why"])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.main(["list", "--compact", "--dir", self.tmp])
+        self.assertIn("codex-%d@codex [-]" % os.getpid(), out.getvalue())
+        self.assertIn("no prompt yet", out.getvalue())
+
+    def test_a_dead_beacon_is_dropped(self):
+        from xsm import paths, registry
+        self._beacon(999999, os.getpid())
+        self.assertEqual(registry.mcp_beacons(), [])
+        self.assertFalse(os.path.exists(paths.path(paths.MCP, "999999.json")))
+
+    def test_the_mcp_server_writes_its_beacon_while_it_serves(self):
+        from xsm import mcp, paths
+        with mock.patch.object(mcp.Server, "serve", lambda self: 0), \
+                mock.patch.object(mcp.identity, "lstart", lambda pid: None):
+            real_write = mcp.write_beacon
+
+            def write_and_check():
+                real_write()
+                self.assertTrue(os.path.exists(paths.path(paths.MCP, "%d.json" % os.getpid())))
+            with mock.patch.object(mcp, "write_beacon", write_and_check), \
+                    mock.patch.dict(os.environ, {"XSM_SANDBOXED": "1"}):
+                self.assertEqual(mcp.main(), 0)
+                self.assertNotIn("XSM_SANDBOXED", os.environ, "the MCP server is outside the sandbox")
+        self.assertFalse(os.path.exists(paths.path(paths.MCP, "%d.json" % os.getpid())),
+                         "removed when the server stops")
+
+
+def resolve_hint(record):
+    from xsm import resolve
+    return resolve.resume_hint(record)
+
+
+class SandboxedSendTest(TempState):
+    def test_a_sandboxed_shell_is_told_to_use_mcp_before_trying_codex_queue(self):
+        """Every S10 worker lost one attempt to `codex queue` failing inside
+        its sandbox before falling back to the MCP tool."""
+        from xsm import adapters, ledger, registry, send
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        a = registry.upsert("codex", home, "t-a", os.getpid(), self.tmp, name="a")
+        registry.upsert("codex", home, "t-b", os.getpid(), self.tmp, name="b")
+        tried = []
+        adapters.to_codex = lambda *args: tried.append(args)
+        with mock.patch.dict(os.environ, {"CODEX_SANDBOX": "seatbelt"}):
+            r = send.send("b", "hi", sender=a)
+        self.assertEqual(r.status, "refused")
+        self.assertIn("xsm_send MCP tool", r.reason)
+        self.assertEqual(tried, [], "codex queue was not even tried")
+        self.assertEqual(ledger.recent(), [], "nothing was recorded as queued")
+        with mock.patch.dict(os.environ, {"XSM_SANDBOXED": "1"}):
+            self.assertEqual(send.send("b", "hi", sender=a).status, "refused")
+        self.assertEqual(send.send("b", "hi", sender=a).status, "sent-unconfirmed")
 
 
 class CodexInboxTest(TempState):

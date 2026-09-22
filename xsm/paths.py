@@ -17,6 +17,7 @@ HOME = os.path.expanduser(os.environ.get("XSM_HOME", "~/.xsm"))
 SESSIONS = "sessions"
 HELD = "held"
 LEDGER = "ledger"
+MCP = "mcp"                 # one beacon per running xsm MCP server (Codex thread liveness)
 
 
 def path(*parts: str) -> str:
@@ -24,7 +25,7 @@ def path(*parts: str) -> str:
 
 
 def ensure_home() -> None:
-    for sub in ("", SESSIONS, HELD, LEDGER):
+    for sub in ("", SESSIONS, HELD, LEDGER, MCP):
         os.makedirs(path(sub), mode=0o700, exist_ok=True)
 
 

@@ -105,6 +105,14 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
     scope, reason = config.scope_for(sender, target)
     if not scope:
         return SendResult("refused", "out of scope: %s" % reason, target=target)
+    if target.get("runtime") == "codex" and sandboxed():
+        # `codex queue` opens Codex's state DB for writing and starts an
+        # embedded app server; a Codex workspace-write sandbox or a Claude
+        # worker's OS sandbox blocks both, and every worker in S10 lost one
+        # attempt finding that out. Say it before trying.
+        return SendResult("refused", "this shell is sandboxed and cannot reach a Codex session "
+                          "(`codex queue` needs Codex's state DB and app server); send it with "
+                          "the xsm_send MCP tool: same target, kind and text", target=target)
 
     forecast, why = native_forecast(sender, target)
     if forecast in ("refuse",):
@@ -152,6 +160,12 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
     elif forecast == "unknown":
         note = "queued; %s, so the receiver's own gate may hold it" % why
     return SendResult("sent-unconfirmed", note, msg_id, target)
+
+
+def sandboxed() -> bool:
+    """Codex marks its sandboxed shells with CODEX_SANDBOX; a background Claude
+    worker's settings mark its shells with XSM_SANDBOXED (workers.py)."""
+    return bool(os.environ.get("CODEX_SANDBOX") or os.environ.get("XSM_SANDBOXED"))
 
 
 def native_forecast(sender: dict, target: dict) -> tuple:

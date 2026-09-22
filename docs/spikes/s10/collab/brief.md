@@ -38,7 +38,7 @@
 것뿐이다. 채널에 쓴 글은 아무도 깨우지 않는다 — 읽으러 와야 보인다. **동료가 조용하면 `send`로
 깨워라.** 논의와 수정은 셋이 같이 하는 단계다. 한 명만 깨어 있으면 그 단계는 실패한 것이다.
 
-`./xsm send`가 sandbox 오류로 실패하면 xsm MCP 도구 `xsm_send`로 보내라. 같은 target, kind, text다.
+Codex 세션에게 보낼 때 `./xsm send`가 "sandboxed" 거부를 돌려주면 xsm MCP 도구 `xsm_send`로 보내라. 같은 target, kind, text다.
 
 xsm 명령이나 도구 결과에 "messages ... waiting for you"가 보이면 `./xsm inbox`(또는 MCP `xsm_inbox`)로
 읽어라. 일하는 도중에 온 메시지가 거기 쌓인다(Codex 세션만 해당한다. Claude 세션은 메시지가 바로 들어온다).

@@ -26,7 +26,12 @@ xsm who                  # how other sessions see this session
 ```
 
 Each row reads `name@home [ref] runtime state mode cwd`. A session marked
-`unregistered` has no hook and cannot be addressed. `out-of-scope` means the
+`unregistered` has no hook and cannot be addressed. A row like
+`codex-<pid>@codex [-] (a thread open for 0m40s with no prompt yet …)` is a
+Codex TUI that just opened a thread: it has no address until someone types a
+first prompt or `/rename` there; tell your user rather than waiting on it.
+A Codex session marked `ended (thread_replaced)` is a thread its TUI has left
+with `/new` or resume: messages queued to it are never read. `out-of-scope` means the
 two of you are not in the same repository and no scope in `~/.xsm/config.json`
 joins you — that is a decision for the user, not something to work around.
 
@@ -94,6 +99,10 @@ Read the result as it is written:
 A Codex session picks up a queued message within about ten seconds when its
 thread is loaded and idle, otherwise at its user's next input. It cannot be
 interrupted mid-turn. Never report `sent-unconfirmed` as delivered.
+
+From a sandboxed shell (a background worker, a Codex workspace-write
+session) `xsm send` to a Codex peer refuses at once and says to use the
+`xsm_send` MCP tool: `codex queue` cannot run inside the sandbox. Use the tool.
 
 If you are a Codex session, messages sent to you wait while your turn runs.
 Every xsm command and MCP tool result tells you when some are waiting; read

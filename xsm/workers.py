@@ -292,6 +292,9 @@ def _claude_worker_settings(worker: dict) -> str:
         # allows it: reads outside the folder asked for a person, and a worker
         # checking INTENT.md for its review sat on that for the rest of the run
         # (S10 collab run 4). Writing stays inside the folder.
+        # Its shells cannot run `codex queue`; `xsm send` reads this and says
+        # so at once instead of failing after trying (send.sandboxed).
+        settings["env"] = {"XSM_SANDBOXED": "1"}
         settings["permissions"] = {"allow": ["Bash", "Monitor", "Read", "Glob", "Grep"] + [
             "mcp__%s__%s" % (install.MCP_NAME, tool)
             for tool in ("xsm_send", "xsm_post", "xsm_channel", "xsm_inbox")]}

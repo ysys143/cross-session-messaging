@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
+import time
 
-from . import channel, identity, registry
+from . import channel, identity, paths, registry
 
 PROTOCOL = "2025-06-18"
 
@@ -385,5 +387,34 @@ class Server:
                 self.send({"id": mid, "error": {"code": -32601, "message": "not supported"}})
 
 
+def beacon_path() -> str:
+    return paths.path(paths.MCP, "%d.json" % os.getpid())
+
+
+def write_beacon() -> None:
+    """This server's existence is the liveness signal for the Codex thread it
+    serves (see identity._state_of): a Codex TUI launches MCP servers per
+    thread and stops them when the thread closes. The hook that registers the
+    thread reads the newest beacon under its Codex pid."""
+    paths.write_json(beacon_path(), {"pid": os.getpid(), "ppid": os.getppid(),
+                                     "lstart": identity.lstart(os.getpid()),
+                                     "started": time.time(), "cwd": os.getcwd()})
+
+
+def remove_beacon() -> None:
+    try:
+        os.unlink(beacon_path())
+    except OSError:
+        pass
+
+
 def main() -> int:
-    return Server().serve()
+    # The MCP server runs outside any sandbox (that is why it exists); a
+    # worker's `env` setting must not make it refuse like a sandboxed shell.
+    os.environ.pop("XSM_SANDBOXED", None)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    write_beacon()
+    try:
+        return Server().serve()
+    finally:
+        remove_beacon()

@@ -80,6 +80,7 @@ xsm who                           # 지금 세션의 신원
 xsm send "reviewer@claude-4" --text "..." --wait 20
 xsm status <msg-id>
 xsm inbox                         # Codex 세션: 턴 도중 도착한 메시지를 지금 읽는다
+                                  # (샌드박스 셸에서 Codex 상대 send는 바로 거부하고 MCP xsm_send를 안내한다)
 xsm ledger
 xsm held list | xsm held show <id>
 xsm doctor | xsm selftest

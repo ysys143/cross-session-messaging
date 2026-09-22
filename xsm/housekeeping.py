@@ -85,6 +85,8 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
                 _unlink(p)
 
     if not dry_run:
+        from . import registry
+        registry.mcp_beacons()          # drops beacons of MCP servers that are gone
         _touch(paths.path(STAMP))
     return removed
 

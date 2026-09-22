@@ -25,6 +25,16 @@ def lstart(pid: int) -> str | None:
     return value or None
 
 
+def comm(pid) -> str | None:
+    """The process's command name, or None if `ps` cannot say."""
+    try:
+        out = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return os.path.basename(out.stdout.strip()) or None
+
+
 def pid_alive(pid) -> bool:
     """Whether a process with this pid exists. EPERM says it does — we are
     just not allowed to signal it — and inside the Codex sandbox that is the
@@ -92,13 +102,18 @@ def state_of(record: dict) -> str:
     deliberate for a Codex session whose pid we could not confirm: unknown must
     not read as dead (ADR-0001).
     """
+    return state_reason(record)[0]
+
+
+def state_reason(record: dict) -> tuple:
+    """(state, reason): state_of with the cause, for a record's end_reason."""
     verdict, why = _state_of(record)
     try:
         from . import telemetry
         telemetry.bump("xsm.state.%s" % why)
     except ImportError:
         pass
-    return verdict
+    return verdict, why
 
 
 def _state_of(record: dict) -> tuple:
@@ -120,6 +135,21 @@ def _state_of(record: dict) -> tuple:
         # `ps` refused (the Codex sandbox) is not evidence of reuse; the pid is
         # alive and we could not look further.
         unverified = now is None
+    if record.get("runtime") == "codex" and record.get("mcp_pid"):
+        # A Codex TUI starts a fresh set of MCP servers for every thread it
+        # opens and kills the old set about a minute after leaving that thread
+        # (measured 2026-09-23, Codex 0.155). So xsm's own MCP server, whose
+        # pid the hook wrote here, lives exactly as long as the thread does —
+        # which the process does not: one /new in the TUI left the process
+        # alive, the thread shut down, and two messages queued to it forever.
+        beacon = record["mcp_pid"]
+        if not pid_alive(beacon):
+            return "ended", "thread_replaced"
+        seen = record.get("mcp_lstart")
+        if seen:
+            now = lstart(beacon)
+            if now is not None and now != seen:
+                return "ended", "thread_replaced"
     if record.get("runtime") == "claude":
         answer = socket_live(record.get("socket") or "")
         if answer is None:

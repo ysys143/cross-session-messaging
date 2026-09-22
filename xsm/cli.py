@@ -56,6 +56,9 @@ def _rows(args, me=None) -> list:
     if getattr(args, "home", None):
         rows = [r for r in rows if args.home in (r.get("alias"), r.get("home"))]
     if not getattr(args, "all", False):
+        # A thread a Codex TUI just opened is what a caller is usually
+        # looking for when a name resolves to nothing; -a already has it.
+        rows += registry.fresh_codex_threads()
         rows = [r for r in rows if r.get("state") not in ("stale", "ended")]
         here = _here(args, me)
         rows = [r for r in rows if (me and r.get("ref") == me.get("ref"))
@@ -102,7 +105,7 @@ def _compact_groups(rows: list, me: dict | None, here: str) -> list:
     for folder, members in _folder_groups(rows, me, here, label):
         lines.append(folder)
         for r, flags in members:
-            lines.append(" %s@%s [%s]%s" % (r.get("name"), r.get("alias"), r.get("ref"),
+            lines.append(" %s@%s [%s]%s" % (r.get("name"), r.get("alias"), r.get("ref") or "-",
                                             (" (" + ", ".join(flags) + ")") if flags else ""))
     return lines
 
@@ -130,7 +133,7 @@ def _table(rows: list, me: dict | None, here: str) -> list:
         for i, (r, flags) in enumerate(members):
             lines.append("| %s | %s | %s | `%s` | %s |" % (
                 cell(folder) if i == 0 else "", cell(r.get("name") or ""),
-                cell(r.get("alias") or ""), r.get("ref"), cell(", ".join(flags))))
+                cell(r.get("alias") or ""), r.get("ref") or "-", cell(", ".join(flags))))
     return lines
 
 
@@ -149,10 +152,10 @@ def _folder_groups(rows: list, me: dict | None, here: str, label) -> list:
         for r in mine:
             flags = [f for f in (
                 "you" if me and r.get("ref") == me.get("ref") else "",
-                "" if r.get("registered") else "unregistered",
+                "" if r.get("registered") or r.get("fresh") else "unregistered",
                 "out-of-scope" if me and not r.get("scope") and r.get("scope_reason") != "self" else "",
                 "would-be-held" if r.get("native") == "hold" else "",
-                r.get("state") if r.get("state") != "live" else "") if f]
+                r.get("state") if r.get("state") != "live" and not r.get("fresh") else "") if f]
             if r.get("why"):
                 flags.append(r["why"])
             members.append((r, flags))

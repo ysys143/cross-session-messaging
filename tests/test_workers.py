@@ -387,6 +387,8 @@ class SafetyTest(TempState):
         self.assertEqual(settings["permissions"]["allow"][:5],
                          ["Bash", "Monitor", "Read", "Glob", "Grep"],
                          "reads anywhere, like Codex's workspace-write; writes stay in the folder")
+        self.assertEqual(settings["env"], {"XSM_SANDBOXED": "1"},
+                         "so `xsm send` to a Codex peer says 'use MCP' instead of failing")
         self.assertIn("mcp__xsm__xsm_inbox", settings["permissions"]["allow"],
                       "reading messages must not wait on a person (S10 collab run 5)")
         self.assertNotIn("Write", settings["permissions"]["allow"])

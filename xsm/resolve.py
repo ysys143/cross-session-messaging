@@ -109,6 +109,11 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
 def resume_hint(record: dict) -> str:
     """How a stopped session could take messages again. Resuming keeps the
     session id, so the address and ref come back unchanged."""
+    if record.get("end_reason") == "thread_replaced":
+        return ("  %s@%s [%s] its Codex TUI (pid %s) opened another thread, which has no address "
+                "until its first prompt or /rename; this one reopens with: CODEX_HOME=%s codex "
+                "resume %s" % (record.get("name"), record.get("alias"), record.get("ref"),
+                               record.get("pid"), record.get("home"), record.get("session_id")))
     how = "exited cleanly (%s)" % record.get("end_reason") if record.get("state") == "ended" \
         else "stopped without saying goodbye"
     if record.get("runtime") == "codex":
