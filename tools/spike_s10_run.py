@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""S10 harness: run N Codex sessions as peers on one shared note graph.
+"""S10 harness: live sessions working on one shared note graph.
 
-Peers, not workers. `xsm spawn` would make every session a child of the caller —
-a tree, which is option G in ADR-0012 and outside what S10 measures. So this
-starts each session with `codex exec` and, when a turn ends before time is up,
-resumes the same thread (one identity per slot, as agora's launcher did with one
-account per worker).
+Every session is a real, interactive TUI started by `xsm spawn --background`:
+a window of the detached tmux session xsm-workers, registered with xsm, able to
+receive a message at any time. Never `claude -p` or `codex exec` — those run
+one prompt and are gone, so there would be no session for xsm to connect and
+nothing for this spike to measure (user decision, 2026-09-22; every pilot run
+before this harness was void for that reason, see S10 §6-1).
 
-Every turn states its sandbox. `exec resume` takes no --sandbox flag and falls
-back to the user's config (measured in xsm/workers.py); here that config is
-danger-full-access, so `-c sandbox_mode="workspace-write"` goes on every call.
+The harness owns the lifecycle — it starts the workers, gives each the brief
+the way a person would, and stops them at the deadline — and nothing else. It
+does not assign work and does not nudge a session that has gone quiet: what
+the sessions do with each other is what is measured.
 
-    tools/spike_s10_run.py --condition 2 --minutes 15 --out <dir> [--agents codex:gpt-5.6-luna,claude:haiku,...]
+Each run has its own folder and its own XSM_HOME, so runs never see each
+other. The workers have no parent session (none is registered in a run's
+store); xsm reaps a parentless worker only once its own process is gone, so
+none is stopped mid-run. Put runs inside a folder every Claude and Codex home
+here already trusts, such as .local/s10/ in this repo: a folder-trust screen is
+a question for a person, the harness never answers one, and a worker that
+stops at one fails its slot and says so.
+
+    tools/spike_s10_run.py --condition 2 --minutes 15 --out .local/s10/run1
 
 Conditions (docs/spikes/S10-swarm-duplication.md §3):
   1 isolated: each slot its own folder and XSM_HOME
@@ -23,7 +33,6 @@ import argparse
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -31,22 +40,24 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASK = os.path.join(REPO, "docs", "spikes", "s10", "task")
-EFFORT = "medium"                  # codex only; claude has no equivalent flag
 DEFAULT_AGENTS = "codex:gpt-5.6-luna,claude:haiku,claude:sonnet"
-CLAUDE_TOOLS = "Bash,Read,Write,Edit,Glob,Grep"
+FIRST_PROMPT = "Read BRIEF.md in this folder and do what it says."
+SCREEN_EVERY = 30               # seconds between screen snapshots of each worker
 
 PEERS = ("You are one of several agents working on this problem at the same time, in this "
          "folder, on the same shared record. ")
 CHANNEL = ("\n## Other agents\n\n`./xsm list` shows the other sessions here. `./xsm send <name> "
            "--text ...` messages one; `./xsm post --text ...` writes to this folder's channel "
-           "and `./xsm channel` reads it.\n")
+           "and `./xsm channel` reads it. Messages from other agents arrive in this session "
+           "as they are sent.\n")
 RULE_WIP = ("\n## Before you start an experiment\n\nAdd a `wip` node whose parent is the node "
             "you are about to build on (`--tag wip --text \"<what you will try>\"`). Do not "
             "build on a node that already has a `wip` child from someone else.\n")
 RULE_CHANNEL = ("When you add the `wip` node, also `./xsm post --tag note --text \"taking <id>: "
                 "<what>\"` so the others see it on the channel.\n")
-RESUME = ("Continue the loop in the brief: read the record, pick a parent, one change, "
-          "evaluate, publish. Stop only when ./timeleft prints 0.")
+# spawn refuses inside Orca or herdr; this harness runs its own workers anyway
+# (user decision, 2026-09-22), so it hides their pane markers from xsm.
+FRAMEWORK_VARS = ("ORCA_TERMINAL_HANDLE", "ORCA_PANE_KEY", "HERDR_PANE_ID", "HERDR_ENV")
 
 
 def brief(condition: int) -> str:
@@ -59,65 +70,100 @@ def brief(condition: int) -> str:
                 .replace("{RULES}", rules))
 
 
-def workspace(root: str, deadline: float) -> str:
-    """A fresh folder: task files, the seed graph, and two helper scripts."""
+def _write_timeleft(root: str, deadline: float) -> None:
+    path = os.path.join(root, "timeleft")
+    with open(path, "w") as fh:
+        fh.write("#!/bin/sh\nexec python3 -c 'import time; print(max(0, int(%d - time.time())))'\n"
+                 % deadline)
+    os.chmod(path, 0o755)
+
+
+def workspace(root: str, deadline: float, condition: int) -> str:
+    """A fresh folder: task files, the brief, the seed graph, two helper scripts."""
     os.makedirs(os.path.join(root, "candidates"), exist_ok=True)
     for name in ("eval.py", "corpus.txt", "baseline.py"):
         shutil.copy(os.path.join(TASK, name), root)
+    with open(os.path.join(root, "BRIEF.md"), "w") as fh:
+        fh.write(brief(condition))
     home = os.path.join(root, ".xsm")
     os.makedirs(home, exist_ok=True)
     with open(os.path.join(root, "xsm"), "w") as fh:
         fh.write("#!/bin/sh\nexport XSM_HOME=%s\nexport PYTHONDONTWRITEBYTECODE=1\n"
                  "exec %s \"$@\"\n" % (home, os.path.join(REPO, "bin", "xsm")))
-    with open(os.path.join(root, "timeleft"), "w") as fh:
-        fh.write("#!/bin/sh\nexec python3 -c 'import time; print(max(0, int(%d - time.time())))'\n"
-                 % deadline)
-    for script in ("xsm", "timeleft"):
-        os.chmod(os.path.join(root, script), 0o755)
+    os.chmod(os.path.join(root, "xsm"), 0o755)
+    _write_timeleft(root, deadline)
     subprocess.run([sys.executable, os.path.join(TASK, "seed.py"), os.path.join(root, "notes.md")],
                    check=True, env=dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1"))
     return home
 
 
-def agent_args(runtime: str, model: str, root: str, thread: str | None, prompt: str) -> list:
-    """One headless turn of either runtime. Codex runs in its workspace-write
-    sandbox; `exec resume` takes no --sandbox flag, so the sandbox goes in as
-    config on every turn. Claude has no sandbox: its tools are limited to the
-    file and shell tools the task needs, and the brief confines it to the folder."""
-    if runtime == "claude":
-        args = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
-                "--allowedTools", CLAUDE_TOOLS, "--permission-mode", "acceptEdits"]
-        return args + (["--resume", thread] if thread else []) + [prompt]
-    common = ["--json", "--skip-git-repo-check", "-m", model,
-              "-c", 'model_reasoning_effort="%s"' % EFFORT,
-              "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"']
-    if thread:
-        return ["codex", "exec", "resume"] + common + [thread, prompt]
-    return ["codex", "exec", "-C", root] + common + [prompt]
+def _env(home: str) -> dict:
+    env = {k: v for k, v in os.environ.items()
+           if k not in FRAMEWORK_VARS and not k.startswith(("CLAUDE_CODE_", "CODEX_COMPANION"))}
+    env.pop("CLAUDE_CONFIG_DIR", None)      # the workers use the default homes
+    env.update(XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1")
+    return env
 
 
-def _events(text: str):
-    for line in text.splitlines():
-        try:
-            yield json.loads(line)
-        except ValueError:
-            continue
+def _record(home: str, name: str) -> dict:
+    try:
+        with open(os.path.join(home, "workers", name + ".json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
 
 
-def started(text: str) -> bool:
-    """The turn is under way: codex's turn.started, or claude's system/init."""
-    return any(ev.get("type") == "turn.started" or
-               (ev.get("type") == "system" and ev.get("subtype") == "init")
-               for ev in _events(text))
+def _screen(pane: str) -> str:
+    try:
+        return subprocess.run(["tmux", "capture-pane", "-p", "-t", pane], capture_output=True,
+                              text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
-def watch(root: str, deadline: float, dest: str) -> None:
+def start(runtime: str, model: str, name: str, root: str, home: str, log_dir: str) -> dict:
+    """Spawn one live worker and give it the brief. Returns its record, or
+    {"name", "error"}: a failed start is reported, never replaced with another
+    kind of session."""
+    out = subprocess.run([os.path.join(REPO, "bin", "xsm"), "spawn", runtime, "--background",
+                          "--name", name, "--model", model, "--dir", root, "--wait", "90"],
+                         env=_env(home), cwd=root, capture_output=True, text=True, timeout=150)
+    with open(os.path.join(log_dir, "%s.spawn.log" % name), "w") as fh:
+        fh.write("exit %d\n%s%s" % (out.returncode, out.stdout, out.stderr))
+    rec = _record(home, name)
+    if rec.get("waiting"):
+        return {"name": name, "error": "stopped at a folder-trust screen; that is a person's "
+                                       "question (request %s)" % rec["waiting"]}
+    if out.returncode != 0 or not rec.get("ref"):
+        lines = (out.stderr or out.stdout).strip().splitlines()
+        return {"name": name, "error": lines[-1] if lines else "no output"}
+    # What a person would type as the first prompt. One line: a newline typed
+    # into the TUI would submit what came before it.
+    subprocess.run(["tmux", "send-keys", "-t", rec["pane"], "-l", FIRST_PROMPT], timeout=5)
+    time.sleep(0.5)
+    subprocess.run(["tmux", "send-keys", "-t", rec["pane"], "Enter"], timeout=5)
+    rec["briefed"] = time.time()
+    return rec
+
+
+def watch_screens(workers_: list, deadline: float, log_dir: str) -> None:
+    """A dated snapshot of every worker's screen: when a session sat idle, and
+    what it showed when something went wrong, without anyone attaching."""
+    while time.time() < deadline + 5:
+        for w in workers_:
+            with open(os.path.join(log_dir, "%s.screens.log" % w["name"]), "a") as fh:
+                screen = [l for l in _screen(w["pane"]).splitlines() if l.strip()]
+                fh.write("===== %s\n%s\n" % (time.strftime("%H:%M:%S"), "\n".join(screen)))
+        time.sleep(SCREEN_EVERY)
+
+
+def watch_candidates(root: str, deadline: float, dest: str) -> None:
     """Keep every version of every candidate file, outside the agents' folder.
 
-    Sessions share one candidates/ folder and do pick the same filename (the
-    pilot saw it within minutes), so the file a node names may by now hold
-    someone else's code. The duplicate count compares code changes, and needs
-    the version that existed when each node was published.
+    Sessions share one candidates/ folder and do pick the same filename, so
+    the file a node names may by now hold someone else's code. The duplicate
+    count compares code changes, and needs the version that existed when each
+    node was published.
     """
     os.makedirs(dest, exist_ok=True)
     seen = set()
@@ -145,9 +191,7 @@ def watch(root: str, deadline: float, dest: str) -> None:
 
 
 def exporter(home: str, endpoint: str) -> subprocess.Popen:
-    """Ship this run's xsm telemetry to an OTLP collector while it runs, so a
-    person can watch the sessions' commands — refusals included — as they
-    happen instead of reading JSONL afterwards."""
+    """Ship this run's xsm telemetry to an OTLP collector while it runs."""
     return subprocess.Popen(
         [os.path.join(REPO, "bin", "xsm"), "otlp-export", "--follow", "--interval", "5",
          "--endpoint", endpoint],
@@ -155,116 +199,9 @@ def exporter(home: str, endpoint: str) -> subprocess.Popen:
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _thread_of(stdout: str) -> str | None:
-    for ev in _events(stdout):
-        if ev.get("type") == "thread.started":
-            return ev.get("thread_id")
-        if ev.get("type") == "system" and ev.get("subtype") == "init":
-            return ev.get("session_id")
-    return None
-
-
-STARTUP_WATCHDOG = int(os.environ.get("S10_STARTUP_WATCHDOG", "60"))   # seconds to turn.started
-START_RETRIES = 2
-
-
-def _sample_group(pgid: int, path: str, why: str) -> None:
-    """A stack sample of every process in the turn's group, taken while it is
-    stuck. The one start-up hang seen so far (2026-09-22) left nothing behind:
-    its stderr was discarded and the process was killed before anyone looked."""
-    pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
-    with open(path, "a") as fh:
-        fh.write("===== %s at %s; group %s: %s\n" % (why, time.strftime("%H:%M:%S"), pgid, pids))
-        for pid in pids:
-            cmd = subprocess.run(["ps", "-o", "command=", "-p", pid],
-                                 capture_output=True, text=True).stdout.strip()
-            fh.write("\n----- pid %s: %s\n" % (pid, cmd[:300]))
-            try:
-                fh.write(subprocess.run(["sample", pid, "3"], capture_output=True, text=True,
-                                        timeout=30).stdout)
-            except (OSError, subprocess.SubprocessError) as err:
-                fh.write("sample failed: %s\n" % err)
-
-
-def _stop_group(proc: subprocess.Popen) -> None:
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            return
-        try:
-            proc.wait(timeout=10)
-            return
-        except subprocess.TimeoutExpired:
-            continue
-
-
-def _turn(argv: list, root: str, env: dict, deadline: float, out_path: str, err,
-          hang_path: str) -> tuple:
-    """One codex turn, watched. Returns (outcome, exit code): outcome is done,
-    deadline (the agent kept working until time ran out: the expected end), or
-    hung (no turn.started within STARTUP_WATCHDOG — sampled, then stopped)."""
-    start = time.time()
-    with open(out_path, "w") as out:
-        proc = subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=out,
-                                stderr=err, start_new_session=True)
-        began = False
-        while proc.poll() is None:
-            time.sleep(2)
-            if not began:
-                with open(out_path) as fh:
-                    began = started(fh.read())
-                if not began and time.time() - start > STARTUP_WATCHDOG:
-                    _sample_group(proc.pid, hang_path, "no turn.started after %ds" % STARTUP_WATCHDOG)
-                    _stop_group(proc)
-                    return "hung", None
-            if time.time() > deadline:
-                _stop_group(proc)
-                return "deadline", None
-    return "done", proc.returncode
-
-
-def slot(n: int, runtime: str, model: str, root: str, home: str, condition: int,
-         deadline: float, log_dir: str) -> None:
-    env = dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1", RUST_LOG="info")
-    for k in [k for k in env if k.startswith(("CLAUDE_", "ORCA_", "CODEX_COMPANION"))]:
-        del env[k]                          # this harness runs inside a Claude session
-    thread, turns, hangs = None, 0, 0
-    hang_path = os.path.join(log_dir, "slot%d.hang.txt" % n)
-    with open(os.path.join(log_dir, "slot%d.jsonl" % n), "a") as log, \
-            open(os.path.join(log_dir, "slot%d.stderr.log" % n), "a") as err:
-        while time.time() < deadline - 20:
-            prompt = brief(condition) if thread is None else RESUME
-            turns += 1
-            log.write(json.dumps({"harness": "turn", "n": turns, "t": time.time(),
-                                  "resume": bool(thread)}) + "\n")
-            log.flush()
-            err.write("===== turn %d %s\n" % (turns, time.strftime("%H:%M:%S")))
-            err.flush()
-            out_path = os.path.join(log_dir, "slot%d.turn.jsonl" % n)
-            outcome, code = _turn(agent_args(runtime, model, root, thread, prompt), root, env,
-                                  deadline,
-                                  out_path, err, hang_path)
-            with open(out_path) as fh:
-                text = fh.read()
-            os.remove(out_path)
-            log.write(text)
-            thread = thread or _thread_of(text)
-            log.write(json.dumps({"harness": outcome, "code": code, "t": time.time()}) + "\n")
-            log.flush()
-            if outcome == "hung":
-                hangs += 1
-                if hangs > START_RETRIES:
-                    break
-                continue                    # a fresh start, or the same thread resumed
-            if outcome == "deadline":
-                break
-            if not thread:
-                log.write(json.dumps({"harness": "no-thread", "code": code}) + "\n")
-                break
-    with open(os.path.join(log_dir, "slot%d.done" % n), "w") as fh:
-        json.dump({"runtime": runtime, "model": model, "thread": thread, "turns": turns,
-                   "hangs": hangs, "ended": time.time()}, fh)
+def stop(name: str, home: str) -> None:
+    subprocess.run([os.path.join(REPO, "bin", "xsm"), "stop", name], env=_env(home),
+                   capture_output=True, timeout=60)
 
 
 def main() -> int:
@@ -273,51 +210,70 @@ def main() -> int:
     parser.add_argument("--condition", type=int, choices=[1, 2, 3, 4], required=True)
     parser.add_argument("--agents", default=DEFAULT_AGENTS,
                         help="one runtime:model per slot, comma-separated (default: %(default)s)")
-    parser.add_argument("--minutes", type=float, default=30)
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--minutes", type=float, default=15)
+    parser.add_argument("--out", required=True, help="a new folder, inside a trusted one")
     parser.add_argument("--otlp", help="OTLP/HTTP endpoint to ship xsm telemetry to while running")
     args = parser.parse_args()
+    if not shutil.which("tmux"):
+        print("tmux is required: the workers are real sessions in tmux", file=sys.stderr)
+        return 2
     agents = [a.split(":", 1) for a in args.agents.split(",")]
-    args.slots = len(agents)
-
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=False)
-    deadline = time.time() + args.minutes * 60
-    roots = ([os.path.join(out, "slot%d" % i) for i in range(args.slots)] if args.condition == 1
-             else [os.path.join(out, "shared")] * args.slots)
-    homes = {}
-    for root in dict.fromkeys(roots):
-        homes[root] = workspace(root, deadline)
-    with open(os.path.join(out, "run.json"), "w") as fh:
-        json.dump({"condition": args.condition, "slots": args.slots, "minutes": args.minutes,
-                   "agents": args.agents, "effort": EFFORT, "started": time.time(),
-                   "deadline": deadline, "roots": sorted(set(roots))}, fh, indent=1)
-    watchers = [threading.Thread(target=watch, daemon=True,
-                                 args=(root, deadline,
-                                       os.path.join(out, "history", os.path.basename(root))))
-                for root in dict.fromkeys(roots)]
-    for w in watchers:
-        w.start()
-    shipping = [exporter(home, args.otlp) for home in homes.values()] if args.otlp else []
-    threads = [threading.Thread(target=slot, args=(i, agents[i][0], agents[i][1], roots[i],
-                                                   homes[roots[i]], args.condition, deadline, out))
-               for i in range(args.slots)]
+    run = os.path.basename(out)
+    roots = ([os.path.join(out, "slot%d" % i) for i in range(len(agents))] if args.condition == 1
+             else [os.path.join(out, "shared")] * len(agents))
+    # Until everyone is up, ./timeleft shows the boot allowance; the real
+    # clock is set once the last worker has its brief.
+    homes = {root: workspace(root, time.time() + 900, args.condition)
+             for root in dict.fromkeys(roots)}
+
+    started = [{}] * len(agents)
+
+    def launch(i):
+        runtime, model = agents[i]
+        name = "%s-%s-%d" % (run, model.split("-")[-1], i)
+        started[i] = start(runtime, model, name, roots[i], homes[roots[i]], out)
+        started[i]["root"] = roots[i]
+
+    threads = [threading.Thread(target=launch, args=(i,)) for i in range(len(agents))]
     for t in threads:
         t.start()
-        time.sleep(2)                       # distinct start times, like staggered launches
     for t in threads:
         t.join()
-    for w in watchers:
-        w.join(timeout=40)
-    for proc, home in zip(shipping, homes.values()):
+    deadline = time.time() + args.minutes * 60
+    for root in homes:
+        _write_timeleft(root, deadline)
+    ready = [w for w in started if not w.get("error")]
+    with open(os.path.join(out, "run.json"), "w") as fh:
+        json.dump({"condition": args.condition, "agents": args.agents, "minutes": args.minutes,
+                   "started": time.time(), "deadline": deadline, "roots": sorted(homes),
+                   "workers": started}, fh, indent=1)
+    for w in started:
+        if w.get("error"):
+            print("slot %s failed to start: %s" % (w["name"], w["error"]), file=sys.stderr)
+    if not ready:
+        return 1
+
+    for root in homes:
+        threading.Thread(target=watch_candidates, daemon=True,
+                         args=(root, deadline, os.path.join(out, "history",
+                                                            os.path.basename(root)))).start()
+    threading.Thread(target=watch_screens, daemon=True, args=(ready, deadline, out)).start()
+    shipping = [(exporter(home, args.otlp), home) for home in homes.values()] if args.otlp else []
+
+    while time.time() < deadline:
+        time.sleep(5)
+    for w in ready:
+        stop(w["name"], homes[w["root"]])
+    for proc, home in shipping:
         proc.terminate()
         proc.wait(timeout=10)
         subprocess.run([os.path.join(REPO, "bin", "xsm"), "otlp-export", "--once",
-                        "--endpoint", args.otlp],
-                       env=dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1"),
+                        "--endpoint", args.otlp], env=dict(os.environ, XSM_HOME=home),
                        capture_output=True, timeout=60)
     print(out)
-    return 0
+    return 0 if len(ready) == len(agents) else 1
 
 
 if __name__ == "__main__":
