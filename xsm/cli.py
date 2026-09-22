@@ -351,6 +351,48 @@ def cmd_ledger(args) -> int:
     return OK
 
 
+def cmd_metrics(args) -> int:
+    from . import telemetry
+    report = telemetry.summarize()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=1))
+        return OK
+    if telemetry.DISABLED:
+        print("telemetry is off (XSM_NO_TELEMETRY is set)")
+    if not report["span_count"] and not report["point_count"]:
+        print("nothing recorded yet")
+        return OK
+    print("%d span(s)" % report["span_count"])
+    for name, row in sorted(report["spans"].items()):
+        print("  %-26s %5d call(s)  %4d error(s)  avg %7.1fms  p95 %7.1fms" % (
+            name, row["count"], row["errors"], row["avg_ms"], row["p95_ms"]))
+    for name, row in sorted(report["counters"].items()):
+        print("  %-26s %5g total over %d point(s)" % (name, row["total"], row["count"]))
+    for name, row in sorted(report["histograms"].items()):
+        print("  %-26s %5d sample(s)  avg %7.1fms  p95 %7.1fms" % (
+            name, row["count"], row["avg_ms"], row["p95_ms"]))
+    return OK
+
+
+def cmd_otlp_export(args) -> int:
+    from . import otlp_export
+    url = otlp_export.endpoint(args.endpoint)
+    if args.follow:
+        return otlp_export.run(url, interval=args.interval)
+    result = otlp_export.export_once(url)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+        return OK
+    if not result["spans_sent"] and not result["points_sent"]:
+        failed = False in (result["traces_ok"], result["metrics_ok"])
+        print("%s -> %s" % ("could not reach the collector" if failed else "nothing new to send",
+                            url))
+        return OK
+    print("sent %d span(s) and %d metric point(s) -> %s" % (
+        result["spans_sent"], result["points_sent"], url))
+    return OK
+
+
 def cmd_held(args) -> int:
     entries = sorted(glob.glob(paths.path(paths.HELD, "*.json")))
     if args.action == "show":
@@ -984,6 +1026,21 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("--json", action="store_true")
     lg.add_argument("--compact", action="store_true")
     lg.set_defaults(func=cmd_ledger)
+
+    mt = sub.add_parser("metrics", help="what xsm's own telemetry has recorded here")
+    mt.add_argument("--json", action="store_true")
+    mt.set_defaults(func=cmd_metrics)
+
+    ox = sub.add_parser("otlp-export", help="send that telemetry to an OTLP collector "
+                                            "(OTEL_EXPORTER_OTLP_ENDPOINT)")
+    ox.add_argument("--endpoint", help="OTLP/HTTP base url; default http://localhost:4318")
+    mode = ox.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="send what is pending and exit (default)")
+    mode.add_argument("--follow", action="store_true",
+                      help="keep sending every --interval seconds until interrupted")
+    ox.add_argument("--interval", type=float, default=5.0)
+    ox.add_argument("--json", action="store_true")
+    ox.set_defaults(func=cmd_otlp_export)
 
     hd = sub.add_parser("held", help="messages this machine refused and kept")
     hd.add_argument("action", nargs="?", default="list", choices=["list", "show", "drop"])

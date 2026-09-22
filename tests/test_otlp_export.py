@@ -176,6 +176,57 @@ class ExportTest(TempState):
         self.assertEqual(self.collector.received, [])
 
 
+@needs_telemetry
+class CommandTest(TempState):
+    def _run(self, argv):
+        import contextlib
+        import io
+        from xsm import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(argv)
+        return code, out.getvalue()
+
+    def test_metrics_says_so_when_there_is_nothing(self):
+        code, out = self._run(["metrics"])
+        self.assertEqual(code, 0)
+        self.assertIn("nothing recorded yet", out)
+
+    def test_metrics_prints_and_serialises_what_was_recorded(self):
+        from xsm import telemetry
+        with telemetry.span("xsm.send"):
+            pass
+        telemetry.counter("xsm.send.count", 1, {"xsm.result.status": "delivered"})
+        code, text = self._run(["metrics"])
+        self.assertEqual(code, 0)
+        self.assertIn("xsm.send", text)
+        self.assertIn("1 call(s)", text)
+        code, raw = self._run(["metrics", "--json"])
+        report = json.loads(raw)
+        self.assertEqual(report["span_count"], 1)
+        self.assertEqual(report["counters"]["xsm.send.count"]["total"], 1)
+
+    def test_otlp_export_reports_what_it_sent(self):
+        from xsm import telemetry
+        collector = Collector()
+        self.addCleanup(collector.close)
+        with telemetry.span("xsm.send"):
+            pass
+        code, text = self._run(["otlp-export", "--endpoint", collector.url])
+        self.assertEqual(code, 0)
+        self.assertIn("sent 1 span(s)", text)
+        code, raw = self._run(["otlp-export", "--endpoint", collector.url, "--json"])
+        self.assertEqual(json.loads(raw)["spans_sent"], 0, "the cursor already moved")
+
+    def test_otlp_export_says_when_the_collector_is_unreachable(self):
+        from xsm import telemetry
+        with telemetry.span("xsm.send"):
+            pass
+        code, text = self._run(["otlp-export", "--endpoint", "http://127.0.0.1:1"])
+        self.assertEqual(code, 0, "an unreachable collector is not a command failure")
+        self.assertIn("could not reach the collector", text)
+
+
 class EndpointTest(TempState):
     def test_the_standard_variable_is_honoured(self):
         from xsm import otlp_export
