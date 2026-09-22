@@ -658,6 +658,40 @@ class CommandInstallTest(TempState):
         install.remove_commands(home)
         self.assertTrue(os.path.exists(target))
 
+    def test_codex_gets_each_command_as_a_skill_it_never_calls_itself(self):
+        """Codex has no slash commands; `$xsm` worked and `$xsm-list` did not
+        exist (2026-09-22). Each command becomes a skill of the same name."""
+        from xsm import install
+        home = os.path.join(self.tmp, "codex-cmd")
+        written = install.install_codex_commands(home)
+        self.assertEqual(sorted(os.path.basename(w) for w in written),
+                         sorted(os.path.basename(f)[:-3] for f in install.command_files()))
+        skill = open(os.path.join(home, "skills", "xsm-list", "SKILL.md")).read()
+        self.assertIn("name: xsm-list\n", skill)
+        self.assertIn(install.launcher() + " list --compact", skill,
+                      "Codex does not run !`cmd`; the model is told to")
+        self.assertNotIn("!`", skill)
+        self.assertNotIn("{{XSM}}", skill)
+        policy = open(os.path.join(home, "skills", "xsm-list", "agents", "openai.yaml")).read()
+        self.assertIn("allow_implicit_invocation: false", policy)
+        send = open(os.path.join(home, "skills", "xsm-send", "SKILL.md")).read()
+        self.assertIn("$xsm-send", send)
+        self.assertNotIn("$ARGUMENTS", send)
+        self.assertIn("xsm_send", send, "the sandbox route is spelled out")
+        self.assertEqual(install.remove_codex_commands(home), len(written))
+        self.assertFalse(os.path.exists(os.path.join(home, "skills", "xsm-list")))
+
+    def test_a_foreign_codex_skill_of_the_same_name_survives(self):
+        from xsm import install
+        home = os.path.join(self.tmp, "codex-cmd")
+        mine = os.path.join(home, "skills", "xsm-list")
+        os.makedirs(mine)
+        open(os.path.join(mine, "SKILL.md"), "w").write("---\nname: xsm-list\n---\nmine\n")
+        install.install_codex_commands(home)
+        install.remove_codex_commands(home)
+        self.assertEqual(open(os.path.join(mine, "SKILL.md")).read(),
+                         "---\nname: xsm-list\n---\nmine\n")
+
     def test_a_foreign_skill_directory_is_left_alone(self):
         from xsm import install
         home = self._home()

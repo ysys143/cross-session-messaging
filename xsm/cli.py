@@ -511,6 +511,9 @@ def cmd_install(args) -> int:
                                         "nested-link": "a link sits inside the existing directory",
                                         "foreign": "something else is at skills/xsm; left alone"
                                         }.get(state, state))
+                written = install.install_codex_commands(home)
+                print("  commands (as skills): %s" % (", ".join(
+                    "$" + os.path.basename(w) for w in written) if written else "none written"))
             print("  Codex asks you to trust hooks once, at the next session start. "
                   "Until you do, the hook does not run. Codex has no SessionEnd, so a "
                   "stopped Codex session always reads as stale.")
@@ -526,6 +529,10 @@ def cmd_uninstall(args) -> int:
             print("%s: removed the MCP server" % home)
         if runtime == "codex" and install.remove_skill(home):
             print("%s: unlinked the skill" % home)
+        if runtime == "codex":
+            gone = install.remove_codex_commands(home)
+            if gone:
+                print("%s: removed %d command skill(s)" % (home, gone))
         if runtime == "claude":
             gone = install.remove_commands(home)
             if gone:

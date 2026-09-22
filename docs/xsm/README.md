@@ -35,6 +35,11 @@ python3 -m xsm uninstall --claude-home ~/.claude-3
 
 설치가 홈에 명령 파일을 넣는다. 세션에서 그대로 쓴다.
 
+Codex에는 슬래시 명령이 없어서, 설치는 같은 명령을 이름이 같은 스킬(`skills/xsm-list/` 등)로 넣는다.
+Codex에서는 `/xsm-list` 대신 `$xsm-list`로 부른다. Claude의 `!`명령`` 선실행이 Codex에는 없으므로
+스킬 본문은 모델에게 명령을 실행해 출력을 그대로 옮기라고 지시한다. 모델이 스스로 부르지 않도록
+`agents/openai.yaml`에 `allow_implicit_invocation: false`를 둔다.
+
 | 명령 | 하는 일 |
 |---|---|
 | `/xsm-list` | 지금 메시지를 보낼 수 있는 세션 목록 |

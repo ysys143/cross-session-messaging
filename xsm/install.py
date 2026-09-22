@@ -165,6 +165,94 @@ def install_commands(home: str) -> list:
     return written
 
 
+def _frontmatter(text: str) -> tuple:
+    """(fields, body) of a command file's --- block; values stay strings."""
+    fields, body = {}, text
+    if text.startswith("---\n"):
+        head, _, body = text[4:].partition("\n---\n")
+        for line in head.splitlines():
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+    return fields, body
+
+
+def codex_command_skill(source: str) -> tuple:
+    """(SKILL.md, agents/openai.yaml) for one slash command, in Codex's terms.
+
+    Codex has no slash commands of its own; a user types `$name` and gets a
+    skill (measured 2026-09-22: `$xsm` worked, `$xsm-list` did not exist). Two
+    things do not carry over. Claude runs `!`cmd`` before the model sees the
+    prompt; Codex does not, so the command is spelled out for the model to run.
+    And `disable-model-invocation` is `policy.allow_implicit_invocation: false`
+    in Codex, so the model never reaches for these on its own."""
+    name = os.path.basename(source)[:-3]
+    fields, body = _frontmatter(open(source, encoding="utf-8").read())
+    body = body.replace(FILE_MARKER, "").strip()
+    xsm = launcher()
+    shell = [line[2:-1] for line in body.splitlines()
+             if line.startswith("!`") and line.endswith("`")]
+    if shell:
+        steps = "\n".join("    %s" % c.replace("{{XSM}}", xsm) for c in shell)
+        text = ("This is a display command. There is nothing to decide.\n\n"
+                "Run %s, exactly as written:\n\n%s\n\n"
+                "Then reply with %s, copied exactly, inside one code block%s. Nothing before "
+                "it, nothing after it. Do not translate, reword, summarise or explain it, and "
+                "run nothing else.\n" % (
+                    "this shell command" if len(shell) == 1 else "these shell commands in order",
+                    steps, "its output" if len(shell) == 1 else "their outputs",
+                    "" if len(shell) == 1 else ", separated by a line `---`"))
+    else:
+        text = body.replace("{{XSM}}", xsm).replace("Bash command", "shell command")
+        text = text.replace("/" + name, "$" + name)
+        text = text.replace("Arguments: $ARGUMENTS",
+                            "Arguments: the words after `$%s` in the user's message." % name)
+        if "send <TARGET>" in text:
+            text += ("\nIf the shell command fails with `sandbox-blocked`, call the MCP tool "
+                     "`xsm_send` with the same target and text instead, and reply with its "
+                     "result the same way.\n")
+    description = fields.get("description", name)
+    if fields.get("argument-hint"):
+        description += " (usage: $%s %s)" % (name, fields["argument-hint"])
+    skill = "---\nname: %s\ndescription: %s\n---\n\n%s\n%s\n" % (
+        name, description, text.rstrip(), FILE_MARKER)
+    yaml = ("interface:\n  display_name: \"%s\"\n  short_description: \"%s\"\n"
+            "policy:\n  allow_implicit_invocation: false\n" % (
+                name, fields.get("description", name).replace('"', "'")))
+    return skill, yaml
+
+
+def install_codex_commands(home: str) -> list:
+    """The slash commands as skills in a Codex home, one directory each.
+    A directory that is not ours (no marker in its SKILL.md) is left alone."""
+    written = []
+    for source in command_files():
+        name = os.path.basename(source)[:-3]
+        target = os.path.join(home, "skills", name)
+        existing = _read_text(os.path.join(target, "SKILL.md"))
+        if os.path.islink(target) or (existing is not None and FILE_MARKER not in existing) \
+                or (existing is None and os.path.exists(target)):
+            continue
+        skill, yaml = codex_command_skill(source)
+        os.makedirs(os.path.join(target, "agents"), exist_ok=True)
+        for rel, text in (("SKILL.md", skill), (os.path.join("agents", "openai.yaml"), yaml)):
+            if _read_text(os.path.join(target, rel)) != text:
+                with open(os.path.join(target, rel), "w", encoding="utf-8") as fh:
+                    fh.write(text)
+        written.append(target)
+    return written
+
+
+def remove_codex_commands(home: str) -> int:
+    removed = 0
+    for source in command_files():
+        target = os.path.join(home, "skills", os.path.basename(source)[:-3])
+        body = _read_text(os.path.join(target, "SKILL.md"))
+        if body is not None and FILE_MARKER in body and not os.path.islink(target):
+            shutil.rmtree(target, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def skill_state(home: str) -> tuple:
     """(state, detail) for the skill in this home.
 
