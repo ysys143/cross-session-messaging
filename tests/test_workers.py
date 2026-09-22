@@ -332,11 +332,32 @@ class SafetyTest(TempState):
         self.assertEqual(started, [["reap", "--after-pid", str(os.getpid())]],
                          "the parent is still alive during its own SessionEnd")
 
-    def test_both_claude_modes_start_in_default_permission_mode(self):
+    def test_claude_workers_never_start_in_the_users_own_mode(self):
         from xsm import workers
+        modes = {}
         for mode in ("pane", "background"):
             argv = workers._claude_argv({"name": "w", "mode": mode}, "/s.json")
-            self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+            modes[mode] = argv[argv.index("--permission-mode") + 1]
+        self.assertEqual(modes, {"pane": "default", "background": "acceptEdits"},
+                         "never the user's own mode; a background worker edits its folder unasked")
+
+    def test_a_background_claude_worker_is_sandboxed_like_codex(self):
+        from xsm import paths, workers
+        w = {"name": "sb", "mode": "background", "approval_timeout": 5}
+        os.makedirs(os.path.join(self.tmp, "workers", "sb"))
+        settings = json.load(open(workers._claude_worker_settings(w)))
+        self.assertEqual(settings["sandbox"]["enabled"], True)
+        self.assertTrue(settings["sandbox"]["autoAllowBashIfSandboxed"])
+        self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
+        self.assertEqual(settings["sandbox"]["filesystem"]["allowWrite"], [paths.HOME],
+                         "xsm stays sandboxed; its store is the one place it may write outside")
+        self.assertEqual(settings["permissions"]["allow"], ["Bash"])
+        self.assertIn(workers.CLAUDE_SOCKETS, settings["sandbox"]["network"]["allowUnixSockets"],
+                      "reporting back goes through a peer's inbox socket")
+        self.assertIn("PermissionRequest", settings["hooks"], "past the sandbox, a person decides")
+        pane = {"name": "pn", "mode": "pane", "approval_timeout": 5}
+        os.makedirs(os.path.join(self.tmp, "workers", "pn"))
+        self.assertNotIn("sandbox", json.load(open(workers._claude_worker_settings(pane))))
 
 
 class GrantTest(TempState):
@@ -558,6 +579,26 @@ class DangerousFlagsTest(TempState):
             with self.assertRaises(workers.WorkerError):
                 workers._wait_for_registration(w, 0.2)
         self.assertEqual(typed, ["/rename cx"], "typed once, after the trust screen was gone")
+
+    def test_two_background_spawns_at_once_both_get_a_window(self):
+        """The loser of the race to create xsm-workers opens a window in it."""
+        from unittest import mock
+        from xsm import workers
+        seen = []
+        def run(argv, **kw):
+            seen.append(argv)
+            if argv[1] == "has-session":
+                return mock.Mock(returncode=1)
+            if argv[1] == "new-session":
+                return mock.Mock(returncode=1, stdout="", stderr="duplicate session: xsm-workers")
+            return mock.Mock(returncode=0, stdout="%5 4242\n", stderr="")
+        w = {"name": "r", "runtime": "claude", "home": self.tmp, "cwd": self.tmp,
+             "mode": "background", "model": "m", "approval_timeout": 5}
+        os.makedirs(os.path.join(self.tmp, "workers", "r"), exist_ok=True)
+        with mock.patch.object(workers.subprocess, "run", run):
+            workers._start_in_tmux(w, None)
+        self.assertEqual([a[1] for a in seen if a[0] == "tmux"][-2:], ["new-session", "new-window"])
+        self.assertEqual(w["pane"], "%5")
 
     def test_trust_keys_are_the_measured_ones(self):
         """Claude's cursor starts on "No, exit": a bare Enter there refuses."""

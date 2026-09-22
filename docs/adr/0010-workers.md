@@ -87,9 +87,14 @@ xsm의 대상이 아니다.
   인박스 소켓, `codex queue`)로 받는다. `xsm attach <워커>`가 그 창으로 데려간다.
 - 작업 상황은 statusline에 워커마다 이름과 상태(`bg`, `gone`, 승인 대기 수)로 보인다. 폴더 신뢰
   질문도 승인 대기 수에 들어간다.
-- 백그라운드 Claude 워커의 승인은 기존 `PermissionRequest` 중계를 그대로 쓴다. 백그라운드 Codex
-  워커는 중계할 훅 이벤트가 없어 `-s workspace-write -a never`로 띄운다. 샌드박스 안에서만 일하고
-  묻지 않는다.
+- 백그라운드 워커는 **작업 폴더 샌드박스 안에서는 묻지 않고, 그 밖은 사람에게 묻는다**(Claude에도
+  같은 규칙을 적용, 사용자 결정 2026-09-22). Codex는 `-s workspace-write -a never`. Claude는
+  `--permission-mode acceptEdits`와 워커 전용 설정의 `sandbox`(모든 셸 명령을 OS 샌드박스 안에서
+  묻지 않고 실행, 샌드박스 밖 실행 금지)이고, 그 밖의 요청은 `PermissionRequest` 중계로 사람에게 간다.
+  샌드박스가 열어두는 것은 보고에 필요한 것뿐이다: xsm 저장소 쓰기, Claude 인박스 소켓(`/tmp/cc-socks`),
+  Codex 홈의 대기열 DB 파일. 설정 파일은 닫혀 있어 워커가 `xsm install` 같은 명령으로 사용자 설정을
+  고칠 수 없다. 실측: 이 규칙 전에는 `./timeleft` 하나에도 승인 창이 떠서 멈췄고, 소켓을 열기 전에는
+  워커의 `xsm send`가 "sandboxed session cannot open the inbox socket"으로 실패했다.
 - **백그라운드 워커의 폴더 신뢰 확인은 사람에게 온다. 사람이 tmux 화면으로 가지 않는다**(사용자 결정,
   2026-09-22: "`tmux attach -t xsm-workers`로 확인하라 — 절대 이 방식에 만족할 수 없음"). spawn은 등록을
   기다리는 동안 창 화면을 읽고, 신뢰 화면이면 권한 요청과 같은 승인 기록(`tool: folder-trust`)을 만든 뒤

@@ -54,6 +54,7 @@ APPROVALS = "approvals"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 APPROVAL_TIMEOUT = 600          # seconds a background worker waits for a person
 BACKGROUND_SESSION = "xsm-workers"
+CLAUDE_SOCKETS = "/tmp/cc-socks"    # where every Claude session opens its inbox socket
 
 # A runtime's "do you trust this folder" screen, and the keys that answer it
 # (measured 2026-09-22 in tmux: Claude's cursor starts on "No, exit", Codex's
@@ -246,6 +247,31 @@ def _claude_worker_settings(worker: dict) -> str:
     so a background worker's prompts reach a person through xsm."""
     settings = {"crossSessionInbound": "accept"}
     if worker["mode"] == "background" and not worker.get("full_access"):
+        # The rule a background Codex worker runs under, for Claude: shell
+        # commands in the OS sandbox (no writes outside the folder) run without
+        # asking, and so do edits inside the folder (--permission-mode
+        # acceptEdits). Anything past that still comes to a person through the
+        # hook below (user decision, 2026-09-22; measured before it: every
+        # `./timeleft` waited for an answer nobody was there to give). Every
+        # shell command is allowed because every one runs sandboxed — Claude
+        # asks even inside the sandbox about a command with `$var` in it — and
+        # xsm too stays inside, with its store the one writable place outside
+        # the folder, so a worker cannot run `xsm install` against the user's
+        # settings.
+        # Sending is the one thing the sandbox must let through: a Claude
+        # peer's inbox socket, and a Codex peer's queue database — only that
+        # file, not the Codex home, whose config the sandbox keeps shut.
+        # Measured without these: `xsm send` from the worker failed with
+        # "a sandboxed session cannot open the inbox socket".
+        queues = [os.path.join(h["path"], "queue_1.sqlite" + suffix)
+                  for h in config.homes() if h.get("runtime") == "codex"
+                  for suffix in ("", "-wal", "-shm")]
+        settings["sandbox"] = {"enabled": True, "autoAllowBashIfSandboxed": True,
+                               "allowUnsandboxedCommands": False,
+                               "filesystem": {"allowWrite": [paths.HOME] + queues},
+                               "network": {"allowUnixSockets": [CLAUDE_SOCKETS,
+                                                                os.path.realpath(CLAUDE_SOCKETS)]}}
+        settings["permissions"] = {"allow": ["Bash"]}
         settings["hooks"] = {"PermissionRequest": [{"hooks": [{
             "type": "command", "command": _hook_command(),
             "timeout": int(worker["approval_timeout"]) + 30}]}]}
@@ -285,10 +311,11 @@ def _claude_argv(worker: dict, settings: str) -> list:
         argv += ["--model", worker["model"]]
     if worker.get("effort"):
         argv += ["--effort", worker["effort"]]
-    # Default mode in both: a pane worker asks its person in the pane, a
-    # background one asks through xsm, whatever mode the user's config starts
-    # sessions in (the same rule as Codex's explicit sandbox and approvals).
-    argv += ["--permission-mode", "bypassPermissions" if worker.get("full_access") else "default"]
+    # Never the user's own mode: a pane worker asks its person in the pane
+    # (default); a background one works unasked inside its folder and sandbox
+    # and asks through xsm past that (acceptEdits + the sandbox settings).
+    argv += ["--permission-mode", "bypassPermissions" if worker.get("full_access") else
+             "acceptEdits" if worker["mode"] == "background" else "default"]
     return argv
 
 
@@ -481,6 +508,12 @@ def _start_in_tmux(worker: dict, pane: str | None) -> None:
         tmux = ["tmux", "new-session", "-d", "-s", BACKGROUND_SESSION, "-n", worker["name"],
                 "-x", "200", "-y", "50"] + fmt + [command]
     out = subprocess.run(tmux, capture_output=True, text=True, timeout=10)
+    if out.returncode != 0 and "duplicate session" in out.stderr:
+        # Another spawn created the session between our check and ours
+        # (measured: three background spawns at once, two lost this race).
+        tmux = ["tmux", "new-window", "-d", "-t", BACKGROUND_SESSION, "-n", worker["name"]] + \
+            fmt + [command]
+        out = subprocess.run(tmux, capture_output=True, text=True, timeout=10)
     if out.returncode != 0:
         raise WorkerError("tmux could not open the worker's %s: %s" % (
             "pane" if pane else "window", out.stderr.strip()))

@@ -155,8 +155,9 @@ xsm stop <worker>           # stop it and remove its records
   reports a step it could not do for lack of permission, get the permission
   (`xsm_approve` when it asks again, `xsm_grant` for full access) and send the
   step back; do not accept "no permission" as the end of the task.
-- A background Claude worker's permission prompts go to your user; a
-  background Codex worker runs sandboxed to its folder and does not ask.
+- A background worker works unasked inside its folder's sandbox (Codex
+  workspace-write; Claude acceptEdits plus its own OS sandbox). Past that, a
+  Claude worker's request goes to your user; a Codex worker cannot go past it.
 - If a background worker stops at a folder-trust screen, `spawn` returns at
   once saying `waiting: … Call the xsm_approve MCP tool with id …`. Do that
   now: the question goes to your user in a form. Once they answer, the worker
