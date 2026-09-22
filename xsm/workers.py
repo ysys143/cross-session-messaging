@@ -259,6 +259,22 @@ def _check_installed(home: str, runtime: str) -> None:
                           "run: xsm install --%s-home %s" % (home, runtime, home))
 
 
+def _working_codex() -> str:
+    """The first codex on this machine that answers `--version`."""
+    from . import adapters
+    candidates = adapters.codex_bins()
+    for path in candidates:
+        try:
+            ran = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if ran.returncode == 0:
+            return path
+    if candidates:
+        return candidates[0]            # let it fail in the open, with its own words
+    raise WorkerError("codex is not installed on this machine")
+
+
 def _hook_command() -> str:
     return install.hook_command("claude", "PermissionRequest")
 
@@ -558,7 +574,10 @@ def _start_in_tmux(worker: dict, pane: str | None) -> None:
             # the worker "this session is not registered" (measured, S10 run 2
             # under a run-local XSM_HOME).
             "-c", 'mcp_servers.%s.env={XSM_HOME=%s}' % (install.MCP_NAME, json.dumps(paths.HOME))]
-        argv = ["codex"] + _codex_config_args(worker) + (
+        # The codex that runs, not whichever is first on PATH: a broken npm
+        # install shadowed the working one (2026-09-23), and a worker started
+        # from it would die in its pane with nobody watching.
+        argv = [_working_codex()] + _codex_config_args(worker) + (
             ["--dangerously-bypass-approvals-and-sandbox"] if worker.get("full_access")
             else ["-s", "workspace-write"] + asks + reach) + (
             ["--dangerously-bypass-hook-trust"] if worker.get("trust_hooks") else [])

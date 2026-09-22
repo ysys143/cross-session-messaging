@@ -515,7 +515,9 @@ class DangerousFlagsTest(TempState):
                 mock.patch.object(workers.time, "sleep", lambda s: None), \
                 mock.patch.object(workers, "_tmux_type", lambda *a: None):
             workers._start_in_tmux(w, "%1")
-        self.assertEqual(seen[0][:2], ["tmux", "split-window"])
+        launched = next(a for a in seen if a[0] == "tmux")
+        self.assertEqual(launched[:2], ["tmux", "split-window"], "the version check runs first")
+        seen = [launched]
         command = shlex.split(seen[0][-1])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("--dangerously-bypass-hook-trust", command)
@@ -547,7 +549,9 @@ class DangerousFlagsTest(TempState):
             self.assertIn(workers.BACKGROUND_SESSION, launch)
             command = shlex.split(launch[-1])
             self.assertNotIn("-p", command)
-            self.assertNotIn("exec", command[command.index(runtime):])
+            # The runtime is an absolute path now: xsm picks a codex that runs.
+            at = next(i for i, word in enumerate(command) if os.path.basename(word) == runtime)
+            self.assertNotIn("exec", command[at:])
             if runtime == "codex":
                 self.assertEqual(command[command.index("-a") + 1], "never",
                                  "nobody to ask, and Codex has no hook to relay the question")

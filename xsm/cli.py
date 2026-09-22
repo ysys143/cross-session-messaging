@@ -756,7 +756,13 @@ def cmd_doctor(args) -> int:
     print("xsm        %s" % (report.get("version") or "?"))
     print("state      %s" % report["xsm_home"])
     print("python     %s%s" % (report["interpreter"], "" if report["interpreter_ok"] else "  TOO OLD"))
-    print("codex      %s" % (report["codex_binary"] or "not found on PATH"))
+    versions = report.get("codex_binaries") or []
+    if not versions:
+        print("codex      not found on PATH")
+    for path, note in versions:
+        broken = note.startswith("does not run")
+        print("codex      %-45s %s%s" % (_home_tilde(path), note,
+                                         "  <- xsm skips this one" if broken else ""))
     print("sessions   %(registered)d registered, %(live)d live, %(unregistered)d unregistered"
           % report["sessions"])
     print("hooks      %d decision(s) recorded, %d internal error(s)"

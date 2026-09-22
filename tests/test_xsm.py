@@ -464,6 +464,72 @@ class PluginPackagingTest(TempState):
         self.assertEqual(out.stdout.strip(), "", "a person is never locked out of their session")
 
 
+class BrokenCodexInstallTest(TempState):
+    """An npm @openai/codex without its platform binary sat first on PATH and
+    could not run at all (2026-09-23). Every delivery to a Codex session goes
+    through `codex queue`, so xsm has to reach for one that works."""
+
+    def _fake(self, name, script):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as fh:
+            fh.write("#!/bin/sh\n" + script)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_a_broken_codex_is_skipped_for_the_next_one(self):
+        from unittest import mock
+        from xsm import adapters
+        broken = self._fake("broken-codex", "echo 'Error: Missing optional dependency "
+                                            "@openai/codex-darwin-arm64' >&2\nexit 1\n")
+        good = self._fake("good-codex", 'echo "queued $*"\nexit 0\n')
+        with mock.patch.object(adapters, "codex_bins", lambda: [broken, good]):
+            self.assertIn("queued", adapters.to_codex(self.tmp, "t1", "hello"))
+
+    def test_a_real_failure_is_not_retried_on_another_install(self):
+        from unittest import mock
+        from xsm import adapters
+        refuses = self._fake("refusing-codex", "echo 'Error: no rollout found for thread' >&2\n"
+                                               "exit 1\n")
+        other = self._fake("other-codex", "echo should-not-run\nexit 0\n")
+        calls = []
+        with mock.patch.object(adapters, "codex_bins", lambda: [refuses, other]), \
+                mock.patch.object(adapters, "queue_direct",
+                                  lambda home, thread, text: calls.append(thread) or "direct"):
+            self.assertEqual(adapters.to_codex(self.tmp, "t1", "hello"), "direct")
+        self.assertEqual(calls, ["t1"], "the second install is not a second chance")
+
+    def test_the_candidates_are_ordered_and_deduplicated(self):
+        from unittest import mock
+        from xsm import adapters
+        mine = self._fake("my-codex", "exit 0\n")
+        with mock.patch.dict(os.environ, {"XSM_CODEX": mine}), \
+                mock.patch.object(adapters.shutil, "which", lambda name: mine):
+            self.assertEqual(adapters.codex_bins()[0], mine)
+            self.assertEqual(adapters.codex_bins().count(mine), 1)
+
+    def test_doctor_names_an_install_that_cannot_run(self):
+        from unittest import mock
+        from xsm import install
+        broken = self._fake("broken-codex", "echo 'Error: Missing optional dependency' >&2\n"
+                                            "exit 1\n")
+        good = self._fake("good-codex", "echo codex-cli 9.9.9\n")
+        with mock.patch.object(install, "adapters", create=True):
+            pass
+        from xsm import adapters
+        with mock.patch.object(adapters, "codex_bins", lambda: [broken, good]):
+            rows = install.codex_versions()
+        self.assertTrue(rows[0][1].startswith("does not run"), rows[0])
+        self.assertEqual(rows[1][1], "codex-cli 9.9.9")
+
+    def test_a_worker_is_started_with_a_codex_that_runs(self):
+        from unittest import mock
+        from xsm import adapters, workers
+        broken = self._fake("broken-codex", "exit 1\n")
+        good = self._fake("good-codex", "echo codex-cli 9.9.9\n")
+        with mock.patch.object(adapters, "codex_bins", lambda: [broken, good]):
+            self.assertEqual(workers._working_codex(), good)
+
+
 class RenamedCommandTest(TempState):
     """`/xsm-inbox` showed the ledger while `xsm inbox` takes a Codex session's
     messages: two different things under one name (user, 2026-09-23). The

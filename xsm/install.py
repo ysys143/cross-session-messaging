@@ -681,6 +681,25 @@ def diff(home: str, runtime: str) -> str:
     return "\n".join(lines)
 
 
+def codex_versions() -> list:
+    """[(path, version or the first line of its failure)] for every codex on
+    this machine, best first. One that cannot run is worth naming: an npm
+    @openai/codex without its platform binary sat first on PATH and would have
+    failed every delivery to a Codex session (2026-09-23)."""
+    from . import adapters as _adapters
+    out = []
+    for path in _adapters.codex_bins():
+        try:
+            ran = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError) as err:
+            out.append((path, "does not run: %s" % err))
+            continue
+        text = (ran.stdout or ran.stderr or "").strip().splitlines()
+        out.append((path, text[0][:120] if text and ran.returncode == 0 else
+                    "does not run: %s" % (next((l for l in text if l.strip()), "")[:100])))
+    return out
+
+
 def stuck(now: float | None = None) -> dict:
     """What is waiting on someone right now, from the records themselves.
 
@@ -721,6 +740,7 @@ def doctor() -> dict:
         "interpreter_pinned": paths.read_json(paths.path(INTERPRETER)) is not None,
         "interpreter_ok": version >= (3, 9),
         "codex_binary": adapters.codex_bin(),
+        "codex_binaries": codex_versions(),
         "homes": config.homes(),
         "installs": [plan(h["path"], h["runtime"]) for h in config.homes()],
         "codex_trust": {h["path"]: codex_trust(h["path"], approvals=True) for h in config.homes()

@@ -34,9 +34,27 @@ class DeliveryError(Exception):
         self.detail = detail
 
 
+# An install that cannot run says so in its own words; measured 2026-09-23,
+# when an npm @openai/codex without its platform binary sat first on PATH and
+# every delivery to a Codex session would have failed with this.
+BROKEN_CODEX = ("Missing optional dependency", "command not found", "cannot execute binary")
+
+
+def codex_bins() -> list:
+    """Every codex worth trying, best first: an explicit one, then PATH, then
+    where the installers put it. A machine can have more than one, and the
+    first is not always the one that runs."""
+    found = [os.environ.get("XSM_CODEX") or "", shutil.which("codex") or "",
+             "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+    out = []
+    for path in found:
+        if path and os.path.exists(path) and path not in out:
+            out.append(path)
+    return out
+
+
 def codex_bin() -> str | None:
-    return shutil.which("codex") or next(
-        (p for p in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex") if os.path.exists(p)), None)
+    return codex_bins()[0] if codex_bins() else None
 
 
 @contextmanager
@@ -100,15 +118,23 @@ def to_codex(codex_home: str, thread_id: str, content: str) -> str:
 
 
 def _to_codex(codex_home: str, thread_id: str, content: str) -> str:
-    binary = codex_bin()
-    if not binary:
+    binaries = codex_bins()
+    if not binaries:
         raise DeliveryError("no-codex-binary", "codex is not on PATH")
     env = dict(os.environ, CODEX_HOME=os.path.expanduser(codex_home))
-    try:
-        out = subprocess.run([binary, "queue", "--thread", thread_id, "--message", content],
-                             capture_output=True, text=True, timeout=30, env=env)
-    except subprocess.SubprocessError as err:
-        raise DeliveryError("codex-failed", str(err))
+    out = None
+    for binary in binaries:
+        try:
+            out = subprocess.run([binary, "queue", "--thread", thread_id, "--message", content],
+                                 capture_output=True, text=True, timeout=30, env=env)
+        except subprocess.SubprocessError as err:
+            raise DeliveryError("codex-failed", str(err))
+        text = (out.stderr or out.stdout or "")
+        if out.returncode == 0 or not any(sign in text for sign in BROKEN_CODEX):
+            break
+        # That install cannot run at all; another one on this machine may.
+    if out is None:
+        raise DeliveryError("no-codex-binary", "codex is not on PATH")
     if out.returncode != 0:
         text = (out.stderr or out.stdout or "").strip()
         if "no rollout found" in text:
