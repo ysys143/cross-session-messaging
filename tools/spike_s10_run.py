@@ -51,6 +51,7 @@ COLLAB = os.path.join(REPO, "docs", "spikes", "s10", "collab")
 COLLAB_FILES = ("ADR-DRAFT.md", "ref-agora-note.md", "ref-s10-spike.md", "ref-adr-0003.md")
 COLLAB_DOC = "ADR-DRAFT.md"
 COLLAB_SHARES = (0.15, 0.40, 0.20, 0.25)    # agree, analyse, discuss, revise
+PHASE_NAMES = ("합의", "분석", "논의", "수정")
 DEFAULT_AGENTS = "codex:gpt-5.6-luna,claude:haiku,claude:sonnet"
 FIRST_PROMPT = "Read BRIEF.md in this folder and do what it says."
 SCREEN_EVERY = 30               # seconds between screen snapshots of each worker
@@ -240,6 +241,35 @@ def watch_candidates(root: str, deadline: float, dest: str) -> None:
         time.sleep(2)
 
 
+def clock(home: str, root: str, workers_: list, start: float, minutes: float) -> None:
+    """The harness as a session called `clock`: at each phase change it sends
+    every worker one message saying which phase began — the clock, not a
+    lead; no instruction in it (user decision, 2026-09-22). It is a registered
+    sender because the gate refuses unregistered ones, and it reads as live
+    while this process runs. The rest is the sessions' own: waking a quiet
+    peer is theirs to do, and the brief says so."""
+    sys.path.insert(0, REPO)
+    from xsm import paths, registry, send as send_mod
+    paths.HOME = home
+    clock_home = os.path.join(root, ".clock-home")
+    os.makedirs(clock_home, exist_ok=True)
+    me = registry.upsert("codex", clock_home, "clock", os.getpid(), root, name="clock")
+    me = registry.by_session("codex", "clock") or me
+    lengths = [minutes * 60 * share for share in COLLAB_SHARES]
+    bounds = [start + sum(lengths[:i]) for i in range(len(lengths))]
+    for i, at in enumerate(bounds):
+        if i == 0:
+            continue                        # phase 1 began with the brief
+        while time.time() < at:
+            time.sleep(1)
+        text = "단계 %d/4 %s 시작. ./phase 로 남은 시간을 확인해라." % (i + 1, PHASE_NAMES[i])
+        for w in workers_:
+            try:
+                send_mod.send("ref:%s" % w["ref"], text, sender=me, kind="note")
+            except Exception:               # the clock never breaks the run
+                pass
+
+
 def exporter(home: str, endpoint: str) -> subprocess.Popen:
     """Ship this run's xsm telemetry to an OTLP collector while it runs."""
     return subprocess.Popen(
@@ -294,12 +324,12 @@ def main() -> int:
         t.start()
     for t in threads:
         t.join()
-    clock = time.time()
-    deadline = clock + args.minutes * 60
+    clock_start = time.time()
+    deadline = clock_start + args.minutes * 60
     for root in homes:
         _write_timeleft(root, deadline)
         if args.scenario == "collab":
-            _write_phase(root, clock, args.minutes)
+            _write_phase(root, clock_start, args.minutes)
     ready = [w for w in started if not w.get("error")]
     with open(os.path.join(out, "run.json"), "w") as fh:
         json.dump({"scenario": args.scenario, "condition": args.condition,
@@ -321,6 +351,10 @@ def main() -> int:
             threading.Thread(target=watch_candidates, daemon=True,
                              args=(root, deadline, dest)).start()
     threading.Thread(target=watch_screens, daemon=True, args=(ready, deadline, out)).start()
+    if args.scenario == "collab":
+        root = next(iter(homes))
+        threading.Thread(target=clock, daemon=True,
+                         args=(homes[root], root, ready, clock_start, args.minutes)).start()
     shipping = [(exporter(home, args.otlp), home) for home in homes.values()] if args.otlp else []
 
     while time.time() < deadline:
