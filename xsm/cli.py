@@ -86,6 +86,41 @@ def cmd_list_clear(args, me) -> int:
     return OK
 
 
+def _compact_groups(rows: list, me: dict | None, here: str) -> list:
+    home = os.path.expanduser("~")
+    here = os.path.realpath(here)
+
+    def label(cwd: str) -> str:
+        real = os.path.realpath(cwd) if cwd else ""
+        if real == here:
+            return "%s (here)" % cwd.replace(home, "~", 1)
+        if real.startswith(here + os.sep):
+            return "./" + os.path.relpath(real, here)
+        return (cwd or "?").replace(home, "~", 1)
+
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault(r.get("cwd") or "", []).append(r)
+    order = sorted(groups, key=lambda c: (os.path.realpath(c) != here if c else True,
+                                          not (c and os.path.realpath(c).startswith(here)), c))
+    lines = []
+    for cwd in order:
+        lines.append(label(cwd))
+        mine = sorted(groups[cwd], key=lambda r: not (me and r.get("ref") == me.get("ref")))
+        for r in mine:
+            flags = [f for f in (
+                "you" if me and r.get("ref") == me.get("ref") else "",
+                "" if r.get("registered") else "unregistered",
+                "out-of-scope" if me and not r.get("scope") and r.get("scope_reason") != "self" else "",
+                "would-be-held" if r.get("native") == "hold" else "",
+                r.get("state") if r.get("state") != "live" else "") if f]
+            if r.get("why"):
+                flags.append(r["why"])
+            lines.append(" %s@%s [%s]%s" % (r.get("name"), r.get("alias"), r.get("ref"),
+                                            (" (" + ", ".join(flags) + ")") if flags else ""))
+    return lines
+
+
 def cmd_list(args) -> int:
     registry.adopt_open_codex()
     me = registry.me()
@@ -117,21 +152,11 @@ def cmd_list(args) -> int:
         return OK
     if args.compact:
         # For a model to copy back verbatim: no alignment padding (every space
-        # is a token), home shortened to ~, and only the flags that change
-        # whether a message would arrive.
-        home = os.path.expanduser("~")
-        for r in rows:
-            flags = [f for f in (
-                "you" if me and r.get("ref") == me.get("ref") else "",
-                "" if r.get("registered") else "unregistered",
-                "out-of-scope" if me and not r.get("scope") and r.get("scope_reason") != "self" else "",
-                "would-be-held" if r.get("native") == "hold" else "",
-                r.get("state") if r.get("state") != "live" else "") if f]
-            cwd = (r.get("cwd") or "").replace(home, "~", 1)
-            if r.get("why"):
-                flags.append(r["why"])
-            print("%s@%s [%s] %s%s" % (r.get("name"), r.get("alias"), r.get("ref"), cwd,
-                                       (" (" + ", ".join(flags) + ")") if flags else ""))
+        # is a token), and only the flags that change whether a message would
+        # arrive. Grouped by folder: a path on every line was most of the
+        # output and wrapped each entry onto two or three lines in a narrow
+        # Codex pane (2026-09-22). This folder first, a folder under it as ./….
+        print("\n".join(_compact_groups(rows, me, _here(args, me))))
         return OK
     if not me:
         # Run from a plain terminal there is no "us" to be in scope with, and

@@ -814,9 +814,30 @@ class CompactOutputTest(TempState):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.main(["list", "--compact", "--dir", self.tmp])
-        line = out.getvalue().strip()
-        self.assertTrue(line.startswith("worker@codex ["), line)
-        self.assertNotIn("  ", line)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].endswith("(here)"), lines)
+        self.assertTrue(lines[1].startswith(" worker@codex ["), lines)
+        self.assertNotIn(self.tmp, lines[1], "the folder is said once, above its sessions")
+        self.assertFalse(any("  " in line for line in lines))
+
+    def test_list_compact_groups_by_folder_this_one_first(self):
+        """A path on every line wrapped each entry in a narrow Codex pane."""
+        from xsm import cli, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        sub_dir, other = os.path.join(self.tmp, "a", "b"), os.path.join(self.tmp, "..", "zz-other")
+        for d in (home, sub_dir):
+            os.makedirs(d, exist_ok=True)
+        registry.upsert("codex", home, "t1", os.getpid(), sub_dir, name="deep")
+        registry.upsert("codex", home, "t2", os.getpid(), self.tmp, name="one")
+        registry.upsert("codex", home, "t3", os.getpid(), self.tmp, name="two")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["list", "--compact", "--dir", self.tmp, "-a"])
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].endswith("(here)"), lines)
+        self.assertEqual(sorted(l.split("@")[0].strip() for l in lines[1:3]), ["one", "two"])
+        self.assertEqual(lines[3], "./a/b")
+        self.assertTrue(lines[4].startswith(" deep@codex"), lines)
 
 
 class ListScopeTest(TempState):
