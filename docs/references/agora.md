@@ -24,7 +24,12 @@ Git으로 저장된 append-only 기여 DAG로, 모든 주장·결과·가설·�
 
 - **저자**: Yifan Zhang, Yunheng Zou, Shaokun Zhang, Jian Hu, Hao Zhang, Binfeng Xu, Jan Kautz, Yi Dong (NVIDIA)
 - **이메일**: {yifazhang,yidong}@nvidia.com
-- **발행**: arXiv:2609.18094 [cs.LG], 2026-09-16 제출
+- **발행**: arXiv:2609.18094 [cs.LG], v1 2026-09-16, v2 2026-09-18
+- **판본 주의(2026-09-22 추가)**: 이 노트는 v1을 보고 썼다. v2 원문을 다시 읽은 결과, 아래 인용 중
+  §3.2 "Git is the only state…", Abstract "every claim is a commit anyone can check out…",
+  §4.7 "a worker that chose to follow the thin state-space cluster…", §3.4 "The codebase is small
+  enough to audit end to end."는 **v2에 그 문장이 없다.** 수치(13 워커, 1,703, 696쌍, 165 재현 등)와
+  식 3은 v2와 일치한다. v2 기준으로 정정한 곳은 "(v2 정정)" 표시를 달았다.
 
 ---
 
@@ -196,7 +201,25 @@ U(v) = 100*Q(v) + C*sqrt(log(N+1)/(n(v)+1)) + 100*D/sqrt(1+rho(v))
 - 13개 워커 계정: worker1-worker5 (A100, Apr 27), slurm_worker_1-8 (H100, Apr 28)
 - 기여는 계정 author로 태그; cross-account 간선에만 점수 가중 (자-인용 제외, 식 2)
 
+**식 2 원문 (v2 정정 — 처음 작성 때 수식을 옮기지 않았다)** (§3.2):
+
+```
+S(u) = Σ_{v : (u,v) ∈ E}  1[a(u) ≠ a(v)] · w(v)
+```
+
+> "A contribution's evidence score is the weighted count of what other accounts built on it."
+
+w(v)는 Table 2의 태그 가중치, a(·)는 계정. 즉 u의 점수 = **u를 부모로 삼은 다른 계정의 자식**들의
+가중치 합이다. 임베딩이 필요 없고 그래프 구조와 태그만으로 계산된다. 별도로 "descendant count"가
+있으며 endorsed·wip·failed verification은 거기 더해지지 않는다. 검증자가 판정을 바꾸면 최신 판정이
+이전 것의 점수 효과를 대체하고 두 커밋 다 이력에 남는다.
+
 > "The self-citation exclusion stops a worker from manufacturing impact by extending its own branch." (§3.2)
+
+**식 3의 항 정의 (v2 정정)** (§3.3): "Q(v) is a quality percentile, n(v) counts follow-on work on v
+**out of N overall**, and ρ(v) counts near-duplicate descriptions." — N은 정의돼 있다. **D의 정의와
+C의 수치는 v2에도 없다.** ρ(v)는 description 임베딩의 single-link 클러스터(cosine 0.90, 커버리지
+≥50%, 최근 5,000건 상한)에서 나오므로, 식 3에서 임베딩이 필요한 항은 ρ(v) 하나뿐이다.
 
 ### 범위 제어: 프로젝트별 격리
 
@@ -254,13 +277,38 @@ U(v) = 100*Q(v) + C*sqrt(log(N+1)/(n(v)+1)) + 100*D/sqrt(1+rho(v))
 - **빠른 착취 (fast exploitation)**: 첫 8개 개선이 ~70% 달성, 처음 18개가 ~98% 달성
 - **좁은 척추 (narrow spine)**: 대부분 follow-on이 한 계보에 집중, 측면 분기는 짧음
 - **병렬 재발견 (parallel rediscovery)**: 동일 점수 696쌍 중 63%가 1시간 내, 80%가 6시간 내
-  - 개선 여지 : 메시지 채널 없음, 리더보드만으로는 중복 감지 어려움
+  - ~~개선 여지 : 메시지 채널 없음, 리더보드만으로는 중복 감지 어려움~~ **(v2 정정)** 이 줄은
+    노트 작성자의 해석이었다. **원문은 원인으로 "메시지 채널"을 언급하지 않는다.** §4.6의 결론
+    문장은 다음이다:
+
+    > "Workers quickly adopted leading results and compared explanations across branches. They also
+    > repeated work and concentrated most follow-on effort on a single lineage. **Shared visibility
+    > supported reuse, but did not by itself sustain broad exploration.**"
+
+    저자의 대응(§4.7)은 채널이 아니라 **다양성 뷰**(클러스터링·다양성 요약·UCB) 배포였고, 배포
+    다음날 새 클러스터 탐색이 시작됐다. 또한 agora는 `wip` 태그("In-flight work, to reduce
+    duplication")를 갖고도 696쌍이 났다 — "보이게 하기"만으로 충분하다는 근거는 원문에 없다.
 
 #### 5. 인간 개입 (§4.7)
 - **Pre-run**: 작업 정의, donor zoo, 평가자, brief 작성, 프로젝트 생성, 워커 시작
 - **Mid-run** (May 2, 유일한 개입): 클러스터링 + 다양성 UCB 배포
   - 1/3 활동이 단일 클러스터에 쌓여 있던 상황 -> diversity views 배포 후 다음날 sub-1.90 달성
-  - "a worker that chose to follow the thin state-space cluster rather than extend the dominant one" (§4.7)
+  - ~~"a worker that chose to follow the thin state-space cluster rather than extend the dominant one"~~
+    **(v2 정정)** v2 §4.7 원문: "Workers immediately began using the new views. On May 3 at 00:13 UTC,
+    a worker exploring the sparsely populated state-space cluster published the first SSM edit,
+    scoring 1.9028 bpb." 그리고: "Workers continued to choose their own experiments and publish
+    without human review."
+
+#### 5-1. 자발적 조정 관례 (v2 §4.3 — 처음 작성 때 빠짐)
+
+> "Contribution descriptions follow a recurring structure: workers state the parent and its score,
+> the single change made, a predicted outcome band, the measured result, and named follow-ups for
+> others. From April 28 onward more than 400 descriptions declare a prediction band before the
+> result, and later workers explicitly close follow-ups named by earlier ones. **The brief required
+> reproducible contributions but did not prescribe prediction bands or named follow-ups.**"
+
+brief에 없던 조정 관례(예측 구간 선언, 후속 과제 지명과 종결)가 description 필드를 통해
+자발적으로 생겼다. description이 비동기 채널 역할을 한 셈이다.
 
 ### 한계 및 미해결 과제 (§4.8 참고, Appendix C)
 
@@ -268,6 +316,26 @@ U(v) = 100*Q(v) + C*sqrt(log(N+1)/(n(v)+1)) + 100*D/sqrt(1+rho(v))
 2. **통제된 비교 필요**: 공유 상태 vs. 독립 에이전트의 발견 효율 비교를 위해서는 matched, preregistered evaluation 필요 (Appendix C 제안)
 3. **메시지 오버헤드**: DAG와 리더보드 기반 협업이 시간대 측정(예: 지연, 병렬화 이득)을 명시하지 않음
 4. **거버넌스**: 권한·범위 모델은 기본; cross-project, 다중 팀 시나리오는 미구현
+
+**Appendix C 원문 — 저자가 제안하고 실행하지 않은 4-arm 비교 (v2 정정, 표를 옮김)**
+
+초록 마지막 문장: "Measuring the effect on discovery per unit of compute requires a matched
+comparison." 저자 스스로 효과를 주장하지 않는다. Table 5 "Minimum community-level comparison.
+Every row uses matched agents, models, compute, evaluator, and wall-clock budget":
+
+| Arm | Shared information | Work allocation |
+|---|---|---|
+| Isolated | Project brief only | Independent local choice |
+| Flat log | Chronological contributions | Participant reads the log |
+| Central planner | Full state visible to planner | Planner assigns next work |
+| Agora | Contribution DAG and analysis views | Participant chooses among explicit exploit/explore slots |
+
+> "The primary analysis unit is the entire community run. Commit-level observations are useful
+> diagnostics but are not independent samples."
+
+이 표는 xsm의 스파이크 S10(`docs/spikes/S10-swarm-duplication.md`)의 원형이다. 또 §4.5 "Those 18
+scored contributions account for about 98% of the total reduction. The remaining 1,106 found the
+next 0.03" — 1,703 커밋은 스웜이 *돌았다*는 증거이지 *효과가 있었다*는 증거가 아니다.
 
 ---
 
@@ -280,7 +348,7 @@ U(v) = 100*Q(v) + C*sqrt(log(N+1)/(n(v)+1)) + 100*D/sqrt(1+rho(v))
 | 요구 | Agora 지원 | 평가 |
 |------|-----------|------|
 | CONFIG_DIR 무관 발견·메시징 | [O] Git 저장소 URL 기반 | 직접 적용 가능 |
-| invoke/wakeup | [X] Async-only, pull-based | 설계 차이 |
+| invoke/wakeup | [X] Async-only, pull-based | 설계 차이 — **의도적**이다(v2 §2): "Agora serves asynchronous participants that share **no conversation**, manager, role graph, runtime, or filesystem." 결함이 아니라 선택 |
 | 1:N/N:N 채널-스레드 | [O] DAG 및 뷰로 지원 | 그룹 협업에 강함 |
 | 인간+에이전트 함께 보기 | [O] 웹 UI + CLI 병행 | 실제 구현 (§4.7 인간 개입) |
 | 충돌·사본 증식·무한 잠금 회피 | [O] Git immutability + async | 검증됨 |
@@ -393,5 +461,6 @@ Agora의 DAG와 다양성 UCB는 **swarm 탐색 구조를 자동화**:
 
 ---
 
-*작성일: 2026-09-19*  
-*조사 대상: arXiv 2609.18094 (2026-09-16 제출)*
+*작성일: 2026-09-19 (v1 기준)*  
+*v2 원문 대조 정정: 2026-09-22 — 식 2·식 3 항 정의, §4.6 해석 철회, §4.3 자발적 관례, §4.7 인용, Appendix C 표*  
+*조사 대상: arXiv 2609.18094 (v1 2026-09-16, v2 2026-09-18)*
