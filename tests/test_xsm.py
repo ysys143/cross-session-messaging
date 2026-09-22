@@ -798,6 +798,24 @@ class SelfIdentityTest(TempState):
         self.assertIsNone(registry.me())
         self.assertIn("missing", registry.self_consent(registry.claude_home_here()))
 
+    def test_a_sandboxed_codex_session_finds_itself_by_thread_id(self):
+        """The Codex sandbox refuses `ps`, so the process walk cannot identify a
+        session there; two sharing a folder were each refused (S10 smoke run)."""
+        from xsm import identity, registry
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        self.addCleanup(lambda v=os.environ.get("CODEX_THREAD_ID"):
+                        os.environ.__setitem__("CODEX_THREAD_ID", v) if v is not None
+                        else os.environ.pop("CODEX_THREAD_ID", None))
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home)
+        registry.upsert("codex", home, "t-one", os.getpid(), self.tmp, name="one")
+        registry.upsert("codex", home, "t-two", os.getpid(), self.tmp, name="two")
+        identity.ancestor_pid = lambda names, max_hops=10: None      # what the sandbox does
+        os.environ["CODEX_THREAD_ID"] = "t-two"
+        self.assertEqual(registry.me()["session_id"], "t-two")
+        os.environ["CODEX_THREAD_ID"] = "t-one"
+        self.assertEqual(registry.me()["session_id"], "t-one")
+
     def test_an_unregistered_session_never_borrows_a_neighbours_identity(self):
         """Before: a session that knew its own id but had no record fell through
         to the cwd guess and printed whichever session shared its folder."""

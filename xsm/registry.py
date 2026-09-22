@@ -397,6 +397,16 @@ def me(session_id: str | None = None, cwd: str | None = None):
         for rec in rows:
             if rec.get("session_id") == session_id:
                 return rec
+    # Codex puts its thread id in every shell it runs, and the thread id is
+    # what a Codex record is keyed by. It has to come before the process walk:
+    # the Codex sandbox refuses to run `ps` ("operation not permitted",
+    # measured 2026-09-22), so inside it the walk always fails, and two
+    # sandboxed sessions sharing a folder could not tell which one they were.
+    thread = os.environ.get("CODEX_THREAD_ID")
+    if thread:
+        for rec in rows:
+            if rec.get("runtime") == "codex" and rec.get("session_id") == thread:
+                return rec
     sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
     if sock:
         pid = identity.pid_from_socket(sock)
