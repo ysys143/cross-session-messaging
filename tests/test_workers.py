@@ -351,7 +351,11 @@ class SafetyTest(TempState):
         self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
         self.assertEqual(settings["sandbox"]["filesystem"]["allowWrite"], [paths.HOME],
                          "xsm stays sandboxed; its store is the one place it may write outside")
-        self.assertEqual(settings["permissions"]["allow"][:2], ["Bash", "Monitor"])
+        self.assertEqual(settings["permissions"]["allow"][:5],
+                         ["Bash", "Monitor", "Read", "Glob", "Grep"],
+                         "reads anywhere, like Codex's workspace-write; writes stay in the folder")
+        self.assertNotIn("Write", settings["permissions"]["allow"])
+        self.assertNotIn("Edit", settings["permissions"]["allow"])
         self.assertIn("mcp__xsm__xsm_send", settings["permissions"]["allow"],
                       "the route to a Codex peer runs outside the sandbox")
         from xsm import config

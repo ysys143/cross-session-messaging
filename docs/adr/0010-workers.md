@@ -95,6 +95,9 @@ xsm의 대상이 아니다.
   Codex 홈의 대기열 DB 파일. 설정 파일은 닫혀 있어 워커가 `xsm install` 같은 명령으로 사용자 설정을
   고칠 수 없다. 실측: 이 규칙 전에는 `./timeleft` 하나에도 승인 창이 떠서 멈췄고, 소켓을 열기 전에는
   워커의 `xsm send`가 "sandboxed session cannot open the inbox socket"으로 실패했다.
+  읽기는 폴더 밖도 묻지 않는다(`Read`·`Glob`·`Grep` 허용). Codex `workspace-write`가 디스크 전체 읽기를
+  허용하므로 이것이 같은 규칙이다. 실측(S10 collab4): 이 허용 전에는 초안을 검토하던 Claude 워커 둘이
+  저장소의 `INTENT.md`, `xsm/doc.py`를 읽으려다 승인 대기에 걸려 논의·수정 단계를 통째로 놓쳤다.
 - **백그라운드 워커의 폴더 신뢰 확인은 사람에게 온다. 사람이 tmux 화면으로 가지 않는다**(사용자 결정,
   2026-09-22: "`tmux attach -t xsm-workers`로 확인하라 — 절대 이 방식에 만족할 수 없음"). spawn은 등록을
   기다리는 동안 창 화면을 읽고, 신뢰 화면이면 권한 요청과 같은 승인 기록(`tool: folder-trust`)을 만든 뒤

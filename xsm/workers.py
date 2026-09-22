@@ -285,7 +285,11 @@ def _claude_worker_settings(worker: dict) -> str:
         # and are the route to a Codex peer: `codex queue` from the sandboxed
         # shell cannot start its embedded app server (measured), and the MCP
         # server can. Same as the Codex worker's route to a Claude peer.
-        settings["permissions"] = {"allow": ["Bash", "Monitor"] + [
+        # Reading is allowed anywhere, as Codex's workspace-write sandbox
+        # allows it: reads outside the folder asked for a person, and a worker
+        # checking INTENT.md for its review sat on that for the rest of the run
+        # (S10 collab run 4). Writing stays inside the folder.
+        settings["permissions"] = {"allow": ["Bash", "Monitor", "Read", "Glob", "Grep"] + [
             "mcp__%s__%s" % (install.MCP_NAME, tool)
             for tool in ("xsm_send", "xsm_post", "xsm_channel")]}
         settings["hooks"] = {"PermissionRequest": [{"hooks": [{
