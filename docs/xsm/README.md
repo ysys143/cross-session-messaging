@@ -108,9 +108,16 @@ cd /tmp/xsm-clean && claude plugin eval . --runs 1 --model haiku --judge-model h
 깨끗한 사본에서 돌리는 이유: eval은 폴더 전체를 플러그인으로 싣는데, 작업 중인 저장소에는 git이 무시하는
 파일(`.omc/`의 하드 링크 등)이 있고 eval은 하드 링크가 있으면 케이스를 거부한다.
 
-실측 2026-09-23: 스킬 **설명문**만 보고 답한 모델이 `/xsm send <session-id> <message>`라는 없는 문법을
-지어냈다(세 케이스 0점). 설명문에 실제 명령 모양을 넣자 세 케이스 모두 1.00이 됐고, 플러그인 없는
-대조군은 0.00이다(Δ +1.00). 스킬 설명문은 모델이 본문을 열기 전에 보는 유일한 것이므로 명령 모양을 담는다.
+실측 2026-09-23. **haiku는 스킬 본문을 열지 않았다**(모든 실행에서 `tools=[]`). 그러니 작은 모델에게는
+설명문이 곧 제품 전체다. 처음에는 `/xsm send <session-id> <message>`라는 없는 문법을 지어냈고(세 케이스
+0점), 설명문에 명령 모양과 두 규칙(샌드박스에서는 MCP, `[-]`는 주소 없음)을 넣자 올라갔다. sonnet은 같은
+케이스를 스킬을 열어 1.00으로 통과한다. 그래서 이 스위트는 "스킬을 열지 않는 모델도 틀리지 않는가"를 재는
+바닥선이다.
+
+남은 하나(`codex-thread-without-a-prompt`)는 설명문으로도 안 고쳐졌다. 원인은 목록 문구였다.
+`no prompt yet ... after its first prompt`를 모델이 "네가 프롬프트를 보내면 된다"로 읽었는데, 그것이야말로
+할 수 없는 일이다. 문구를 "nobody has typed in yet ... once its own user types there or runs /rename,
+and until then it cannot be messaged"로 바꾸자 1.00이 됐다. 출력 문구도 인터페이스다.
 
 ### 플러그인을 고칠 때 알아야 할 것 (실측 2026-09-23)
 

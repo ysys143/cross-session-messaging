@@ -1,6 +1,6 @@
 ---
 name: xsm
-description: Talk to other Claude Code or Codex sessions on this machine — list them, send a message or a task, answer one, start workers, and see what was delivered. Use when the user asks to contact, hand off to, or coordinate with another session or agent. Read it before naming any xsm command or address: they are shell commands (`xsm list`, `xsm send <name|ref:xxxxxx> --text "..."`), not slash commands, and a made-up address is a message nobody receives.
+description: Talk to other Claude Code or Codex sessions on this machine — list them, send a message or a task, answer one, start workers, and see what was delivered. Use when the user asks to contact, hand off to, or coordinate with another session or agent. Read it before naming any xsm command or address: they are shell commands (`xsm list`, `xsm send <name|ref:xxxxxx> --text "..."`), not slash commands, and a made-up address is a message nobody receives. From a sandboxed shell, reach a Codex session with the `xsm_send` MCP tool instead; a row whose ref is `[-]` has no address yet.
 ---
 
 # Talking to other sessions

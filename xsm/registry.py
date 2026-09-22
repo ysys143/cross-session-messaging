@@ -395,9 +395,13 @@ def fresh_codex_threads() -> list:
                "state": "unknown",
                "ref": identity.ref_of("codex", home, thread) if thread and home else None,
                "fresh": True}
-        row["why"] = ("a thread open for %dm%02ds with no prompt yet%s" % (
+        # The wording is the whole message here: "no prompt yet" was read as
+        # "send it a prompt" by a model answering from it (eval, 2026-09-23),
+        # which is the one thing that cannot be done.
+        row["why"] = ("a Codex window nobody has typed in yet (%dm%02ds)%s" % (
             age // 60, age % 60, "" if thread else
-            "; Codex has not logged its id, so it has no address until its first prompt or /rename"))
+            "; it takes an address once its own user types there or runs /rename, and until "
+            "then it cannot be messaged"))
         out.append(row)
     return out
 

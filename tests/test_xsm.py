@@ -760,12 +760,12 @@ class CodexThreadLivenessTest(TempState):
         with mock.patch.object(registry.identity, "comm", lambda pid: "codex"):
             rows = registry.fresh_codex_threads()
             self.assertEqual(len(rows), 1)
-            self.assertIn("first prompt or /rename", rows[0]["why"])
+            self.assertIn("nobody has typed in", rows[0]["why"])
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 cli.main(["list", "--compact", "--dir", self.tmp])
         self.assertIn("codex-%d@codex [-]" % os.getpid(), out.getvalue())
-        self.assertIn("no prompt yet", out.getvalue())
+        self.assertIn("nobody has typed in", out.getvalue())
 
     def test_a_dead_beacon_is_dropped(self):
         from xsm import paths, registry
