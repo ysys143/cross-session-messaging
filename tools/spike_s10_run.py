@@ -119,6 +119,17 @@ def watch(root: str, deadline: float, dest: str) -> None:
         time.sleep(2)
 
 
+def exporter(home: str, endpoint: str) -> subprocess.Popen:
+    """Ship this run's xsm telemetry to an OTLP collector while it runs, so a
+    person can watch the sessions' commands — refusals included — as they
+    happen instead of reading JSONL afterwards."""
+    return subprocess.Popen(
+        [os.path.join(REPO, "bin", "xsm"), "otlp-export", "--follow", "--interval", "5",
+         "--endpoint", endpoint],
+        env=dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1"),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _thread_of(stdout: str) -> str | None:
     for line in stdout.splitlines():
         try:
@@ -172,6 +183,7 @@ def main() -> int:
     parser.add_argument("--slots", type=int, default=3)
     parser.add_argument("--minutes", type=float, default=30)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--otlp", help="OTLP/HTTP endpoint to ship xsm telemetry to while running")
     args = parser.parse_args()
 
     out = os.path.abspath(args.out)
@@ -192,6 +204,7 @@ def main() -> int:
                 for root in dict.fromkeys(roots)]
     for w in watchers:
         w.start()
+    shipping = [exporter(home, args.otlp) for home in homes.values()] if args.otlp else []
     threads = [threading.Thread(target=slot, args=(i, roots[i], homes[roots[i]], args.condition,
                                                    deadline, out))
                for i in range(args.slots)]
@@ -202,6 +215,13 @@ def main() -> int:
         t.join()
     for w in watchers:
         w.join(timeout=40)
+    for proc, home in zip(shipping, homes.values()):
+        proc.terminate()
+        proc.wait(timeout=10)
+        subprocess.run([os.path.join(REPO, "bin", "xsm"), "otlp-export", "--once",
+                        "--endpoint", args.otlp],
+                       env=dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1"),
+                       capture_output=True, timeout=60)
     print(out)
     return 0
 

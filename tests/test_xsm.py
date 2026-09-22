@@ -818,6 +818,21 @@ class SelfIdentityTest(TempState):
         os.environ["CODEX_THREAD_ID"] = "t-one"
         self.assertEqual(registry.me()["session_id"], "t-one")
 
+    def test_a_sandbox_that_forbids_signals_and_ps_still_sees_live_peers(self):
+        """From inside the Codex sandbox kill(pid, 0) answers EPERM and `ps`
+        cannot run. Both were read as "dead", so `xsm list` there showed no one
+        (S10 pilot, seen in xsm's own spans)."""
+        from unittest import mock
+        from xsm import identity
+        rec = {"runtime": "codex", "pid": os.getpid(), "lstart": "Tue Sep 22 11:06:20 2026"}
+        with mock.patch("os.kill", side_effect=PermissionError(1, "Operation not permitted")), \
+                mock.patch.object(identity, "lstart", lambda pid: None):
+            self.assertEqual(identity.state_of(rec), "live")
+        with mock.patch("os.kill", side_effect=ProcessLookupError(3, "No such process")):
+            self.assertEqual(identity.state_of(rec), "stale", "a pid that is gone is still gone")
+        with mock.patch.object(identity, "lstart", lambda pid: "Mon Sep 21 09:00:00 2026"):
+            self.assertEqual(identity.state_of(rec), "stale", "a measured, different start is reuse")
+
     def test_an_unregistered_session_never_borrows_a_neighbours_identity(self):
         """Before: a session that knew its own id but had no record fell through
         to the cwd guess and printed whichever session shared its folder."""

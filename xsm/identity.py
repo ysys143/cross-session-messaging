@@ -26,8 +26,19 @@ def lstart(pid: int) -> str | None:
 
 
 def pid_alive(pid) -> bool:
+    """Whether a process with this pid exists. EPERM says it does — we are
+    just not allowed to signal it — and inside the Codex sandbox that is the
+    answer for every other session's pid (measured through xsm's own spans,
+    2026-09-22: every peer read as dead from inside, live from the hooks)."""
     try:
         os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        try:
+            from . import telemetry
+            telemetry.bump("xsm.state.kill_eperm")
+        except ImportError:
+            pass
         return True
     except OSError as err:
         try:
@@ -95,17 +106,19 @@ def _state_of(record: dict) -> tuple:
     if not pid_alive(pid):
         return gone, "pid_dead"
     recorded = record.get("lstart")
+    unverified = False
     if recorded:
         now = lstart(pid)
-        if now is None:
-            return gone, "lstart_unmeasured"
-        if now != recorded:
+        if now is not None and now != recorded:
             return gone, "lstart_changed"   # pid reused by a different process
+        # `ps` refused (the Codex sandbox) is not evidence of reuse; the pid is
+        # alive and we could not look further.
+        unverified = now is None
     if record.get("runtime") == "claude":
         if socket_live(record.get("socket") or ""):
-            return "live", "live"
+            return "live", "live_unverified" if unverified else "live"
         return gone, "socket_dead"
-    return "live", "live"
+    return "live", "live_unverified" if unverified else "live"
 
 
 def ancestor_pid(names, max_hops: int = 10) -> int | None:
