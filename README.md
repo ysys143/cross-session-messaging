@@ -61,6 +61,34 @@ xsm send --to recipient-session --body "작업 요청"
 xsm receive --from sender-session
 ```
 
+## 관측 (텔레메트리)
+
+xsm은 자신의 송수신을 스팬과 메트릭으로 기록한다. OpenTelemetry SDK를 설치하지 않고
+OTLP의 형식만 직접 만들기 때문에, 의존성은 여전히 stdlib뿐이면서 표준 백엔드와 붙는다
+(ADR-0011).
+
+```bash
+xsm metrics                 # 이 머신에 쌓인 호출 수, 에러, p95
+xsm metrics --json
+```
+
+collector로 보내려면:
+
+```bash
+# OTEL_EXPORTER_OTLP_ENDPOINT 가 없으면 http://localhost:4318
+xsm otlp-export --once
+xsm otlp-export --follow --interval 5
+```
+
+기록은 `$XSM_HOME/otel-spans.jsonl`과 `otel-metrics.jsonl`에 append되고, 전송은 별도
+명령이 할 때만 일어난다. 송수신 경로에서 네트워크를 타는 일은 없다.
+
+한 메시지의 전 구간(발신 → SSH → 수신 머신 → 대상 세션의 훅)이 하나의 trace로 이어지므로,
+Jaeger나 Grafana Tempo에서 "이 메시지가 어디서 멈췄는지"를 그대로 볼 수 있다.
+
+끄려면 `XSM_NO_TELEMETRY=1`. 계측 비용은 send 1회당 약 0.175ms로 측정됐다
+([telemetry-overhead.md](docs/references/telemetry-overhead.md)).
+
 ## 설계 원칙
 
 - **No Wrapper Runtime**: Claude Code/Codex 위에 별도의 오케스트레이션 런타임을 두지 않음

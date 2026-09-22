@@ -26,7 +26,10 @@ from . import paths, telemetry
 CURSOR = "otlp-cursor.json"
 DEFAULT_ENDPOINT = "http://localhost:4318"
 
-# OTLP enum values, which the JSON encoding spells as numbers.
+# OTLP enum values, which the JSON encoding spells as numbers. Trace and span
+# ids go out as hex, which is the one place OTLP/JSON deliberately departs from
+# the Protobuf JSON mapping's base64 for bytes — see opentelemetry-proto's
+# docs/specification.md.
 SPAN_KINDS = {"INTERNAL": 1, "SERVER": 2, "CLIENT": 3, "PRODUCER": 4, "CONSUMER": 5}
 STATUS = {"UNSET": 0, "OK": 1, "ERROR": 2}
 BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]    # milliseconds
