@@ -76,6 +76,19 @@ ADR-0001~0010이 모두 Accepted되고 두 머신 SSH까지 검증된 시점에�
   즉 구현체의 관례가 아니라 스펙 자체가 hex를 요구한다. B안의 유일한 미검증 지점이었고,
   1차 출처로 해소됐다.
 
+- 실물 검증(2026-09-22): `otel/opentelemetry-collector:latest`(v0.161.0)를 4318에 띄우고
+  `xsm otlp-export --once`를 실행. traces/metrics 모두 2xx, collector의 debug exporter가
+  다음을 그대로 디코딩했다.
+
+  - trace/span id를 hex 그대로 인식, `xsm.send`를 루트로 `xsm.remote.ssh`와 `xsm.deliver`가
+    자식으로 붙은 트리
+  - span kind 숫자 → `Producer` / `Client` / `Consumer` / `Internal`
+  - `Status code: Error` + `Status message: out of scope: different project`
+  - `DataType: Sum`, `IsMonotonic: true`, `AggregationTemporality: Delta`
+  - `DataType: Histogram`, `Unit: ms`, Count/Sum/Min
+
+  즉 B안이 만든 페이로드는 SDK가 만든 것과 구별되지 않는다.
+
 ## 토론 기록
 
 | 라운드 | 참가자 | 입장 | 근거 | 반론/응답 |

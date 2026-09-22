@@ -83,6 +83,13 @@ xsm otlp-export --follow --interval 5
 기록은 `$XSM_HOME/otel-spans.jsonl`과 `otel-metrics.jsonl`에 append되고, 전송은 별도
 명령이 할 때만 일어난다. 송수신 경로에서 네트워크를 타는 일은 없다.
 
+실제 OpenTelemetry Collector(v0.161.0)로 검증했다:
+
+```bash
+docker run --rm -p 4318:4318 otel/opentelemetry-collector:latest
+xsm otlp-export --once
+```
+
 한 메시지의 전 구간(발신 → SSH → 수신 머신 → 대상 세션의 훅)이 하나의 trace로 이어지므로,
 Jaeger나 Grafana Tempo에서 "이 메시지가 어디서 멈췄는지"를 그대로 볼 수 있다.
 
