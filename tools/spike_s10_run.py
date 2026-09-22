@@ -51,6 +51,14 @@ COLLAB = os.path.join(REPO, "docs", "spikes", "s10", "collab")
 COLLAB_FILES = ("ADR-DRAFT.md", "ref-agora-note.md", "ref-s10-spike.md", "ref-adr-0003.md")
 COLLAB_DOC = "ADR-DRAFT.md"
 COLLAB_SHARES = (0.15, 0.40, 0.20, 0.25)    # agree, analyse, discuss, revise
+
+# The co-editing conditions (S10 §3, added 2026-09-23). The compress conditions
+# measure two sessions doing the same work; these measure two sessions writing
+# over each other in one file. 5 is the current xsm with no rule at all; 6 adds
+# the one line that condition 4 adds to the compress brief, in its own terms.
+COEDIT_RULE = ("\n## 겹치지 않게\n\n문서의 어느 구간을 고치기 전에 채널에 한 줄 남겨라: "
+               "`./xsm post --tag note --text \"taking <절 이름>\"`. 다른 세션이 이미 잡은 "
+               "구간은 피한다.\n")
 PHASE_NAMES = ("합의", "분석", "논의", "수정")
 DEFAULT_AGENTS = "codex:gpt-5.6-luna,claude:haiku,claude:sonnet"
 FIRST_PROMPT = "Read BRIEF.md in this folder and do what it says."
@@ -102,12 +110,20 @@ def _write_phase(root: str, start: float, minutes: float) -> None:
 def workspace(root: str, deadline: float, condition: int, scenario: str = "compress") -> str:
     """A fresh folder: task files, the brief, helper scripts, and for the
     compression task the seed graph."""
-    if scenario == "collab":
+    if scenario in ("collab", "coedit"):
         os.makedirs(root, exist_ok=True)
         for name in COLLAB_FILES:
             shutil.copy(os.path.join(COLLAB, name), root)
-        shutil.copy(os.path.join(COLLAB, "brief.md"), os.path.join(root, "BRIEF.md"))
-        _write_phase(root, deadline, 1)     # "not started yet" until the real clock is set
+        if scenario == "coedit":
+            # No phases and no clock: the rule under test is the only thing
+            # that differs between conditions 5 and 6.
+            with open(os.path.join(COLLAB, "coedit.md")) as fh:
+                text = fh.read()
+            with open(os.path.join(root, "BRIEF.md"), "w") as fh:
+                fh.write(text.replace("{RULES}", COEDIT_RULE if condition >= 6 else ""))
+        else:
+            shutil.copy(os.path.join(COLLAB, "brief.md"), os.path.join(root, "BRIEF.md"))
+            _write_phase(root, deadline, 1)   # "not started yet" until the real clock is set
     else:
         os.makedirs(os.path.join(root, "candidates"), exist_ok=True)
         for name in ("eval.py", "corpus.txt", "baseline.py"):
@@ -289,8 +305,9 @@ def stop(name: str, home: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenario", choices=["compress", "collab"], default="compress")
-    parser.add_argument("--condition", type=int, choices=[1, 2, 3, 4], default=2,
+    parser.add_argument("--scenario", choices=["compress", "collab", "coedit"],
+                        default="compress")
+    parser.add_argument("--condition", type=int, choices=[1, 2, 3, 4, 5, 6], default=2,
                         help="compress only; collab is always one shared folder")
     parser.add_argument("--agents", default=DEFAULT_AGENTS,
                         help="one runtime:model per slot, comma-separated (default: %(default)s)")
@@ -347,7 +364,7 @@ def main() -> int:
 
     for root in homes:
         dest = os.path.join(out, "history", os.path.basename(root))
-        if args.scenario == "collab":
+        if args.scenario in ("collab", "coedit"):
             threading.Thread(target=watch_file, daemon=True,
                              args=(os.path.join(root, COLLAB_DOC), deadline, dest)).start()
         else:
