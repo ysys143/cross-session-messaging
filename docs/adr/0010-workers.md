@@ -106,6 +106,16 @@ xsm의 대상이 아니다.
 - 같은 이유로 Codex 워커 이름 붙이기(`/rename <이름>` + Enter)는 신뢰 화면이 없을 때만 입력한다. 전에는
   띄운 지 4초 뒤 무조건 입력해서, 그때 신뢰 화면이 떠 있으면 Enter가 "Yes"를 골라 사람 모르게 폴더를
   신뢰했다(창 모드에도 있던 문제).
+- **백그라운드 워커가 다른 런타임의 세션에 보낼 때는 xsm MCP 서버(`xsm_send`)를 쓴다**(실측 2026-09-22,
+  S10 협업 파일럿). 샌드박스 안의 셸에서 `xsm send`는 양방향 모두 막혔다 — Codex 샌드박스는 Claude
+  인박스 소켓 연결을 파일시스템 위반으로 막고(`network.allow_unix_sockets`로도 안 열림), Claude
+  샌드박스 안의 `codex queue`는 내장 app server를 띄우지 못한다. MCP 서버는 셸 샌드박스 밖의 별도
+  프로세스라 양쪽 다 통한다. 그래서 백그라운드 Codex는 `mcp_servers.xsm.default_tools_approval_mode=
+  "approve"`(`-a never`에서는 묻는 도구가 곧 거부이므로)와 `writable_roots`에 XSM_HOME을 받고, 백그라운드
+  Claude는 `--mcp-config`로 xsm 서버를 직접 싣고 `mcp__xsm__xsm_send`·`xsm_post`·`xsm_channel`을
+  허용받는다. 셸의 `xsm send`가 sandbox 오류를 내면 MCP 도구를 쓰라는 안내가 오류 문구에 있다.
+- `xsm install`의 MCP 등록이 `~/.claude/.claude.json`에 들어가 아무 세션도 읽지 못했다. 원인은 폴더
+  신뢰 때와 같은 `CLAUDE_CONFIG_DIR=~/.claude` 명시. 기본 홈은 이름을 지정하지 않는다(설치기·워커 공통).
 - tmux는 `spawn`의 전제 조건이 된다. 없으면 `spawn`이 이유와 함께 거부한다. 메시지 전달 자체는
   tmux가 필요 없다.
 - 지운 것: 헤드리스 Claude(FIFO + stream-json), 헤드리스 Codex(`codex app-server` 턴, pump,

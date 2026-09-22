@@ -31,6 +31,14 @@ def queued(msg_id: str, sender: dict, target: dict, scope: str, kind: str, body:
     return entry
 
 
+def failed(msg_id: str, reason: str) -> None:
+    """The send never left: no receipt will come, so the entry itself says so.
+    (Measured 2026-09-22: five sends blocked by a sandbox sat as `queued`.)"""
+    entry = paths.read_json(_entry_path(msg_id), {}) or {}
+    entry.update({"status": "error", "error": reason, "failed_t": time.time()})
+    paths.write_json(_entry_path(msg_id), entry)
+
+
 def receipt(msg_id: str, decision: str, receiver: dict | None, reason: str = "") -> None:
     """Written by the receiving hook. `decision` is delivered | held | blocked."""
     paths.write_json(_receipt_path(msg_id), {

@@ -481,8 +481,19 @@ def mcp_command() -> list:
 
 
 def _runtime_env(home: str, runtime: str) -> dict:
+    """The environment to run the runtime's own CLI in for this home. The
+    default Claude home is not named: with CLAUDE_CONFIG_DIR=~/.claude Claude
+    reads and writes ~/.claude/.claude.json, which no ordinary session ever
+    reads — `xsm install --statusline`-era MCP registrations landed there and
+    `claude mcp get xsm` found nothing (measured 2026-09-22)."""
     env = dict(os.environ)
-    env["CLAUDE_CONFIG_DIR" if runtime == "claude" else "CODEX_HOME"] = home
+    if runtime == "claude":
+        if os.path.realpath(home) == os.path.realpath(os.path.expanduser("~/.claude")):
+            env.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            env["CLAUDE_CONFIG_DIR"] = home
+    else:
+        env["CODEX_HOME"] = home
     return env
 
 

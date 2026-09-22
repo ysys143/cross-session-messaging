@@ -873,6 +873,18 @@ class SelfIdentityTest(TempState):
         self.assertIsNone(registry.me(), "not someone else's record")
 
 
+class LedgerFailureTest(TempState):
+    def test_a_send_the_sandbox_blocked_is_not_left_as_queued(self):
+        """Five such sends sat as `queued` in the S10 collab pilot; the failure
+        was only in the decision log."""
+        from xsm import ledger
+        ledger.queued("m1", {"name": "a"}, {"name": "b"}, "repo:x", "note", "hi")
+        ledger.failed("m1", "sandbox-blocked: cannot open the inbox socket")
+        entry = ledger.status("m1")
+        self.assertEqual(entry["status"], "error")
+        self.assertIn("sandbox-blocked", entry["error"])
+
+
 class LifecycleTest(TempState):
     """What happens to a session after it stops (ADR-0001 addendum)."""
 

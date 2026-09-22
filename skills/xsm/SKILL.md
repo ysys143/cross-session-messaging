@@ -158,6 +158,9 @@ xsm stop <worker>           # stop it and remove its records
 - A background worker works unasked inside its folder's sandbox (Codex
   workspace-write; Claude acceptEdits plus its own OS sandbox). Past that, a
   Claude worker's request goes to your user; a Codex worker cannot go past it.
+- From inside a background worker, `xsm send` to a session of the other
+  runtime fails with a sandbox error; use the `xsm_send` MCP tool then (same
+  target, kind, text). The MCP server runs outside the shell sandbox.
 - If a background worker stops at a folder-trust screen, `spawn` returns at
   once saying `waiting: … Call the xsm_approve MCP tool with id …`. Do that
   now: the question goes to your user in a form. Once they answer, the worker

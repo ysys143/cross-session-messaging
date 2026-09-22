@@ -245,7 +245,7 @@ def _claude_worker_settings(worker: dict) -> str:
     """Settings only this worker loads. `accept` so the caller's messages are
     not held for a person by Claude's own mode check; the PermissionRequest hook
     so a background worker's prompts reach a person through xsm."""
-    settings = {"crossSessionInbound": "accept"}
+    settings: dict = {"crossSessionInbound": "accept"}
     if worker["mode"] == "background" and not worker.get("full_access"):
         # The rule a background Codex worker runs under, for Claude: shell
         # commands in the OS sandbox (no writes outside the folder) run without
@@ -263,15 +263,31 @@ def _claude_worker_settings(worker: dict) -> str:
         # file, not the Codex home, whose config the sandbox keeps shut.
         # Measured without these: `xsm send` from the worker failed with
         # "a sandboxed session cannot open the inbox socket".
-        queues = [os.path.join(h["path"], "queue_1.sqlite" + suffix)
-                  for h in config.homes() if h.get("runtime") == "codex"
-                  for suffix in ("", "-wal", "-shm")]
+        # `codex queue` opens the home's state database as well as the queue
+        # (measured: "failed to open state DB ... state_5.sqlite (code: 8)"
+        # from inside the sandbox), so every sqlite file there is writable;
+        # config.toml and hooks.json stay shut.
+        codex_homes = [h["path"] for h in config.homes() if h.get("runtime") == "codex"]
+        queues = [p for h in codex_homes for p in glob.glob(os.path.join(h, "*.sqlite*"))]
+        # `codex queue` also starts an embedded app server, which needs the
+        # home's ipc and daemon folders and a local socket to bind (measured:
+        # "failed to start embedded app server: Operation not permitted").
+        ipc = [os.path.join(h, d) for h in codex_homes for d in ("ipc", "app-server-daemon")]
         settings["sandbox"] = {"enabled": True, "autoAllowBashIfSandboxed": True,
                                "allowUnsandboxedCommands": False,
-                               "filesystem": {"allowWrite": [paths.HOME] + queues},
+                               "filesystem": {"allowWrite": [paths.HOME] + queues + ipc},
                                "network": {"allowUnixSockets": [CLAUDE_SOCKETS,
-                                                                os.path.realpath(CLAUDE_SOCKETS)]}}
-        settings["permissions"] = {"allow": ["Bash"]}
+                                                                os.path.realpath(CLAUDE_SOCKETS)]
+                                           + ipc, "allowLocalBinding": True}}
+        # Monitor runs shell commands too, under the same sandbox; without it a
+        # worker that watched a file with Monitor sat on an approval for ten
+        # minutes (S10 collab pilot). The xsm MCP tools run outside the sandbox
+        # and are the route to a Codex peer: `codex queue` from the sandboxed
+        # shell cannot start its embedded app server (measured), and the MCP
+        # server can. Same as the Codex worker's route to a Claude peer.
+        settings["permissions"] = {"allow": ["Bash", "Monitor"] + [
+            "mcp__%s__%s" % (install.MCP_NAME, tool)
+            for tool in ("xsm_send", "xsm_post", "xsm_channel")]}
         settings["hooks"] = {"PermissionRequest": [{"hooks": [{
             "type": "command", "command": _hook_command(),
             "timeout": int(worker["approval_timeout"]) + 30}]}]}
@@ -307,6 +323,13 @@ def _claude_argv(worker: dict, settings: str) -> list:
     # the worker to act on other sessions or on configuration unseen.
     argv = ["claude", "--name", worker["name"], "--settings", settings,
             "--allowedTools", "Bash(%s send:*)" % install.launcher()]
+    if worker["mode"] == "background":
+        # The xsm MCP server, whatever the user's own registration: a
+        # background worker's route to a Codex peer is this server, which runs
+        # outside the shell sandbox. (Registration was also found landing in
+        # ~/.claude/.claude.json, which no session reads — see install.)
+        argv += ["--mcp-config", json.dumps({"mcpServers": {install.MCP_NAME: {
+            "command": install.mcp_command()[0], "args": install.mcp_command()[1:]}}})]
     if worker.get("model"):
         argv += ["--model", worker["model"]]
     if worker.get("effort"):
@@ -491,9 +514,19 @@ def _start_in_tmux(worker: dict, pane: str | None) -> None:
         # has nobody to ask and Codex has no hook to relay the question, so it
         # does not ask: it stays in its workspace-write sandbox instead.
         asks = ["-a", "on-request"] if worker["mode"] == "pane" else ["-a", "never"]
+        # A background Codex worker reports through xsm like any session. Its
+        # sandboxed shell cannot open a Claude peer's inbox socket (seatbelt
+        # counts that as a filesystem violation, and network.allow_unix_sockets
+        # did not change it — measured 2026-09-22), so the route is the xsm MCP
+        # server, which runs outside the sandbox: its tools need no approval,
+        # since under `-a never` a tool that asks is refused outright. The
+        # shell still needs XSM_HOME writable for the ledger it keeps.
+        reach = [] if worker.get("full_access") or worker["mode"] == "pane" else [
+            "-c", "sandbox_workspace_write.writable_roots=[%s]" % json.dumps(paths.HOME),
+            "-c", 'mcp_servers.%s.default_tools_approval_mode="approve"' % install.MCP_NAME]
         argv = ["codex"] + _codex_config_args(worker) + (
             ["--dangerously-bypass-approvals-and-sandbox"] if worker.get("full_access")
-            else ["-s", "workspace-write"] + asks) + (
+            else ["-s", "workspace-write"] + asks + reach) + (
             ["--dangerously-bypass-hook-trust"] if worker.get("trust_hooks") else [])
     # exec all the way down, so the pane's pid is the worker's own pid.
     command = "exec env %s %s %s" % (unset, assignments, " ".join(shlex.quote(a) for a in argv))

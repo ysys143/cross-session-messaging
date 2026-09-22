@@ -108,6 +108,7 @@ def _to_codex(codex_home: str, thread_id: str, content: str) -> str:
         raise DeliveryError("codex-failed", str(err))
     if out.returncode != 0:
         text = (out.stderr or out.stdout or "").strip()
-        reason = "sandbox-blocked" if "readonly database" in text else "codex-failed"
+        blocked = "readonly database" in text or "Operation not permitted" in text
+        reason = "sandbox-blocked" if blocked else "codex-failed"
         raise DeliveryError(reason, text[:400])
     return (out.stdout or "").strip()

@@ -351,7 +351,23 @@ class SafetyTest(TempState):
         self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
         self.assertEqual(settings["sandbox"]["filesystem"]["allowWrite"], [paths.HOME],
                          "xsm stays sandboxed; its store is the one place it may write outside")
-        self.assertEqual(settings["permissions"]["allow"], ["Bash"])
+        self.assertEqual(settings["permissions"]["allow"][:2], ["Bash", "Monitor"])
+        self.assertIn("mcp__xsm__xsm_send", settings["permissions"]["allow"],
+                      "the route to a Codex peer runs outside the sandbox")
+        from xsm import config
+        codex_home = os.path.realpath(os.path.join(self.tmp, "codex-home"))
+        os.makedirs(codex_home)
+        open(os.path.join(codex_home, "state_5.sqlite"), "w").close()
+        open(os.path.join(codex_home, "config.toml"), "w").close()
+        config.add_home(codex_home, "codex")
+        again = json.load(open(workers._claude_worker_settings(w)))
+        self.assertIn(os.path.join(codex_home, "state_5.sqlite"),
+                      again["sandbox"]["filesystem"]["allowWrite"], "codex queue opens its state DB")
+        self.assertNotIn(os.path.join(codex_home, "config.toml"),
+                         again["sandbox"]["filesystem"]["allowWrite"])
+        self.assertIn(os.path.join(codex_home, "ipc"), again["sandbox"]["network"]["allowUnixSockets"],
+                      "codex queue starts an embedded app server")
+        self.assertTrue(again["sandbox"]["network"]["allowLocalBinding"])
         self.assertIn(workers.CLAUDE_SOCKETS, settings["sandbox"]["network"]["allowUnixSockets"],
                       "reporting back goes through a peer's inbox socket")
         self.assertIn("PermissionRequest", settings["hooks"], "past the sandbox, a person decides")
@@ -599,6 +615,55 @@ class DangerousFlagsTest(TempState):
             workers._start_in_tmux(w, None)
         self.assertEqual([a[1] for a in seen if a[0] == "tmux"][-2:], ["new-session", "new-window"])
         self.assertEqual(w["pane"], "%5")
+
+    def test_a_background_codex_worker_can_reach_peers_and_its_mcp_tools(self):
+        """Its sandbox may open Claude inbox sockets, and xsm's MCP tools need no
+        approval — under `-a never` a tool that asks is refused. Pane workers,
+        whose person answers in the pane, get neither."""
+        import shlex
+        from unittest import mock
+        from xsm import install, workers
+        for mode, expect in (("background", True), ("pane", False)):
+            seen = []
+            def run(argv, **kw):
+                seen.append(argv)
+                if argv[1] == "has-session":
+                    return mock.Mock(returncode=1)
+                return mock.Mock(returncode=0, stdout="%4 4242\n", stderr="")
+            w = {"name": "cx-" + mode, "runtime": "codex", "home": self.tmp, "cwd": self.tmp,
+                 "mode": mode, "model": "m", "approval_timeout": 5, "created": 0}
+            with mock.patch.object(workers.subprocess, "run", run), \
+                    mock.patch.object(workers.time, "sleep", lambda s: None):
+                workers._start_in_tmux(w, "%1" if mode == "pane" else None)
+            launch = next(a for a in seen if a[0] == "tmux" and a[1] in ("split-window", "new-session"))
+            command = " ".join(shlex.split(launch[-1]))
+            self.assertEqual("sandbox_workspace_write.writable_roots" in command, expect, mode)
+            self.assertEqual('mcp_servers.%s.default_tools_approval_mode="approve"'
+                             % install.MCP_NAME in command, expect, mode)
+
+    def test_a_background_claude_worker_carries_the_xsm_mcp_server_itself(self):
+        """Whatever the user's registration: the route to a Codex peer."""
+        import json as _json
+        from xsm import install, workers
+        for mode, expect in (("background", True), ("pane", False)):
+            argv = workers._claude_argv({"name": "w", "mode": mode}, "/s.json")
+            self.assertEqual("--mcp-config" in argv, expect, mode)
+            if expect:
+                cfg = _json.loads(argv[argv.index("--mcp-config") + 1])
+                self.assertEqual(cfg["mcpServers"][install.MCP_NAME]["args"],
+                                 install.mcp_command()[1:])
+
+    def test_the_default_claude_home_is_never_named_to_claude(self):
+        """CLAUDE_CONFIG_DIR=~/.claude sends Claude to ~/.claude/.claude.json,
+        which no session reads: folder trust and the MCP registration both
+        vanished that way."""
+        from unittest import mock
+        from xsm import install
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/elsewhere"}):
+            self.assertNotIn("CLAUDE_CONFIG_DIR",
+                             install._runtime_env(os.path.expanduser("~/.claude"), "claude"))
+            self.assertEqual(install._runtime_env("/x/.claude-2", "claude")["CLAUDE_CONFIG_DIR"],
+                             "/x/.claude-2")
 
     def test_trust_keys_are_the_measured_ones(self):
         """Claude's cursor starts on "No, exit": a bare Enter there refuses."""

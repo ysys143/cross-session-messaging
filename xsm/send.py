@@ -127,6 +127,7 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
             adapters.to_codex(target.get("home", os.path.expanduser("~/.codex")),
                               str(target.get("session_id")), content)
     except adapters.DeliveryError as err:
+        ledger.failed(msg_id, "%s: %s" % (err.reason, err.detail))
         paths.append_jsonl("decisions.jsonl", {"decision": "send-failed", "id": msg_id,
                                                "reason": err.reason, "detail": err.detail})
         return SendResult("error", "%s: %s" % (err.reason, err.detail), msg_id, target)
