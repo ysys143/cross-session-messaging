@@ -73,6 +73,25 @@ FRAMEWORKS = (
 )
 
 
+# --- what a background worker may do without asking --------------------------
+#
+# One declaration, because the rule was widened three times in one day, each
+# time after a worker sat ten minutes on a question nobody was there to answer
+# (S10, 2026-09-22/23): shell commands, then reads outside the folder, then
+# xsm_inbox. Both runtimes are configured from this; `xsm workers --policy`
+# prints it, and PROTOCOL 5.5 explains each line.
+WORKER_POLICY = {
+    "shell": "every shell command, because every one runs inside the OS sandbox",
+    "read": "read anything, anywhere (Read, Glob, Grep; Codex workspace-write reads too)",
+    "write": "write inside the working folder only, plus the xsm store",
+    "reach": "message peers: the xsm MCP tools, which run outside the sandbox",
+    "ask": "anything else goes to a person: Claude through the PermissionRequest hook, "
+           "Codex by refusing (it has no such hook)",
+}
+CLAUDE_WORKER_TOOLS = ("Bash", "Monitor", "Read", "Glob", "Grep")
+CLAUDE_WORKER_MCP = ("xsm_send", "xsm_post", "xsm_channel", "xsm_inbox")
+
+
 class WorkerError(Exception):
     pass
 
@@ -295,9 +314,8 @@ def _claude_worker_settings(worker: dict) -> str:
         # Its shells cannot run `codex queue`; `xsm send` reads this and says
         # so at once instead of failing after trying (send.sandboxed).
         settings["env"] = {"XSM_SANDBOXED": "1"}
-        settings["permissions"] = {"allow": ["Bash", "Monitor", "Read", "Glob", "Grep"] + [
-            "mcp__%s__%s" % (install.MCP_NAME, tool)
-            for tool in ("xsm_send", "xsm_post", "xsm_channel", "xsm_inbox")]}
+        settings["permissions"] = {"allow": list(CLAUDE_WORKER_TOOLS) + [
+            "mcp__%s__%s" % (install.MCP_NAME, tool) for tool in CLAUDE_WORKER_MCP]}
         settings["hooks"] = {"PermissionRequest": [{"hooks": [{
             "type": "command", "command": _hook_command(),
             "timeout": int(worker["approval_timeout"]) + 30}]}]}

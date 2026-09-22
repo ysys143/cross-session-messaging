@@ -161,7 +161,7 @@ grep -n '#xsm-hook' ~/.claude-4/settings.json
 
 `install`이 훅과 함께 넣는다. 따로 복사할 것이 없다.
 
-- `<홈>/commands/xsm-*.md` — 세션에서 바로 쓰는 명령 `/xsm-list`, `/xsm-who`, `/xsm-inbox`, `/xsm-doctor`, `/xsm-send`. 파일에는 저장소의 `bin/xsm` 절대 경로가 박히므로 PATH에 의존하지 않는다.
+- `<홈>/commands/xsm-*.md` — 세션에서 바로 쓰는 명령 `/xsm-list`, `/xsm-who`, `/xsm-log`, `/xsm-doctor`, `/xsm-send`. 파일에는 저장소의 `bin/xsm` 절대 경로가 박히므로 PATH에 의존하지 않는다.
 - `<홈>/skills/xsm` — 저장소의 스킬로 가는 심볼릭 링크. 에이전트가 주소 문법과 결과 읽는 법을 알게 된다.
 
 같은 이름의 파일이 이미 있으면 건드리지 않고 건너뛴다. 훅만 넣고 싶으면 `--no-commands`를 준다.
@@ -498,7 +498,7 @@ refused: cx-reviewer@codex is open but has not registered with xsm: the xsm hook
 | 6-5 | 멈춘 Codex | X를 종료한다(`/quit`, 또는 Ctrl-C 두 번). A에서 `/xsm-send cx-reviewer@codex 정지 확인` | `refused: only stopped sessions match …`와 `resume it with: CODEX_HOME=… codex resume <id>`. 상태는 `stale`(Codex에는 종료 인사가 없다) |
 | 6-6 | 재개 | 안내된 명령으로 재개하고 프롬프트를 한 번 넣는다(재개 뒤 SessionStart가 다시 오는지는 확인되지 않았다. 프롬프트 때 훅이 다시 등록한다). A에서 다시 보낸다 | 다시 `live`. **ref가 그대로**다. 메시지가 도착한다 |
 
-`--wait`를 주지 않은 발신 결과는 항상 `sent-unconfirmed`다. Codex는 큐를 10초 단위로 읽으므로, 전달 여부는 조금 뒤 `xsm ledger`나 `/xsm-inbox`로 본다.
+`--wait`를 주지 않은 발신 결과는 항상 `sent-unconfirmed`다. Codex는 큐를 10초 단위로 읽으므로, 전달 여부는 조금 뒤 `xsm ledger`나 `/xsm-log`로 본다.
 
 ### 6.4 협업: Codex를 검토자로
 

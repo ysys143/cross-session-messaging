@@ -627,11 +627,22 @@ def cmd_install(args) -> int:
         if runtime != "claude":
             continue
         plugin = install.plugin_installed(home)
-        if plugin and not args.force:
-            print("refused: %s has the xsm plugin (%s), which brings its own hooks; installing "
-                  "again would run every hook twice. Remove the plugin, or pass --force if you "
-                  "know why you want both." % (_home_tilde(home), plugin), file=sys.stderr)
-            return REFUSED
+        if not plugin or args.force:
+            continue
+        if args.refresh:
+            # Refreshing every home it knows must not stop at one that has
+            # moved to the plugin; the plugin updates itself by version.
+            print("%s: the xsm plugin (%s) keeps it up to date; skipped"
+                  % (_home_tilde(home), plugin))
+            targets.remove((home, runtime))
+            continue
+        print("refused: %s has the xsm plugin (%s), which brings its own hooks; installing "
+              "again would run every hook twice. Remove the plugin, or pass --force if you "
+              "know why you want both." % (_home_tilde(home), plugin), file=sys.stderr)
+        return REFUSED
+    if not targets:
+        print("every home xsm knows is on the plugin; nothing to refresh")
+        return OK
     try:
         chosen = install.resolve_python(args.python)
     except ValueError as err:
@@ -1009,6 +1020,18 @@ def cmd_reap(args) -> int:
 
 
 def cmd_workers(args) -> int:
+    if getattr(args, "policy", False):
+        print("what a background worker does without asking (PROTOCOL 5.5):")
+        for name, rule in workers.WORKER_POLICY.items():
+            print("  %-6s %s" % (name, rule))
+        print("  claude tools: %s" % ", ".join(
+            list(workers.CLAUDE_WORKER_TOOLS) + list(workers.CLAUDE_WORKER_MCP)))
+        print("  codex:        -s workspace-write -a never, xsm store writable, MCP approved")
+        return OK
+    return _cmd_workers(args)
+
+
+def _cmd_workers(args) -> int:
     for name, why in workers.reap():
         print("stopped %s: %s" % (name, why))
     rows = workers.all_workers()
@@ -1267,6 +1290,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "(default: XSM_MAX_DEPTH or config max_depth, 1; a worker can only lower it)")
     sp.set_defaults(func=cmd_spawn)
     wk = sub.add_parser("workers", help="workers xsm started")
+    wk.add_argument("--policy", action="store_true",
+                    help="what a background worker may do without asking")
     wk.set_defaults(func=cmd_workers)
     rp = sub.add_parser("reap", help=argparse.SUPPRESS)
     rp.add_argument("--after-pid", type=int)

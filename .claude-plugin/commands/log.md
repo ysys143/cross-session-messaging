@@ -1,5 +1,5 @@
 ---
-description: Show recent xsm messages and anything the gate refused
+description: Show this session's recent xsm messages and anything the gate refused
 allowed-tools: Bash(xsm ledger:*), Bash(xsm held:*)
 disable-model-invocation: true
 ---

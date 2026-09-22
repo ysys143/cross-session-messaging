@@ -309,6 +309,17 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 `xsm spawn`이 띄운 세션이다. 등록된 뒤에는 다른 세션과 똑같이 주소가 붙고 검문을 받는다. 기록은 `workers/<이름>.json`과 `workers/<이름>/`(워커 전용 `settings.json`)이다.
 
 - **실행 위치.** Orca·herdr 패널(`ORCA_TERMINAL_HANDLE`·`ORCA_PANE_KEY`, `HERDR_PANE_ID`·`HERDR_ENV`) 안이면 `spawn`과 `stop`은 거부한다. 단, 사람이 `xsm frameworks ignore <이름>`으로 켠 프레임워크(`config.json`의 `ignore_frameworks`)는 예외다. 살아 있는 tmux 패널(`$TMUX_PANE`을 `tmux display`로 확인) 안이면 그 옆 분할 패널에서 TUI로 띄운다. 그 밖에는 백그라운드 tmux 세션에서 TUI로 띄운다. tmux가 없으면 거부한다.
+- **백그라운드 워커가 묻지 않고 하는 일(한 선언).** 규칙이 흩어져 있어 하루에 세 번 넓혀졌으므로(그때마다 워커가 10분씩 사람을 기다렸다) `workers.WORKER_POLICY` 한 곳에서 선언하고 두 런타임을 거기서 구성한다. `xsm workers --policy`가 그대로 출력한다.
+
+  | 항목 | 규칙 |
+  |---|---|
+  | shell | 모든 셸 명령. 모두 OS 샌드박스 안에서 돌기 때문이다 |
+  | read | 어디서든 읽기(`Read`·`Glob`·`Grep`; Codex의 `workspace-write`도 읽기는 전부 허용한다) |
+  | write | 작업 폴더 안, 그리고 xsm 저장소만 |
+  | reach | 피어에게 보내기: 샌드박스 밖에서 도는 xsm MCP 도구 |
+  | ask | 그 밖의 모든 것은 사람에게. Claude는 `PermissionRequest` 훅으로, Codex는 훅이 없으므로 거부로 |
+
+  Claude 워커 허용 도구는 `workers.CLAUDE_WORKER_TOOLS`(`Bash`, `Monitor`, `Read`, `Glob`, `Grep`)와 `workers.CLAUDE_WORKER_MCP`(`xsm_send`, `xsm_post`, `xsm_channel`, `xsm_inbox`)다. Codex 워커는 `-s workspace-write -a never`에 xsm 저장소 쓰기와 MCP 승인이 붙는다.
 - **환경.** 워커에는 `XSM_WORKER=<이름>`이 붙고, 부모의 `CLAUDE_CODE_SESSION_ID`·`CLAUDE_CODE_MESSAGING_SOCKET`과 프레임워크 패널 변수는 지운다. Claude 워커는 패널이든 백그라운드든 `--permission-mode default`로 뜨고, `--settings`로 `crossSessionInbound: accept`를 받고, 보고용으로 `xsm send`만 미리 허용된다(`--allowedTools Bash(<xsm> send:*)`). `spawn`·`stop`·`install` 같은 다른 xsm 명령은 여전히 승인을 거친다.
 - **백그라운드.** tmux 밖에서 부르거나 `--background`면 분리된 tmux 세션 `xsm-workers`에 창을 열고(없으면 `new-session -d`, 있으면 `new-window -d`) 그 안에서 실제 TUI를 띄운다. 전달은 다른 세션과 같다(Claude 인박스 소켓, `codex queue`). 워커는 `claude -p`나 `codex exec`로 띄우지 않는다(2026-09-22 결정, ADR-0010 부록).
 - **TUI Codex.** `codex -s workspace-write -a on-request`로 띄운다. 사용자 설정이 전체 접근이어도 패널에서 승인을 묻게 하기 위해서다. 패널에서 띄운 뒤 `/rename <이름>`을 입력해 스레드를 만들고, 그 이름과 시작 시각 이후 생성으로 스레드를 찾아 등록한다. 같은 폴더의 가장 최근 스레드로 추정하지 않는다(그렇게 했다가 이전 워커의 스레드로 잘못 등록된 것을 실측했다).

@@ -10,7 +10,7 @@ a hook in each session records where it is, and the CLI writes to the
 receiving runtime's native path.
 
 In Claude Code the commands below also exist as `/xsm-list`, `/xsm-who`,
-`/xsm-inbox`, `/xsm-doctor`, `/xsm-send`, `/xsm-join`, `/xsm-leave` and
+`/xsm-log`, `/xsm-doctor`, `/xsm-send`, `/xsm-join`, `/xsm-leave` and
 `/xsm-projects`. In Codex there are no slash
 commands: run `xsm` from the shell. Sending from Codex needs a shell that can
 reach outside the sandbox (full access, or approve the command when asked) —
@@ -148,6 +148,12 @@ same way. Pairing a machine is your user's decision (`xsm_grant`, option
 `remote`).
 
 ## Workers: starting a session to hand work to
+
+`xsm workers --policy` prints what a background worker does without asking:
+every shell command (all of them sandboxed), reads anywhere, writes inside its
+folder, and the xsm MCP tools to reach a peer. Everything else goes to a person.
+If a worker reports that it was refused something, that list is what to check —
+do not widen it yourself.
 
 ```bash
 xsm spawn claude --model haiku --once --task "Run the tests in ./pkg and report failures"

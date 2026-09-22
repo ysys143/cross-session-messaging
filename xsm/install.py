@@ -199,6 +199,7 @@ def install_commands(home: str) -> list:
     in. Written rather than symlinked because the path has to be substituted."""
     target_dir = os.path.join(home, "commands")
     os.makedirs(target_dir, exist_ok=True)
+    remove_orphans(home, "claude")
     written = []
     for source in command_files():
         body = open(source, encoding="utf-8").read().replace("{{XSM}}", launcher())
@@ -295,6 +296,7 @@ def install_codex_commands(home: str) -> list:
     """The slash commands as skills in a Codex home, one directory each.
     A directory that is not ours (no marker in its SKILL.md) is left alone."""
     written = []
+    remove_orphans(home, "codex")
     for source in command_files():
         name = os.path.basename(source)[:-3]
         target = os.path.join(home, "skills", name)
@@ -492,6 +494,38 @@ def remove_statusline(home: str) -> bool:
         del data["statusLine"]
     paths.write_json(target, data, mode=0o644)
     return True
+
+
+def orphaned_commands(home: str, runtime: str = "claude") -> list:
+    """Files we installed for a command that no longer exists — a renamed one.
+    `/xsm-inbox` became `/xsm-log` (2026-09-23) and the old file would have
+    stayed, offering a command whose text we no longer maintain."""
+    ours = {os.path.basename(s) for s in command_files()}
+    out = []
+    if runtime == "claude":
+        for p in glob.glob(os.path.join(home, "commands", "xsm-*.md")):
+            body = _read_text(p)
+            if os.path.basename(p) not in ours and body and FILE_MARKER in body:
+                out.append(p)
+    else:
+        for p in glob.glob(os.path.join(home, "skills", "xsm-*", "SKILL.md")):
+            if os.path.basename(os.path.dirname(p)) + ".md" not in ours and \
+                    FILE_MARKER in (_read_text(p) or ""):
+                out.append(os.path.dirname(p))
+    return out
+
+
+def remove_orphans(home: str, runtime: str = "claude") -> list:
+    gone = orphaned_commands(home, runtime)
+    for p in gone:
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    return gone
 
 
 def remove_commands(home: str) -> int:

@@ -9,10 +9,10 @@
     {
       "name": "xsm",
       "source": "./",
-      "version": "0.2.3",
+      "version": "0.3.0",
       "description": "Message the other Claude Code and Codex sessions on this machine: list them, send a task, answer one, start workers, and see what was delivered.",
       "category": "productivity"
     }
   ],
-  "version": "0.2.3"
+  "version": "0.3.0"
 }
