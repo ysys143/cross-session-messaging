@@ -647,6 +647,9 @@ def cmd_spawn(args) -> int:
         print("refused: --task needs a registered session to send it from and to report back "
               "to; run spawn from a session", file=sys.stderr)
         return REFUSED
+    # The id is on record before the task leaves, so the answer can never
+    # arrive ahead of it (a `once` worker stops only on that exact answer).
+    task = {"id": envelope.new_id(), "text": args.task} if args.task else None
     try:
         worker = workers.spawn(args.runtime, name=args.name, model=args.model, effort=args.effort,
                                cwd=args.dir, home=args.home, once=args.once,
@@ -654,7 +657,7 @@ def cmd_spawn(args) -> int:
                                approval_timeout=args.approval_timeout,
                                wait=args.wait, caller=caller, max_depth=args.max_depth,
                                full_access=args.full_access, trust_hooks=args.trust_hooks,
-                               grant=args.grant)
+                               grant=args.grant, task=task)
     except workers.WorkerError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return REFUSED
@@ -662,25 +665,47 @@ def cmd_spawn(args) -> int:
              "background, tmux " + workers.BACKGROUND_SESSION + " %s") % worker.get("pane")
     print("started %s (%s, %s%s) [%s] in %s" % (
         worker["name"], worker["runtime"], where,
-        ", model %s" % worker["model"] if worker.get("model") else "", worker.get("ref"),
-        worker["cwd"]))
-    if args.task:
-        # The id is on record before the task leaves, so the answer can never
-        # arrive ahead of it (a `once` worker stops only on that exact answer).
-        task_id = envelope.new_id()
-        worker["task_id"] = task_id
+        ", model %s" % worker["model"] if worker.get("model") else "",
+        worker.get("ref") or "not registered yet", worker["cwd"]))
+    if worker.get("waiting"):
+        return _spawn_waiting_for_trust(worker)
+    if task:
+        worker.pop("pending_task", None)
+        worker["task_id"] = task["id"]
         workers.save(worker)
-        result = send.send("ref:%s" % worker["ref"], args.task, sender=caller, kind="task",
-                           wait=args.task_wait, msg_id=task_id)
+        result = send.send("ref:%s" % worker["ref"], task["text"], sender=caller, kind="task",
+                           wait=args.task_wait, msg_id=task["id"])
         print("task %s: %s%s" % (result.msg_id or "-", result.status,
                                  ": " + result.reason if result.reason else ""))
-    if worker["mode"] == "background":
-        print("see it: xsm attach %s   stop it: xsm stop %s" % (worker["name"], worker["name"]))
-    else:
-        print("stop it: xsm stop %s" % worker["name"])
+    print("stop it: xsm stop %s" % worker["name"])
     if worker.get("once"):
         print("it stops by itself once its answer to the task reaches this session")
     return OK
+
+
+def _spawn_waiting_for_trust(worker: dict) -> int:
+    """The worker stopped at a folder-trust screen. A person at this terminal
+    answers here; an agent is told to put the question to its user now."""
+    req_id = worker["waiting"]
+    question = "%s asks to trust %s" % (worker["name"], worker["cwd"])
+    if workers.human_terminal():
+        with open("/dev/tty", "w") as tty_out, open("/dev/tty") as tty_in:
+            tty_out.write("%s. Trust it? Type yes to trust: " % question)
+            tty_out.flush()
+            yes = tty_in.readline().strip().lower() == "yes"
+        workers.answer(req_id, yes, None if yes else "the person said no")
+        print("%s; the worker %s" % ("trusted" if yes else "not trusted",
+                                     "carries on" if yes else "is being stopped"))
+        return OK if yes else REFUSED
+    print("waiting: %s. Call the xsm_approve MCP tool with id %s now: it puts the question to "
+          "your user. Do not decide it yourself. Once they answer, the worker %s on its own%s."
+          % (question, req_id, "starts" , ", and its task goes to it" if worker.get("pending_task")
+             else ""))
+    return UNCONFIRMED
+
+
+def cmd_worker_finish(args) -> int:
+    return workers.finish(args.name)
 
 
 def cmd_reap(args) -> int:
@@ -955,7 +980,8 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--after-pid", type=int)
     rp.set_defaults(func=cmd_reap)
     for verb, helptext, func in (("stop", "stop a worker and remove its records", cmd_stop),
-                                 ("attach", "go to a worker's tmux pane", cmd_attach)):
+                                 ("attach", "go to a worker's tmux pane", cmd_attach),
+                                 ("worker-finish", argparse.SUPPRESS, cmd_worker_finish)):
         sp = sub.add_parser(verb, help=helptext)
         sp.add_argument("name")
         if verb == "stop":
@@ -1112,7 +1138,7 @@ def main(argv=None) -> int:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
     paths.ensure_home()
-    if args.command not in ("hook", "statusline", "prune", "reap", "mcp"):
+    if args.command not in ("hook", "statusline", "prune", "reap", "mcp", "worker-finish"):
         housekeeping.maybe_prune()
     try:
         from . import telemetry

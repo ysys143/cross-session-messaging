@@ -156,7 +156,12 @@ xsm stop <worker>           # stop it and remove its records
   (`xsm_approve` when it asks again, `xsm_grant` for full access) and send the
   step back; do not accept "no permission" as the end of the task.
 - A background Claude worker's permission prompts go to your user; a
-  background Codex worker runs sandboxed to its folder and does not ask. You get a note
+  background Codex worker runs sandboxed to its folder and does not ask.
+- If a background worker stops at a folder-trust screen, `spawn` returns at
+  once saying `waiting: … Call the xsm_approve MCP tool with id …`. Do that
+  now: the question goes to your user in a form. Once they answer, the worker
+  starts and its `--task` reaches it on its own. Never send your user to the
+  tmux screen, and never answer it yourself. You get a note
   saying what it is waiting for. **Never try to approve it yourself** —
   `xsm approve` works only from a person's terminal, and trying to get around
   that is permission laundering. Tell your user what is waiting and why.

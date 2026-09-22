@@ -13,18 +13,21 @@ Where it runs follows from where the caller is (user decision, 2026-09-21):
 - Anywhere else, or with --background, it runs in the background: the same
   real TUI, in a window of a detached tmux session named xsm-workers. Nobody is
   at its screen, but it is a live session all the same — it takes messages the
-  way any session does, and `tmux attach -t xsm-workers` shows it.
+  way any session does.
+- Inside a multi-agent framework (Orca, herdr) xsm starts and stops nothing:
+  managing workers belongs to the framework, and xsm only carries the
+  cross-session messages the framework does not (user decision, 2026-09-21).
 
 A worker is never `claude -p` or `codex exec`. Those run one prompt and are
 gone: there is no session to send a message to, so there is nothing for xsm to
 connect (user decision, 2026-09-22; an earlier version ran such "headless"
 workers, and a headless Claude worker could not even be sent a message).
-- Inside a multi-agent framework (Orca, herdr) xsm starts and stops nothing:
-  managing workers belongs to the framework, and xsm only carries the
-  cross-session messages the framework does not (user decision, 2026-09-21).
 
-A background Claude worker has nobody at its screen, so its permission prompts
-go through xsm: its PermissionRequest hook records the request, tells the caller,
+Nobody is at a background worker's screen, so what it would ask there comes to
+a person through xsm instead of the person going to the screen: a folder-trust
+screen before it starts, and a background Claude worker's permission prompts.
+Its PermissionRequest hook records the request, tells the caller,
+and waits for a person to answer with `xsm approve`/`xsm deny` in a terminal. its PermissionRequest hook records the request, tells the caller,
 and waits for a person to answer with `xsm approve`/`xsm deny` in a terminal.
 The caller's agent is told, never asked — an agent approving its own worker is
 the permission laundering the skill forbids.
@@ -51,6 +54,14 @@ APPROVALS = "approvals"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 APPROVAL_TIMEOUT = 600          # seconds a background worker waits for a person
 BACKGROUND_SESSION = "xsm-workers"
+
+# A runtime's "do you trust this folder" screen, and the keys that answer it
+# (measured 2026-09-22 in tmux: Claude's cursor starts on "No, exit", Codex's
+# on "Yes, continue", so the same Enter means opposite things).
+TRUST_PROMPTS = {
+    "claude": ("Yes, I trust this folder", {"yes": ["Down", "Enter"], "no": ["Enter"]}),
+    "codex": ("Do you trust the contents of this directory", {"yes": ["Enter"], "no": ["2"]}),
+}
 CODEX_MODEL = "gpt-5.6-luna"    # the default for tests; --model overrides
 
 # How each framework marks the terminals it owns. Pane-level variables, not
@@ -349,7 +360,12 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
           once: bool = False, background: bool = False, approval_timeout: int = APPROVAL_TIMEOUT,
           wait: float = 90.0, caller: dict | None = None,
           max_depth: int | None = None, full_access: bool = False, trust_hooks: bool = False,
-          grant: str | None = None) -> dict:
+          grant: str | None = None, task: dict | None = None) -> dict:
+    """Start a worker. If it stops at a folder-trust screen in the background,
+    return at once with worker["waiting"] set to an approval request: the
+    caller is an agent blocked in this call, and it has to be free to ask its
+    user. A detached `xsm worker-finish` answers the screen once a person has,
+    finishes registration and hands over `task` ({"id", "text"})."""
     refuse_inside_framework()
     depth, limit = depth_budget(caller, max_depth)
     check_concurrency(caller)
@@ -392,7 +408,8 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
               "approval_timeout": int(approval_timeout), "created": time.time(),
               "parent_ref": (caller or {}).get("ref"), "session_id": None,
               "depth": depth, "max_depth": limit, "full_access": full_access,
-              "trust_hooks": trust_hooks, "grant": (granted or {}).get("id")}
+              "trust_hooks": trust_hooks, "grant": (granted or {}).get("id"),
+              "pending_task": task}
     if runtime == "codex" and not worker["model"]:
         worker["model"] = CODEX_MODEL
     os.makedirs(_dir(name), mode=0o700, exist_ok=True)
@@ -411,7 +428,13 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
         with span_cm:
             _start_in_tmux(worker, pane)
             save(worker)
-            _wait_for_registration(worker, wait)
+            try:
+                _wait_for_registration(worker, wait)
+            except _WaitingForTrust:
+                _ask_trust(worker)
+                save(worker)
+                _finish_detached(worker)
+                return worker
     except BaseException:
         if worker.get("pane"):
             subprocess.run(["tmux", "kill-pane", "-t", worker["pane"]], capture_output=True,
@@ -466,8 +489,9 @@ def _start_in_tmux(worker: dict, pane: str | None) -> None:
     if worker["runtime"] == "codex":
         # A Codex thread exists only once it is named or prompted; naming it
         # lets xsm register it before its first prompt (see adopt_open_codex).
-        time.sleep(4)
-        _tmux_type(pane_id, "/rename %s" % worker["name"])
+        # Typed later, from the registration wait: typed now it could land on
+        # a folder-trust screen, where its Enter picks the default, "Yes".
+        worker["needs_rename"] = True
 
 
 def _tmux_type(pane_id: str, text: str) -> None:
@@ -493,9 +517,117 @@ def _register_named_thread(worker: dict) -> None:
         paths.write_json(registry._record_path("codex", thread), rec)
 
 
+class _WaitingForTrust(Exception):
+    pass
+
+
+def _screen(pane: str) -> str:
+    try:
+        return subprocess.run(["tmux", "capture-pane", "-p", "-t", pane], capture_output=True,
+                              text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _at_trust_prompt(worker: dict) -> bool:
+    marker = TRUST_PROMPTS.get(worker["runtime"], ("",))[0]
+    return bool(marker and worker.get("pane") and marker in _screen(worker["pane"]))
+
+
+def _press(worker: dict, answer: str) -> None:
+    for key in TRUST_PROMPTS[worker["runtime"]][1][answer]:
+        subprocess.run(["tmux", "send-keys", "-t", worker["pane"], key], timeout=5)
+        time.sleep(0.5)
+
+
+def _ask_trust(worker: dict) -> dict:
+    """Turn the trust screen into an approval request: the same record, the
+    same statusline count and the same xsm_approve form as a permission."""
+    req = {"id": uuid.uuid4().hex[:8], "worker": worker["name"], "runtime": worker["runtime"],
+           "t": time.time(), "tool": "folder-trust", "input": worker["cwd"], "status": "pending",
+           "summary": "trust the folder %s so the %s worker can start" % (worker["cwd"],
+                                                                        worker["runtime"])}
+    os.makedirs(paths.path(APPROVALS), mode=0o700, exist_ok=True)
+    paths.write_json(_approval_path(req["id"]), req)
+    worker["waiting"] = req["id"]
+    return req
+
+
+def _finish_detached(worker: dict) -> None:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = install.REPO
+    subprocess.Popen([install.pinned_python(), "-m", "xsm", "worker-finish", worker["name"]],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+
+
+def finish(name: str) -> int:
+    """Wait for a person's answer to a trust screen, answer the screen, and
+    finish what spawn could not: registration, then the pending task. Runs
+    detached; says what happened through the approval record, the statusline,
+    and — once the worker can send — a note to the parent."""
+    while True:
+        worker = load(name)
+        if not worker or not worker.get("waiting"):
+            return 0
+        req_id = worker["waiting"]
+        deadline = time.time() + float(worker.get("approval_timeout") or APPROVAL_TIMEOUT)
+        status = "pending"
+        while time.time() < deadline and load(name):
+            status = (paths.read_json(_approval_path(req_id)) or {}).get("status") or "denied"
+            if status != "pending":
+                break
+            time.sleep(1)
+        if not load(name):
+            return 0
+        if status != "approved":
+            if status == "pending":
+                req = paths.read_json(_approval_path(req_id)) or {}
+                req.update({"status": "denied", "reason": "nobody answered within %ds"
+                            % (deadline - req.get("t", deadline))})
+                paths.write_json(_approval_path(req_id), req)
+            _press(worker, "no")
+            stop(name, reason="folder trust was not given")
+            return 0
+        _press(worker, "yes")
+        worker.pop("waiting", None)
+        save(worker)
+        try:
+            _wait_for_registration(worker, 90)
+        except _WaitingForTrust:
+            _ask_trust(worker)             # another trust screen: ask again
+            save(worker)
+            continue
+        except WorkerError:
+            stop(name, reason="it did not register after folder trust")
+            return 0
+        save(worker)
+        break
+    task = worker.pop("pending_task", None)
+    if task:
+        parent = next((r for r in registry.records() if r.get("ref") == worker.get("parent_ref")),
+                      None)
+        if parent:
+            from . import send as send_mod
+            worker["task_id"] = task["id"]
+            save(worker)
+            send_mod.send("ref:%s" % worker["ref"], task["text"], sender=parent, kind="task",
+                          msg_id=task["id"])
+    else:
+        save(worker)
+    return 0
+
+
 def _wait_for_registration(worker: dict, wait: float) -> None:
     deadline = time.time() + wait
     while time.time() < deadline:
+        at_trust = _at_trust_prompt(worker)
+        if at_trust and worker.get("mode") == "background":
+            raise _WaitingForTrust()
+        if worker.get("needs_rename") and not at_trust and \
+                time.time() - worker.get("created", 0) >= 4:
+            _tmux_type(worker["pane"], "/rename %s" % worker["name"])
+            worker.pop("needs_rename")
         if worker["runtime"] == "codex":
             _register_named_thread(worker)
             rec = next((r for r in registry.records() if r.get("runtime") == "codex" and (
@@ -512,9 +644,8 @@ def _wait_for_registration(worker: dict, wait: float) -> None:
         if worker.get("pid") and not identity.pid_alive(worker["pid"]):
             raise WorkerError("the worker exited before registering")
         time.sleep(0.5)
-    raise WorkerError("the worker did not register within %ds (is a trust prompt waiting in "
-                      "its tmux %s?)" % (wait, "pane" if worker["mode"] == "pane" else
-                                         "window: tmux attach -t %s" % BACKGROUND_SESSION))
+    raise WorkerError("the worker did not register within %ds%s" % (
+        wait, " (is a trust prompt waiting in its pane?)" if worker["mode"] == "pane" else ""))
 
 
 # --- approvals --------------------------------------------------------------------

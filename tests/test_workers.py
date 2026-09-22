@@ -488,6 +488,84 @@ class DangerousFlagsTest(TempState):
         self.assertNotIn("CLAUDE_CONFIG_DIR", default)
         self.assertEqual(other["CLAUDE_CONFIG_DIR"], "/x/.claude-2")
 
+    def test_a_trust_screen_becomes_a_question_for_a_person(self):
+        """The person is asked through xsm; they are not sent to a tmux screen."""
+        from unittest import mock
+        from xsm import paths, workers
+        workers._check_installed = lambda home, runtime: None
+        workers.check_concurrency = lambda caller: None
+        started = []
+        def start(worker, pane):
+            worker.update({"pane": "%7", "pid": os.getpid(), "lstart": None})
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_", "TMUX"))}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(workers, "_start_in_tmux", start), \
+                mock.patch.object(workers, "_screen", lambda pane: "  Yes, I trust this folder"), \
+                mock.patch.object(workers, "_finish_detached", lambda w: started.append(w["name"])), \
+                mock.patch.object(workers.shutil, "which", lambda name: "/usr/bin/" + name):
+            w = workers.spawn("claude", name="tw", cwd=self.tmp, background=True,
+                              task={"id": "t1", "text": "do it"})
+        req = paths.read_json(workers._approval_path(w["waiting"])) or {}
+        self.assertEqual((req.get("status"), req.get("tool"), req.get("worker")),
+                         ("pending", "folder-trust", "tw"))
+        self.assertIn(self.tmp, req.get("summary", ""))
+        self.assertEqual(started, ["tw"], "a detached finisher takes over; spawn returns at once")
+        self.assertEqual((workers.load("tw") or {}).get("pending_task"), {"id": "t1", "text": "do it"})
+
+    def test_the_finisher_answers_the_screen_the_way_the_person_did(self):
+        from unittest import mock
+        from xsm import paths, workers
+        for answer in ("approved", "denied"):
+            name = "f-" + answer
+            workers.save({"name": name, "runtime": "claude", "mode": "background", "pane": "%7",
+                          "cwd": self.tmp, "created": 0, "parent_ref": "pppppp"})
+            w = workers.load(name) or {}
+            req = workers._ask_trust(w)
+            workers.save(w)
+            req["status"] = answer
+            paths.write_json(workers._approval_path(req["id"]), req)
+            pressed, stopped = [], []
+            def register(worker, wait):
+                worker.update({"session_id": "s", "ref": "rrrrrr"})
+            with mock.patch.object(workers, "_press", lambda wk, a: pressed.append(a)), \
+                    mock.patch.object(workers, "_wait_for_registration", register), \
+                    mock.patch.object(workers, "stop", lambda n, reason="": stopped.append(n)):
+                workers.finish(name)
+            if answer == "approved":
+                self.assertEqual((pressed, stopped), (["yes"], []))
+                after = workers.load(name) or {}
+                self.assertNotIn("waiting", after)
+                self.assertEqual(after.get("ref"), "rrrrrr")
+            else:
+                self.assertEqual((pressed, stopped), (["no"], [name]))
+
+    def test_codex_is_not_named_over_a_trust_screen(self):
+        """/rename ends with Enter, which on Codex's trust screen picks "Yes":
+        typed there, it would trust the folder with nobody asked."""
+        from unittest import mock
+        from xsm import workers
+        typed = []
+        calls = []
+        def screen(pane):
+            calls.append(pane)
+            return "Do you trust the contents of this directory?" if len(calls) <= 2 else "> ready"
+        w = {"name": "cx", "runtime": "codex", "mode": "pane", "pane": "%3", "pid": None,
+             "home": self.tmp, "created": 0, "needs_rename": True}
+        with mock.patch.object(workers, "_screen", screen), \
+                mock.patch.object(workers, "_tmux_type", lambda pane, text: typed.append(text)), \
+                mock.patch.object(workers, "_register_named_thread", lambda wk: None), \
+                mock.patch.object(workers.time, "sleep", lambda s: None):
+            with self.assertRaises(workers.WorkerError):
+                workers._wait_for_registration(w, 0.2)
+        self.assertEqual(typed, ["/rename cx"], "typed once, after the trust screen was gone")
+
+    def test_trust_keys_are_the_measured_ones(self):
+        """Claude's cursor starts on "No, exit": a bare Enter there refuses."""
+        from xsm import workers
+        self.assertEqual(workers.TRUST_PROMPTS["claude"][1], {"yes": ["Down", "Enter"],
+                                                             "no": ["Enter"]})
+        self.assertEqual(workers.TRUST_PROMPTS["codex"][1], {"yes": ["Enter"], "no": ["2"]})
+
     def test_full_access_claude_skips_the_approval_hook(self):
         from xsm import workers
         w = {"name": "c", "mode": "background", "full_access": True, "approval_timeout": 5}

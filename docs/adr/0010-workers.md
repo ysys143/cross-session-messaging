@@ -85,10 +85,22 @@ xsm의 대상이 아니다.
 - tmux 밖에서 부른 `spawn`, 또는 `--background`는 분리된 tmux 세션 `xsm-workers`에 창을 하나 열고
   그 안에서 실제 TUI를 띄운다. 화면 앞에 사람이 없을 뿐, 메시지는 다른 세션과 같은 경로(Claude
   인박스 소켓, `codex queue`)로 받는다. `xsm attach <워커>`가 그 창으로 데려간다.
-- 작업 상황은 statusline에 워커마다 이름과 상태(`bg`, `gone`, 승인 대기 수)로 보인다.
+- 작업 상황은 statusline에 워커마다 이름과 상태(`bg`, `gone`, 승인 대기 수)로 보인다. 폴더 신뢰
+  질문도 승인 대기 수에 들어간다.
 - 백그라운드 Claude 워커의 승인은 기존 `PermissionRequest` 중계를 그대로 쓴다. 백그라운드 Codex
   워커는 중계할 훅 이벤트가 없어 `-s workspace-write -a never`로 띄운다. 샌드박스 안에서만 일하고
   묻지 않는다.
+- **백그라운드 워커의 폴더 신뢰 확인은 사람에게 온다. 사람이 tmux 화면으로 가지 않는다**(사용자 결정,
+  2026-09-22: "`tmux attach -t xsm-workers`로 확인하라 — 절대 이 방식에 만족할 수 없음"). spawn은 등록을
+  기다리는 동안 창 화면을 읽고, 신뢰 화면이면 권한 요청과 같은 승인 기록(`tool: folder-trust`)을 만든 뒤
+  요청 id와 함께 바로 돌아온다. spawn을 부른 에이전트가 셸 호출에 묶여 있으면 `xsm_approve`를 부를 수
+  없기 때문이다. 분리된 `xsm worker-finish`가 사람의 답을 기다려 화면에 그 답을 입력하고, 등록을 마치고,
+  미뤄둔 `--task`를 보낸다. 거부되거나 한도 안에 답이 없으면 워커를 정리한다. 키는 실측했다: Claude는
+  커서가 "No, exit"에서 시작해 허용이 ↓+Enter, 거부가 Enter이고, Codex는 커서가 "Yes, continue"에서
+  시작해 허용이 Enter, 거부가 `2`다.
+- 같은 이유로 Codex 워커 이름 붙이기(`/rename <이름>` + Enter)는 신뢰 화면이 없을 때만 입력한다. 전에는
+  띄운 지 4초 뒤 무조건 입력해서, 그때 신뢰 화면이 떠 있으면 Enter가 "Yes"를 골라 사람 모르게 폴더를
+  신뢰했다(창 모드에도 있던 문제).
 - tmux는 `spawn`의 전제 조건이 된다. 없으면 `spawn`이 이유와 함께 거부한다. 메시지 전달 자체는
   tmux가 필요 없다.
 - 지운 것: 헤드리스 Claude(FIFO + stream-json), 헤드리스 Codex(`codex app-server` 턴, pump,
