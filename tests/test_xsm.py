@@ -863,6 +863,21 @@ class SelfIdentityTest(TempState):
         with mock.patch.object(identity, "lstart", lambda pid: "Mon Sep 21 09:00:00 2026"):
             self.assertEqual(identity.state_of(rec), "stale", "a measured, different start is reuse")
 
+    def test_a_sandbox_that_forbids_the_inbox_socket_still_sees_live_claude_peers(self):
+        """The Codex sandbox refuses connect() on a Claude inbox socket with
+        EPERM; that read as a dead socket, and a Codex worker listed both its
+        Claude peers as `stale` for a whole run (S10 collab run 4)."""
+        import socket
+        from unittest import mock
+        from xsm import identity
+        rec = {"runtime": "claude", "pid": os.getpid(), "socket": "/tmp/cc-socks/1.sock"}
+        with mock.patch.object(socket.socket, "connect",
+                               side_effect=PermissionError(1, "Operation not permitted")):
+            self.assertEqual(identity.state_of(rec), "live")
+        with mock.patch.object(socket.socket, "connect",
+                               side_effect=ConnectionRefusedError(61, "Connection refused")):
+            self.assertEqual(identity.state_of(rec), "stale", "a socket nobody listens on is gone")
+
     def test_an_unregistered_session_never_borrows_a_neighbours_identity(self):
         """Before: a session that knew its own id but had no record fell through
         to the cwd guess and printed whichever session shared its folder."""

@@ -51,7 +51,11 @@ def pid_alive(pid) -> bool:
         return False
 
 
-def socket_live(sock_path: str, timeout: float = 0.3) -> bool:
+def socket_live(sock_path: str, timeout: float = 0.3) -> bool | None:
+    """True if the inbox socket answers, False if it is gone, None if we were
+    not allowed to ask. The Codex sandbox refuses the connect with EPERM, and
+    reading that as dead showed every Claude peer as `stale` to a Codex worker
+    (S10 collab run 4) — the same mistake pid_alive once made with kill."""
     if not sock_path:
         return False
     try:
@@ -59,6 +63,8 @@ def socket_live(sock_path: str, timeout: float = 0.3) -> bool:
             s.settimeout(timeout)
             s.connect(sock_path)
         return True
+    except PermissionError:
+        return None
     except OSError:
         return False
 
@@ -115,7 +121,10 @@ def _state_of(record: dict) -> tuple:
         # alive and we could not look further.
         unverified = now is None
     if record.get("runtime") == "claude":
-        if socket_live(record.get("socket") or ""):
+        answer = socket_live(record.get("socket") or "")
+        if answer is None:
+            return "live", "socket_blocked"
+        if answer:
             return "live", "live_unverified" if unverified else "live"
         return gone, "socket_dead"
     return "live", "live_unverified" if unverified else "live"
