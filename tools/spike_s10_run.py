@@ -22,6 +22,13 @@ a question for a person, the harness never answers one, and a worker that
 stops at one fails its slot and says so.
 
     tools/spike_s10_run.py --condition 2 --minutes 15 --out .local/s10/run1
+    tools/spike_s10_run.py --scenario collab --minutes 15 --out .local/s10/collab1
+
+Scenario `collab` (user request, 2026-09-22): the three sessions review one
+document together and revise it — agree who looks at what, analyse, meet and
+discuss, then edit the one shared file. Phases run by the clock alone
+(`./phase`); nobody announces them, so a session that has gone quiet moves on
+only if another session's message wakes it.
 
 Conditions (docs/spikes/S10-swarm-duplication.md §3):
   1 isolated: each slot its own folder and XSM_HOME
@@ -40,6 +47,10 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASK = os.path.join(REPO, "docs", "spikes", "s10", "task")
+COLLAB = os.path.join(REPO, "docs", "spikes", "s10", "collab")
+COLLAB_FILES = ("ADR-DRAFT.md", "ref-agora-note.md", "ref-s10-spike.md", "ref-adr-0003.md")
+COLLAB_DOC = "ADR-DRAFT.md"
+COLLAB_SHARES = (0.15, 0.40, 0.20, 0.25)    # agree, analyse, discuss, revise
 DEFAULT_AGENTS = "codex:gpt-5.6-luna,claude:haiku,claude:sonnet"
 FIRST_PROMPT = "Read BRIEF.md in this folder and do what it says."
 SCREEN_EVERY = 30               # seconds between screen snapshots of each worker
@@ -78,13 +89,30 @@ def _write_timeleft(root: str, deadline: float) -> None:
     os.chmod(path, 0o755)
 
 
-def workspace(root: str, deadline: float, condition: int) -> str:
-    """A fresh folder: task files, the brief, the seed graph, two helper scripts."""
-    os.makedirs(os.path.join(root, "candidates"), exist_ok=True)
-    for name in ("eval.py", "corpus.txt", "baseline.py"):
-        shutil.copy(os.path.join(TASK, name), root)
-    with open(os.path.join(root, "BRIEF.md"), "w") as fh:
-        fh.write(brief(condition))
+def _write_phase(root: str, start: float, minutes: float) -> None:
+    path = os.path.join(root, "phase")
+    with open(path, "w") as fh:
+        fh.write("#!/bin/sh\nexec python3 %s %d %s\n" % (
+            os.path.join(COLLAB, "phase.py"), start,
+            " ".join("%.2f" % (minutes * share) for share in COLLAB_SHARES)))
+    os.chmod(path, 0o755)
+
+
+def workspace(root: str, deadline: float, condition: int, scenario: str = "compress") -> str:
+    """A fresh folder: task files, the brief, helper scripts, and for the
+    compression task the seed graph."""
+    if scenario == "collab":
+        os.makedirs(root, exist_ok=True)
+        for name in COLLAB_FILES:
+            shutil.copy(os.path.join(COLLAB, name), root)
+        shutil.copy(os.path.join(COLLAB, "brief.md"), os.path.join(root, "BRIEF.md"))
+        _write_phase(root, deadline, 1)     # "not started yet" until the real clock is set
+    else:
+        os.makedirs(os.path.join(root, "candidates"), exist_ok=True)
+        for name in ("eval.py", "corpus.txt", "baseline.py"):
+            shutil.copy(os.path.join(TASK, name), root)
+        with open(os.path.join(root, "BRIEF.md"), "w") as fh:
+            fh.write(brief(condition))
     home = os.path.join(root, ".xsm")
     os.makedirs(home, exist_ok=True)
     with open(os.path.join(root, "xsm"), "w") as fh:
@@ -92,8 +120,10 @@ def workspace(root: str, deadline: float, condition: int) -> str:
                  "exec %s \"$@\"\n" % (home, os.path.join(REPO, "bin", "xsm")))
     os.chmod(os.path.join(root, "xsm"), 0o755)
     _write_timeleft(root, deadline)
-    subprocess.run([sys.executable, os.path.join(TASK, "seed.py"), os.path.join(root, "notes.md")],
-                   check=True, env=dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1"))
+    if scenario != "collab":
+        subprocess.run([sys.executable, os.path.join(TASK, "seed.py"),
+                        os.path.join(root, "notes.md")],
+                       check=True, env=dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1"))
     return home
 
 
@@ -157,6 +187,26 @@ def watch_screens(workers_: list, deadline: float, log_dir: str) -> None:
         time.sleep(SCREEN_EVERY)
 
 
+def watch_file(path: str, deadline: float, dest: str) -> None:
+    """Every version of one file, with its time: who overwrote whom in a
+    shared document is read off these."""
+    os.makedirs(dest, exist_ok=True)
+    last = None
+    while time.time() < deadline + 30:
+        try:
+            st = os.stat(path)
+        except OSError:
+            st = None
+        if st and (st.st_mtime_ns, st.st_size) != last:
+            last = (st.st_mtime_ns, st.st_size)
+            try:
+                shutil.copy2(path, os.path.join(dest, "%s@%d" % (os.path.basename(path),
+                                                                st.st_mtime_ns)))
+            except OSError:
+                last = None
+        time.sleep(1)
+
+
 def watch_candidates(root: str, deadline: float, dest: str) -> None:
     """Keep every version of every candidate file, outside the agents' folder.
 
@@ -207,7 +257,9 @@ def stop(name: str, home: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--condition", type=int, choices=[1, 2, 3, 4], required=True)
+    parser.add_argument("--scenario", choices=["compress", "collab"], default="compress")
+    parser.add_argument("--condition", type=int, choices=[1, 2, 3, 4], default=2,
+                        help="compress only; collab is always one shared folder")
     parser.add_argument("--agents", default=DEFAULT_AGENTS,
                         help="one runtime:model per slot, comma-separated (default: %(default)s)")
     parser.add_argument("--minutes", type=float, default=15)
@@ -221,11 +273,12 @@ def main() -> int:
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=False)
     run = os.path.basename(out)
-    roots = ([os.path.join(out, "slot%d" % i) for i in range(len(agents))] if args.condition == 1
+    roots = ([os.path.join(out, "slot%d" % i) for i in range(len(agents))]
+             if args.condition == 1 and args.scenario == "compress"
              else [os.path.join(out, "shared")] * len(agents))
     # Until everyone is up, ./timeleft shows the boot allowance; the real
     # clock is set once the last worker has its brief.
-    homes = {root: workspace(root, time.time() + 900, args.condition)
+    homes = {root: workspace(root, time.time() + 900, args.condition, args.scenario)
              for root in dict.fromkeys(roots)}
 
     started = [{}] * len(agents)
@@ -241,12 +294,16 @@ def main() -> int:
         t.start()
     for t in threads:
         t.join()
-    deadline = time.time() + args.minutes * 60
+    clock = time.time()
+    deadline = clock + args.minutes * 60
     for root in homes:
         _write_timeleft(root, deadline)
+        if args.scenario == "collab":
+            _write_phase(root, clock, args.minutes)
     ready = [w for w in started if not w.get("error")]
     with open(os.path.join(out, "run.json"), "w") as fh:
-        json.dump({"condition": args.condition, "agents": args.agents, "minutes": args.minutes,
+        json.dump({"scenario": args.scenario, "condition": args.condition,
+                   "agents": args.agents, "minutes": args.minutes,
                    "started": time.time(), "deadline": deadline, "roots": sorted(homes),
                    "workers": started}, fh, indent=1)
     for w in started:
@@ -256,9 +313,13 @@ def main() -> int:
         return 1
 
     for root in homes:
-        threading.Thread(target=watch_candidates, daemon=True,
-                         args=(root, deadline, os.path.join(out, "history",
-                                                            os.path.basename(root)))).start()
+        dest = os.path.join(out, "history", os.path.basename(root))
+        if args.scenario == "collab":
+            threading.Thread(target=watch_file, daemon=True,
+                             args=(os.path.join(root, COLLAB_DOC), deadline, dest)).start()
+        else:
+            threading.Thread(target=watch_candidates, daemon=True,
+                             args=(root, deadline, dest)).start()
     threading.Thread(target=watch_screens, daemon=True, args=(ready, deadline, out)).start()
     shipping = [(exporter(home, args.otlp), home) for home in homes.values()] if args.otlp else []
 
