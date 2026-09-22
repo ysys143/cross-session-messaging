@@ -74,6 +74,18 @@ def pid_of(runtime: str) -> int | None:
     return identity.ancestor_pid({"codex"}) or os.getppid()
 
 
+def session_folder(runtime: str, data: dict) -> str:
+    """The folder a session belongs to, which decides its scope. For Claude
+    that is where it started: the hook input's `cwd` follows every `cd` its
+    Bash tool makes, so one `cd` into a subfolder moved the session there in
+    `xsm who` and in every scope check (2026-09-23). Claude Code gives hooks
+    the start folder as CLAUDE_PROJECT_DIR. Codex's shell does not keep a
+    `cd`, so its `cwd` already is the start folder."""
+    if runtime == "claude" and os.environ.get("CLAUDE_PROJECT_DIR"):
+        return os.environ["CLAUDE_PROJECT_DIR"]
+    return data.get("cwd") or os.getcwd()
+
+
 def register(data: dict, runtime: str) -> dict | None:
     session_id = data.get("session_id")
     home = home_of(runtime, data)
@@ -90,7 +102,7 @@ def register(data: dict, runtime: str) -> dict | None:
             "reason": "missing %s" % ", ".join(
                 n for n, v in (("session_id", session_id), ("home", home), ("pid", pid)) if not v)})
         return None
-    return registry.upsert(runtime, home, session_id, pid, data.get("cwd") or os.getcwd(),
+    return registry.upsert(runtime, home, session_id, pid, session_folder(runtime, data),
                            permission_mode=data.get("permission_mode"),
                            name=data.get("session_title"))
 

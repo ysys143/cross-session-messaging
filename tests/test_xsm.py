@@ -459,6 +459,22 @@ class CodexReceiverNameTest(TempState):
         self.assertEqual(record["receiver"], "reviewer")
 
 
+class SessionFolderTest(TempState):
+    def test_a_claude_session_stays_in_the_folder_it_started_in(self):
+        """A `cd` in its Bash tool changed the hook's cwd, and `xsm who` put
+        the session in that subfolder (2026-09-23)."""
+        from unittest import mock
+        from xsm import receive
+        data = {"cwd": os.path.join(self.tmp, "sub")}
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.tmp}):
+            self.assertEqual(receive.session_folder("claude", data), self.tmp)
+            self.assertEqual(receive.session_folder("codex", data), data["cwd"],
+                             "Codex's cwd already is its start folder")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            self.assertEqual(receive.session_folder("claude", data), data["cwd"])
+
+
 class CodexInboxTest(TempState):
     """A Codex session takes its queue only between turns. In S10 collab run 4
     the Codex worker never ended one (it polled with sleep) and read none of
