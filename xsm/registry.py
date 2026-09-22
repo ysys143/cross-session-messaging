@@ -45,6 +45,7 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
     record.pop("ended_at", None)
     record.pop("end_reason", None)
     record.pop("adopted", None)       # the session's own hook has now spoken for it
+    record.pop("unprompted", None)
     if permission_mode:
         record["permission_mode"] = permission_mode
     if name:
@@ -62,6 +63,13 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
     if not any(h.get("path") == home for h in config.homes()):
         config.add_home(home, runtime)
     return record
+
+
+def default_codex_name(thread_id: str) -> str:
+    """For a thread nobody named. Codex thread ids are UUIDv7, time first:
+    two threads opened minutes apart shared their first eight characters
+    and so their name (2026-09-23). The random tail tells them apart."""
+    return "codex-%s" % thread_id.replace("-", "")[-6:]
 
 
 def _claude_native(home: str, pid) -> dict:
@@ -109,7 +117,7 @@ def _enrich(record: dict) -> dict:
         worker = workers.for_session(record.get("session_id"))
         out["name"] = (_codex_thread_name(record.get("home", ""), str(record.get("session_id") or ""))
                        or (worker or {}).get("name") or record.get("name")
-                       or "codex-%s" % str(record.get("session_id"))[:8])
+                       or default_codex_name(str(record.get("session_id") or "")))
     out["state"], why = identity.state_reason(out)
     if why == "thread_replaced":
         # The TUI is alive but opened another thread (Codex /new, resume);
@@ -252,10 +260,31 @@ def adopt_open_codex() -> list:
             thread_id, name, cwd, _rollout, _created, _updated, pid = row
             if thread_id in known:
                 continue
-            rec = upsert("codex", home["path"], thread_id, pid, cwd or "", name=name)
+            rec = upsert("codex", home["path"], thread_id, pid, cwd or "", name=name,
+                         mcp_pid=beacon_for(pid))
             rec["adopted"] = True
             paths.write_json(_record_path("codex", thread_id), rec)
             adopted.append(rec)
+            known.add(thread_id)
+    # A thread with no prompt yet is in no Codex table; its beacon and Codex's
+    # log name it. Its MCP server's pid keeps its liveness honest.
+    trusted = set()
+    for home in config.homes():
+        if home.get("runtime") == "codex":
+            from . import install
+            trust = install.codex_trust(home["path"])
+            if trust and all(trust.values()):
+                trusted.add(home["path"])
+    for row in fresh_codex_threads():
+        if not row.get("session_id") or row["session_id"] in known or row["home"] not in trusted:
+            continue
+        rec = upsert("codex", row["home"], row["session_id"], row["pid"], row.get("cwd") or "",
+                     mcp_pid=row["mcp_pid"])
+        rec["adopted"] = True
+        rec["unprompted"] = True
+        paths.write_json(_record_path("codex", row["session_id"]), rec)
+        adopted.append(rec)
+        known.add(row["session_id"])
     return adopted
 
 
@@ -334,14 +363,18 @@ def beacon_for(codex_pid) -> int | None:
 
 
 def fresh_codex_threads() -> list:
-    """Threads a Codex TUI has open that xsm cannot address yet: it has an xsm
-    MCP server (so the thread is open) but no record points at that server.
-    Codex writes nothing else about a thread until its first prompt or
-    /rename, so this is the only sign of it. Read once per command, not in
-    hooks: it runs `ps` for each beacon whose parent has no record."""
+    """Threads a Codex TUI has open that its hook has not registered: it has
+    an xsm MCP server (so the thread is open) but no record points at that
+    server. Codex writes no thread row, rollout or hook call before the first
+    prompt; its log database does name the thread within seconds, and that is
+    enough to address it (adapters.thread_of_process). A row with a
+    session_id can be adopted; one without is shown as waiting.
+    Read once per command, not in hooks: it runs `ps` and reads Codex's logs."""
+    from . import adapters
     recs = records()
     served = {r.get("mcp_pid") for r in recs if r.get("runtime") == "codex"}
     claude_pids = {r.get("pid") for r in recs if r.get("runtime") == "claude"}
+    codex_homes = [h["path"] for h in config.homes() if h.get("runtime") == "codex"]
     out = []
     for b in mcp_beacons():
         ppid = b.get("ppid")
@@ -349,12 +382,23 @@ def fresh_codex_threads() -> list:
             continue
         if not any(r.get("pid") == ppid for r in recs) and identity.comm(ppid) != "codex":
             continue
+        thread, home = None, None
+        for h in codex_homes:
+            thread = adapters.thread_of_process(h, ppid, b.get("started") or time.time())
+            if thread:
+                home = h
+                break
         age = int(time.time() - b.get("started", time.time()))
-        out.append({"runtime": "codex", "home": "", "alias": "codex", "session_id": None,
-                    "pid": ppid, "name": "codex-%d" % ppid, "cwd": b.get("cwd"),
-                    "registered": False, "state": "unknown", "ref": None, "fresh": True,
-                    "why": "a thread open for %dm%02ds with no prompt yet; it can be addressed "
-                           "after its first prompt or /rename" % (age // 60, age % 60)})
+        row = {"runtime": "codex", "home": home or "", "alias": config.alias_of(home) if home
+               else "codex", "session_id": thread, "pid": ppid, "mcp_pid": b["pid"],
+               "name": "codex-%d" % ppid, "cwd": b.get("cwd"), "registered": False,
+               "state": "unknown",
+               "ref": identity.ref_of("codex", home, thread) if thread and home else None,
+               "fresh": True}
+        row["why"] = ("a thread open for %dm%02ds with no prompt yet%s" % (
+            age // 60, age % 60, "" if thread else
+            "; Codex has not logged its id, so it has no address until its first prompt or /rename"))
+        out.append(row)
     return out
 
 
@@ -379,7 +423,7 @@ def unregistered() -> list:
                 else:
                     why = "its hook has not run since it started"
                 out.append({"runtime": "codex", "home": home["path"], "alias": home.get("alias"),
-                            "session_id": thread_id, "name": name or "codex-%s" % thread_id[:8],
+                            "session_id": thread_id, "name": name or default_codex_name(thread_id),
                             "cwd": cwd, "registered": False, "state": "unknown", "why": why,
                             "ref": identity.ref_of("codex", home["path"], thread_id)})
             continue

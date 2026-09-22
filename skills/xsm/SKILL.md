@@ -26,10 +26,11 @@ xsm who                  # how other sessions see this session
 ```
 
 Each row reads `name@home [ref] runtime state mode cwd`. A session marked
-`unregistered` has no hook and cannot be addressed. A row like
-`codex-<pid>@codex [-] (a thread open for 0m40s with no prompt yet …)` is a
-Codex TUI that just opened a thread: it has no address until someone types a
-first prompt or `/rename` there; tell your user rather than waiting on it.
+`unregistered` has no hook and cannot be addressed. A Codex TUI that
+just opened a thread shows up as `codex-<6 chars>@codex [ref]` before anyone
+has typed there, and can be sent to like any session. Only a row with `[-]`
+(`…no prompt yet; Codex has not logged its id…`) has no address yet; tell
+your user rather than waiting on it.
 A Codex session marked `ended (thread_replaced)` is a thread its TUI has left
 with `/new` or resume: messages queued to it are never read. `out-of-scope` means the
 two of you are not in the same repository and no scope in `~/.xsm/config.json`

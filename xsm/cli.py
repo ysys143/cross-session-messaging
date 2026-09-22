@@ -58,7 +58,7 @@ def _rows(args, me=None) -> list:
     if not getattr(args, "all", False):
         # A thread a Codex TUI just opened is what a caller is usually
         # looking for when a name resolves to nothing; -a already has it.
-        rows += registry.fresh_codex_threads()
+        rows += [r for r in registry.fresh_codex_threads() if not r.get("session_id")]
         rows = [r for r in rows if r.get("state") not in ("stale", "ended")]
         here = _here(args, me)
         rows = [r for r in rows if (me and r.get("ref") == me.get("ref"))

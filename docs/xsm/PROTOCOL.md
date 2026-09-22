@@ -84,6 +84,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 
 - **항상 UUID로 지정한다.** 이름 조회는 스레드가 100개를 넘으면 거부된다(S7).
 - 대상 TUI가 스레드를 로드한 유휴 상태면 약 10초 안에 턴이 시작된다. 진행 중인 턴에는 끼어들지 않는다(S2).
+- **첫 프롬프트 전 스레드로 보내기.** `codex queue`는 rollout이 없는 스레드를 `no rollout found`로 거부한다. 이 오류일 때만 xsm은 `codex queue`가 쓸 행을 대기열 DB(`queue_<n>.sqlite`의 `queued_items`)에 직접 쓴다: `id`(UUIDv7), `thread_id`, `payload_json = {"UserInput": {"content": [{"type": "text", "text": <봉투>, "text_elements": []}], "client_id": <UUIDv7>}}`, `queue_order = 그 스레드 최대값 + 1`, `created_at_ms = updated_at_ms = 지금`. DB 트리거가 리비전을 올리고 TUI가 가져간다(실측 8~14초). 열 구성이 이와 다르면 쓰지 않고 `codex-internal-changed`로 실패한다. Codex 내부 형식에 기대는 유일한 곳이다(ADR-0002 부록).
 - **턴 중 수신(`xsm inbox`).** 발신 측은 대기열에 넣기 전에 봉투 사본을 `inbox/<thread-uuid>/<id>.json`에
   둔다(대기열 전송이 실패하면 지운다). Codex 세션은 턴 도중 `xsm inbox`나 MCP `xsm_inbox`로 사본을 꺼낸다.
   꺼내는 순간 훅과 같은 검사(`receive.check`)를 거치고 같은 영수증을 쓴다. 나중에 대기열 사본이 훅에
@@ -163,7 +164,7 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 
 **Codex 스레드 교체.** 한 Codex TUI 프로세스는 `/new`나 resume으로 스레드를 바꾼다. 옛 스레드는 그 프로세스 안에서 약 60초 뒤 `Shutdown`되고, 그 뒤로는 자기 대기열을 읽지 않는다(실측 2026-09-23: 살아 있는 pid 앞으로 보낸 메시지 2건이 영원히 `queued`). Codex는 스레드가 열릴 때마다 MCP 서버를 새로 띄우고 닫힐 때 죽이므로, **xsm MCP 서버의 pid가 곧 스레드의 생존이다.** MCP 서버는 시작할 때 비콘(`mcp/<pid>.json`: pid, ppid, lstart, started, cwd)을 쓰고 끝날 때 지운다. Codex 훅은 등록할 때 자기 Codex pid 아래 가장 최근 비콘의 pid를 `mcp_pid`로 적는다. 그 프로세스가 죽었으면 기록은 pid가 살아 있어도 `ended`(`end_reason: thread_replaced`)다. 비콘이 없으면(MCP 서버 미설치, adopt) pid 판정만 쓴다.
 
-**첫 프롬프트 전의 Codex 스레드.** Codex는 첫 프롬프트나 `/rename` 전에는 스레드 행도 rollout도 쓰지 않는다. 그런 스레드의 유일한 흔적은 MCP 서버 비콘이다. `xsm list`는 어떤 기록도 가리키지 않는 비콘(부모가 살아 있는 `codex` 프로세스)을 `codex-<pid>@codex [-] (a thread open for … with no prompt yet …)`로 보여 준다. 주소는 없다.
+**첫 프롬프트 전의 Codex 스레드.** Codex는 첫 프롬프트나 `/rename` 전에는 스레드 행도 rollout도 쓰지 않고 훅도 부르지 않는다. 그래도 로그 DB(`logs_<n>.sqlite`)에는 TUI가 스레드를 연 지 몇 초 안에 `process_uuid = pid:<pid>:…`와 스레드 id가 함께 찍힌다. xsm은 어떤 기록도 가리키지 않는 MCP 비콘마다 그 부모 pid의 로그에서 비콘 시작 시각에 가장 가까이 처음 나타난 스레드(±30초)를 찾아 그 스레드를 **adopt**한다(`adopted`, `unprompted`, `mcp_pid`). 신뢰된 훅이 설치된 홈만 대상이다. 이름은 붙지 않았으므로 `codex-<id 끝 6자>`다(UUIDv7은 앞자리가 시각이라 몇 분 사이 연 스레드끼리 앞 8자가 같았다). 로그에서 id를 찾지 못한 비콘은 `codex-<pid>@codex [-] (… no prompt yet …)`로만 보인다.
 
 한 Claude 프로세스는 `/clear`나 `--resume`으로 세션 id를 바꾼다. 그래서 같은 pid의 기록이 여럿 생긴다. 네이티브 기록(`<홈>/sessions/<pid>.json`)의 `sessionId`와 기록의 id가 다르면, 그 기록은 프로세스가 살아 있어도 `ended`(`end_reason: superseded`)로 본다.
 

@@ -13,12 +13,15 @@ mode, not a retry.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import time
+import uuid
 from contextlib import contextmanager
 
 
@@ -108,7 +111,95 @@ def _to_codex(codex_home: str, thread_id: str, content: str) -> str:
         raise DeliveryError("codex-failed", str(err))
     if out.returncode != 0:
         text = (out.stderr or out.stdout or "").strip()
+        if "no rollout found" in text:
+            # A thread its TUI has open but that has had no prompt yet: Codex
+            # writes no rollout before the first prompt, and `codex queue`
+            # checks for one. The TUI itself reads its queue all the same
+            # (measured 2026-09-23: a row written here was taken in 14 s).
+            return queue_direct(codex_home, thread_id, content)
         blocked = "readonly database" in text or "Operation not permitted" in text
         reason = "sandbox-blocked" if blocked else "codex-failed"
         raise DeliveryError(reason, text[:400])
     return (out.stdout or "").strip()
+
+
+# --- Codex internals, for a thread with no prompt yet -------------------------
+#
+# Neither of these is a public interface. Each checks the shape it expects and
+# fails with `codex-internal-changed` otherwise, so a Codex update turns a
+# fresh thread back into "not addressable yet" rather than a lost message
+# (user decision, 2026-09-23; ADR-0002 appendix).
+
+QUEUE_COLUMNS = ["id", "thread_id", "payload_json", "queue_order", "created_at_ms", "updated_at_ms"]
+
+
+def _newest(home: str, stem: str) -> str | None:
+    """Codex names its databases <stem>_<schema version>.sqlite."""
+    found = glob.glob(os.path.join(os.path.expanduser(home), "%s_*.sqlite" % stem))
+    return max(found, key=lambda p: int(os.path.basename(p)[len(stem) + 1:-7] or 0)
+               if os.path.basename(p)[len(stem) + 1:-7].isdigit() else -1) if found else None
+
+
+def _uuid() -> str:
+    return str(getattr(uuid, "uuid7", uuid.uuid4)())      # Codex's own ids are v7
+
+
+def queue_direct(codex_home: str, thread_id: str, content: str) -> str:
+    """The row `codex queue` would have written, written here."""
+    db = _newest(codex_home, "queue")
+    if not db:
+        raise DeliveryError("codex-internal-changed", "no queue database in %s" % codex_home)
+    try:
+        con = sqlite3.connect(db, timeout=5)
+    except sqlite3.Error as err:
+        raise DeliveryError("codex-failed", str(err))
+    try:
+        cols = [row[1] for row in con.execute("pragma table_info(queued_items)")]
+        if cols != QUEUE_COLUMNS:
+            raise DeliveryError("codex-internal-changed",
+                                "queued_items has columns %s, expected %s" % (cols, QUEUE_COLUMNS))
+        now = int(time.time() * 1000)
+        payload = {"UserInput": {"content": [{"type": "text", "text": content,
+                                              "text_elements": []}],
+                                 "client_id": _uuid()}}
+        with con:
+            order = con.execute("select coalesce(max(queue_order), 0) + 1 from queued_items "
+                                "where thread_id = ?", (thread_id,)).fetchone()[0]
+            con.execute("insert into queued_items (id, thread_id, payload_json, queue_order, "
+                        "created_at_ms, updated_at_ms) values (?, ?, ?, ?, ?, ?)",
+                        (_uuid(), thread_id, json.dumps(payload, ensure_ascii=False), order,
+                         now, now))
+    except sqlite3.OperationalError as err:
+        blocked = "readonly" in str(err) or "not permitted" in str(err)
+        raise DeliveryError("sandbox-blocked" if blocked else "codex-failed", str(err))
+    except sqlite3.Error as err:
+        raise DeliveryError("codex-failed", str(err))
+    finally:
+        con.close()
+    return "queued directly (the thread has had no prompt yet)"
+
+
+def thread_of_process(codex_home: str, pid: int, since: float) -> str | None:
+    """The thread a Codex process opened at about `since` (when its xsm MCP
+    server started), from Codex's own log database: every log line carries
+    `pid:<pid>:…` and, once a thread exists, its id — seconds after the TUI
+    opens it, long before any prompt. The thread first seen closest to
+    `since` is the one; a side thread the TUI opens later is further off."""
+    db = _newest(codex_home, "logs")
+    if not db:
+        return None
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = con.execute(
+            "select thread_id, min(ts) from logs where process_uuid like ? and thread_id != '' "
+            "and thread_id is not null and ts >= ? group by thread_id",
+            ("pid:%d:%%" % int(pid), int(since) - 30)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    near = [(abs(first - since), tid) for tid, first in rows if abs(first - since) <= 30]
+    return min(near)[1] if near else None

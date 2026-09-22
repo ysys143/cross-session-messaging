@@ -554,6 +554,97 @@ class CodexThreadLivenessTest(TempState):
                          "removed when the server stops")
 
 
+class UnpromptedCodexThreadTest(TempState):
+    """A Codex TUI writes no thread row, rollout or hook call before the first
+    prompt, and `codex queue` refuses such a thread ("no rollout found"). Its
+    log database names the thread within seconds, and a queue row written
+    directly is taken by the TUI like any other (measured 2026-09-23)."""
+
+    def _codex_home(self):
+        import sqlite3
+        home = os.path.join(self.tmp, "codex-home")
+        os.makedirs(home, exist_ok=True)
+        con = sqlite3.connect(os.path.join(home, "queue_1.sqlite"))
+        con.execute("create table queued_items (id text primary key not null, thread_id text "
+                    "not null, payload_json text not null, queue_order integer not null, "
+                    "created_at_ms integer not null, updated_at_ms integer not null)")
+        con.commit()
+        con.close()
+        con = sqlite3.connect(os.path.join(home, "logs_2.sqlite"))
+        con.execute("create table logs (id integer primary key, ts integer, thread_id text, "
+                    "process_uuid text)")
+        con.executemany("insert into logs (ts, thread_id, process_uuid) values (?, ?, ?)", [
+            (1000, "", "pid:77:a"),
+            (1003, "01a0ca1b-aaaa-7000-8000-000000000001", "pid:77:a"),    # opened with the TUI
+            (1500, "01a0ca1b-bbbb-7000-8000-000000000002", "pid:77:a"),    # a side thread later
+            (1004, "01a0ca1b-cccc-7000-8000-000000000003", "pid:78:b"),    # another TUI
+        ])
+        con.commit()
+        con.close()
+        return home
+
+    def test_the_thread_a_process_opened_is_read_from_codex_logs(self):
+        from xsm import adapters
+        home = self._codex_home()
+        self.assertEqual(adapters.thread_of_process(home, 77, 1001),
+                         "01a0ca1b-aaaa-7000-8000-000000000001")
+        self.assertEqual(adapters.thread_of_process(home, 77, 1498),
+                         "01a0ca1b-bbbb-7000-8000-000000000002", "after /new: the newer one")
+        self.assertIsNone(adapters.thread_of_process(home, 79, 1001))
+
+    def test_a_refused_codex_queue_falls_back_to_the_row_it_would_write(self):
+        import sqlite3
+        from xsm import adapters
+        home = self._codex_home()
+        failed = mock.Mock(returncode=1, stdout="", stderr=(
+            "Error: failed to queue session message: thread/queue/add failed: failed to read "
+            "thread: invalid thread-store request: no rollout found for thread id T1"))
+        with mock.patch.object(adapters.subprocess, "run", lambda *a, **k: failed), \
+                mock.patch.object(adapters, "codex_bin", lambda: "/bin/codex"):
+            adapters.to_codex(home, "T1", "hello")
+            adapters.to_codex(home, "T1", "again")
+        con = sqlite3.connect(os.path.join(home, "queue_1.sqlite"))
+        rows = con.execute("select thread_id, payload_json, queue_order from queued_items "
+                           "order by queue_order").fetchall()
+        con.close()
+        self.assertEqual([(r[0], r[2]) for r in rows], [("T1", 1), ("T1", 2)])
+        payload = json.loads(rows[0][1])["UserInput"]
+        self.assertEqual(payload["content"], [{"type": "text", "text": "hello",
+                                               "text_elements": []}])
+        self.assertTrue(payload["client_id"])
+
+    def test_a_changed_codex_queue_table_is_refused_not_guessed_at(self):
+        import sqlite3
+        from xsm import adapters
+        home = os.path.join(self.tmp, "codex-new")
+        os.makedirs(home)
+        con = sqlite3.connect(os.path.join(home, "queue_2.sqlite"))
+        con.execute("create table queued_items (id text, thread_id text, body text)")
+        con.commit()
+        con.close()
+        with self.assertRaises(adapters.DeliveryError) as cm:
+            adapters.queue_direct(home, "T1", "hello")
+        self.assertEqual(cm.exception.reason, "codex-internal-changed")
+
+    def test_other_codex_queue_failures_are_not_rerouted(self):
+        from xsm import adapters
+        home = self._codex_home()
+        failed = mock.Mock(returncode=1, stdout="", stderr="Error: readonly database")
+        with mock.patch.object(adapters.subprocess, "run", lambda *a, **k: failed), \
+                mock.patch.object(adapters, "codex_bin", lambda: "/bin/codex"), \
+                mock.patch.object(adapters, "queue_direct") as direct:
+            with self.assertRaises(adapters.DeliveryError):
+                adapters.to_codex(home, "T1", "hello")
+        direct.assert_not_called()
+
+    def test_threads_opened_minutes_apart_get_different_default_names(self):
+        from xsm import registry
+        a = registry.default_codex_name("01a0ca1b-e3f1-7a22-9b01-4c5d6e7f8a90")
+        b = registry.default_codex_name("01a0ca1b-f402-7c11-8d23-1a2b3c4d5e6f")
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, "codex-7f8a90")
+
+
 def resolve_hint(record):
     from xsm import resolve
     return resolve.resume_hint(record)
