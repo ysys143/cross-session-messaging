@@ -169,3 +169,78 @@ def log(nodes: list) -> str:
     return "\n".join("%s %s [%s] %s%s" % (n["id"], n["t"], ", ".join(n["tags"]), n["author"],
                                           " <- " + ", ".join(n["parents"]) if n["parents"] else "")
                      for n in nodes)
+
+
+def wip_children(nodes: list) -> dict:
+    """Parent id -> the `wip` nodes hanging off it. A `wip` node is a session
+    saying out loud that it is working on something; it is a declaration, not a
+    contribution, so it never becomes a candidate itself."""
+    kids = children(nodes)
+    return {pid: [k for k in ks if "wip" in k["tags"]] for pid, ks in kids.items()
+            if any("wip" in k["tags"] for k in ks)}
+
+
+def next_candidates(nodes: list) -> list:
+    """What a session arriving at this document could pick up: the open ends
+    and the hypotheses nobody has verified.
+
+    Both sets already exist and `render()` already prints them in two sections;
+    this view only puts them together, so no new judgement enters the document.
+    **The order is the document's own** — `read()`'s, which is by timestamp and
+    then by id, so nodes written in the same second fall in a stable but
+    arbitrary order. It is not re-sorted here. No
+    score, no ranking, no assignment: who picks what and on what signal is the
+    open question of ADR-0012, and a ranking shipped here would settle it by
+    accident."""
+    picked, seen = [], set()
+    candidates = {n["id"] for n in leaves(nodes)} | {n["id"] for n in unverified(nodes)}
+    for n in nodes:
+        if n["id"] in candidates and n["id"] not in seen and "wip" not in n["tags"]:
+            seen.add(n["id"])
+            picked.append(n)
+    return picked
+
+
+def _next_line(n: dict, wips: dict) -> str:
+    why = []
+    line = _one_line(n)
+    held = wips.get(n["id"]) or []
+    if held:
+        # Said, not acted on: the node stays exactly where it is in the list.
+        why.append("someone said they are on it (%s)" % ", ".join(k["author"] for k in held))
+    return line + ("\n    " + "; ".join(why) if why else "")
+
+
+def next_text(doc: str, limit: int = 0) -> str:
+    nodes = read(doc)
+    picked = next_candidates(nodes)
+    if not picked:
+        return "(nothing open: no loose ends and no unverified hypotheses)"
+    wips = wip_children(nodes)
+    shown = picked[:limit] if limit else picked
+    out = [_next_line(n, wips) for n in shown]
+    if len(shown) < len(picked):
+        out.append("… and %d more" % (len(picked) - len(shown)))
+    out.append("")
+    out.append("In the order they were written. xsm does not rank them and does not assign "
+               "them; pick one and say so with `--tag wip --parent <id>`.")
+    return "\n".join(out)
+
+
+def next_json(doc: str, limit: int = 0) -> dict:
+    nodes = read(doc)
+    picked = next_candidates(nodes)
+    wips = wip_children(nodes)
+    ends = {n["id"] for n in leaves(nodes)}
+    open_q = {n["id"] for n in unverified(nodes)}
+    shown = picked[:limit] if limit else picked
+    return {"doc": os.path.basename(doc),
+            # Stated in the payload so a caller cannot mistake the list for a
+            # ranking, and so a later version that does rank has to say so.
+            "order": "created", "assigns": False, "total": len(picked),
+            "candidates": [{"id": n["id"], "tags": n["tags"], "author": n["author"], "t": n["t"],
+                            "why": [w for w in ("open end" if n["id"] in ends else "",
+                                                "unverified hypothesis" if n["id"] in open_q
+                                                else "") if w],
+                            "wip": [k["author"] for k in wips.get(n["id"], [])]}
+                           for n in shown]}

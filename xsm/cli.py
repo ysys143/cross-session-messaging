@@ -1211,6 +1211,11 @@ def cmd_doc(args) -> int:
             print("rendered %s from %d node(s)" % (args.doc, len(doc.read(args.doc))))
         elif args.action == "log":
             print(doc.log(doc.read(args.doc)) or "(no nodes)")
+        elif args.action == "next":
+            if args.json:
+                print(json.dumps(doc.next_json(args.doc, args.limit), ensure_ascii=False, indent=1))
+            else:
+                print(doc.next_text(args.doc, args.limit))
         elif args.action == "leaves":
             print("\n".join(doc._one_line(n) for n in doc.leaves(doc.read(args.doc))) or "(no nodes)")
         elif args.action == "show":
@@ -1377,8 +1382,9 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--out", help="export: write the markdown here")
     ch.add_argument("--dir")
     ch.set_defaults(func=cmd_channel)
-    dc = sub.add_parser("doc", help="shared documents as immutable nodes (add, render, log, leaves, show)")
-    dc.add_argument("action", choices=["add", "render", "log", "leaves", "show"])
+    dc = sub.add_parser("doc", help="shared documents as immutable nodes (add, render, log, "
+                        "next, leaves, show)")
+    dc.add_argument("action", choices=["add", "render", "log", "next", "leaves", "show"])
     dc.add_argument("doc", help="the document, e.g. docs/research/cache.md")
     dc.add_argument("node", nargs="?", help="show: the node id")
     dc.add_argument("--tag", action="append", help="setup, result, insight, hypothesis, "
@@ -1386,6 +1392,8 @@ def build_parser() -> argparse.ArgumentParser:
     dc.add_argument("--parent", action="append", help="a node this builds on or revises")
     dc.add_argument("--text")
     dc.add_argument("--file")
+    dc.add_argument("--json", action="store_true", help="next: the candidates as JSON")
+    dc.add_argument("--limit", type=int, default=0, help="next: show at most this many")
     dc.set_defaults(func=cmd_doc)
     rm = sub.add_parser("remote", help="pair with another machine over two-way SSH (add, list, "
                         "remove, sessions)")

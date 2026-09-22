@@ -1,4 +1,5 @@
 """Shared documents as agora-style nodes (ADR-0006)."""
+import json
 import os
 import subprocess
 import sys
@@ -91,3 +92,98 @@ class EndorseMcpTest(TempState):
         top = doc.canonical(doc.read(path))
         self.assertEqual((top["tags"], top["author_kind"], top["parents"]),
                          (["endorsed"], "human", [r["id"]]))
+
+
+class DocNextTest(TempState):
+    def setUp(self):
+        super().setUp()
+        self.doc = os.path.join(self.tmp, "cache.md")
+
+    def _document(self):
+        from xsm import doc
+        a = doc.add(self.doc, AGENT, "redis is 2x faster", ["result"])
+        b = doc.add(self.doc, AGENT, "the cache is cold on the first run", ["hypothesis"])
+        c = doc.add(self.doc, AGENT, "measured again, still 2x", ["result"], [a["id"]])
+        return a, b, c
+
+    def test_candidates_are_the_open_ends_and_the_unverified(self):
+        from xsm import doc
+        a, b, c = self._document()
+        got = {n["id"] for n in doc.next_candidates(doc.read(self.doc))}
+        self.assertEqual(got, {b["id"], c["id"]},
+                         "a: built on, so not an open end; b: nobody verified it; "
+                         "c: nothing builds on it")
+
+    def test_the_order_is_the_documents_own_order(self):
+        from xsm import doc
+        a, b, c = self._document()
+        doc.add(self.doc, AGENT, "and another question", ["hypothesis"])
+        nodes = doc.read(self.doc)
+        picked = [n["id"] for n in doc.next_candidates(nodes)]
+        chosen = set(picked)
+        self.assertEqual(picked, [n["id"] for n in nodes if n["id"] in chosen],
+                         "read()'s order, untouched: no ranking of its own")
+        self.assertNotIn("score", json.dumps(doc.next_json(self.doc)),
+                         "xsm must not rank the candidates: ADR-0012 is still open")
+        payload = doc.next_json(self.doc)
+        self.assertEqual((payload["order"], payload["assigns"]), ("created", False))
+
+    def test_a_wip_node_is_a_note_on_its_parent_not_a_candidate(self):
+        from xsm import doc
+        a, b, c = self._document()
+        before = [n["id"] for n in doc.next_candidates(doc.read(self.doc))]
+        w = doc.add(self.doc, AGENT, "taking the cold-cache question", ["wip"], [b["id"]])
+        nodes = doc.read(self.doc)
+        self.assertNotIn(w["id"], [n["id"] for n in doc.next_candidates(nodes)],
+                         "a declaration is not a contribution")
+        self.assertEqual([n["id"] for n in doc.next_candidates(nodes)], before,
+                         "saying you are on it does not remove it or move it")
+        self.assertIn("said they are on it", doc.next_text(self.doc))
+        marked = next(c for c in doc.next_json(self.doc)["candidates"] if c["id"] == b["id"])
+        self.assertEqual(len(marked["wip"]), 1)
+        self.assertIn(AGENT["name"], marked["wip"][0])
+
+    def test_the_older_views_treat_a_wip_node_as_any_other(self):
+        """`doc next` is a view, not an adoption of the `wip` tag: the older
+        views go on counting a `wip` node exactly as they counted it before."""
+        from xsm import doc
+        a, b, c = self._document()
+        before_log = doc.log(doc.read(self.doc))
+        w = doc.add(self.doc, AGENT, "taking it", ["wip"], [b["id"]])
+        nodes = doc.read(self.doc)
+        self.assertIn(w["id"], [n["id"] for n in doc.leaves(nodes)],
+                      "a wip node is a node: nothing builds on it, so leaves has it")
+        self.assertNotIn(b["id"], [n["id"] for n in doc.leaves(nodes)],
+                         "and it shadows its parent there, the way any child would")
+        self.assertIn(b["id"], [n["id"] for n in doc.next_candidates(nodes)],
+                      "which is why the candidates are the union: b is still unverified")
+        for line in before_log.splitlines():
+            self.assertIn(line, doc.log(nodes), "every line the log had, it still has")
+        self.assertIn(w["id"], doc.render(self.doc), "render is untouched too")
+
+    def test_empty_document_says_so(self):
+        from xsm import doc
+        doc.add(self.doc, AGENT, "the report", ["report"])
+        # One node, and it is a leaf: the one thing open is the report itself.
+        self.assertIn("`", doc.next_text(self.doc))
+
+
+class DocNextCliTest(TempState):
+    def test_next_prints_candidates_and_json(self):
+        import contextlib
+        import io
+        from xsm import cli, doc
+        path = os.path.join(self.tmp, "d.md")
+        doc.add(path, AGENT, "a result", ["result"])
+        h = doc.add(path, AGENT, "a question", ["hypothesis"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["doc", "next", path]), 0)
+        self.assertIn(h["id"], out.getvalue())
+        self.assertIn("does not rank", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["doc", "next", path, "--json", "--limit", "1"])
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["total"], 2)
+        self.assertEqual(len(payload["candidates"]), 1)

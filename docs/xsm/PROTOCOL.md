@@ -357,6 +357,14 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 
 문서 `<path>`의 노드는 `<path>.nodes/<id>.md`다. 머리는 `---`로 감싼 `key: value` 줄이다(`id`, `t`, `author`, `author_kind`, `tags`, `parents`, 선택적으로 `approved`). 본문은 그 아래에 온다. `id`는 `sha256("t|author|tags|parents|body")`의 앞 12자다. 노드는 `O_CREAT|O_EXCL`로 만들므로 이미 있는 노드를 덮어쓰지 않는다. 부모는 이미 있는 노드여야 한다. `endorsed`는 `author_kind: human`일 때만 쓸 수 있다. 사람 판정은 채널과 같고, MCP `xsm_doc_endorse`의 elicitation도 사람으로 인정한다. `render`의 기준 노드는 가장 최근의 `endorsed`, 없으면 가장 최근의 `report`다. 여기에 끝 노드(자식이 없는 노드)와, `verification` 자식이 없는 `hypothesis`를 덧붙인다.
 
+`xsm doc next <문서>`는 그 두 집합의 **합집합**을 한 목록으로 낸다. 이미 있는 두 뷰를 합칠 뿐 새 판단을 들이지 않기 위해서다. 규칙:
+
+- **순위를 매기지 않는다.** 순서는 `read()`가 준 순서 그대로다(시각, 같으면 id). 무엇을 순위 신호로 삼느냐가 ADR-0012가 아직 답하지 않은 질문이므로, 여기서 한 신호를 고르면 그 선택지가 사고로 채택된다. `--json`은 `"order": "created"`와 `"assigns": false`를 실어 이 중립을 계약으로 드러낸다. `score` 키는 없다.
+- **배정하지 않는다.** 누가 무엇을 맡을지 정하지 않고, 목록을 보는 것이 맡는 것이 아니다.
+- `wip` 태그가 붙은 노드는 후보에서 뺀다(선언은 기여가 아니다). 그 부모에는 "누가 하고 있다고 말했다" 한 줄이 붙지만 **후보 집합에서 빼지도, 순서를 바꾸지도 않는다.**
+- 기존 뷰(`leaves`, `log`, `render`)는 한 줄도 바뀌지 않는다. `wip` 노드는 거기서 여전히 보통 노드다(자식이 있으므로 부모는 `leaves`에서 빠진다). 이것이 `wip`을 채택한 것이 아님을 보이는 증거다.
+- MCP에 노출하지 않는다. 읽기만 하므로 샌드박스에서도 `bin/xsm doc next`로 된다.
+
 ### 5.8 원격(두 방향 SSH)
 
 - **짝.** `config.json`의 `remotes`에 `{peer, host, local_project, remote_project}`를 둔다. `peer`는 상대가 스스로 알린 호스트 이름(`XSM_HOSTNAME`, 기본 `hostname`의 첫 부분)이다. `host`는 SSH로 닿는 이름이다.
