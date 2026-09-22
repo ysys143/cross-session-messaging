@@ -88,6 +88,27 @@ def span(name: str, attributes: dict | None = None, *, kind: str = "INTERNAL",
         _record(current)
 
 
+def annotate(key: str, value) -> None:
+    """Set an attribute on whatever span is open in this process, if any.
+
+    For code deep in a call that has no span of its own to hand — how
+    registry.me() identified the caller, say — so the fact lands on the
+    command's span without a span argument threaded through every signature.
+    """
+    current = _current.get()
+    if current is not None:
+        current.attributes[key] = value
+
+
+def bump(key: str, by: int = 1) -> None:
+    """Add to a counter attribute on the open span: for things that happen
+    many times per command, like one liveness verdict per session listed."""
+    current = _current.get()
+    if current is not None:
+        value = current.attributes.get(key)
+        current.attributes[key] = (value if isinstance(value, int) else 0) + by
+
+
 def _ids(traceparent: str | None) -> tuple:
     """(trace_id, span_id, parent_id) for a span about to start."""
     resumed = parse_traceparent(traceparent)

@@ -31,22 +31,31 @@ def kill_switch(value):
             os.environ["XSM_NO_TELEMETRY"] = before
 
 
+@contextlib.contextmanager
+def opened(*args, **kwargs):
+    """telemetry.span for tests that run with telemetry on. The real one may
+    yield None by design, and a test that reads the span should fail here,
+    saying why, rather than later on an attribute of None."""
+    from xsm import telemetry
+    with telemetry.span(*args, **kwargs) as span:
+        assert span is not None, "telemetry is off or could not start a span"
+        yield span
+
+
 @needs_telemetry
 class SpanTest(TempState):
     def test_ids_have_the_w3c_shape_and_do_not_repeat(self):
-        from xsm import telemetry
         seen = set()
         for _ in range(50):
-            with telemetry.span("x") as s:
-                self.assertEqual(len(s.trace_id), 32)
-                self.assertEqual(len(s.span_id), 16)
-                int(s.trace_id, 16), int(s.span_id, 16)      # hex, not anything else
+            with opened("x") as s:
+                self.assertRegex(s.trace_id, r"^[0-9a-f]{32}$")
+                self.assertRegex(s.span_id, r"^[0-9a-f]{16}$")
                 seen.add((s.trace_id, s.span_id))
         self.assertEqual(len(seen), 50)
 
     def test_a_span_is_written_when_it_ends(self):
         from xsm import paths, telemetry
-        with telemetry.span("xsm.send", {"xsm.msg.kind": "task"}, kind="PRODUCER") as s:
+        with opened("xsm.send", {"xsm.msg.kind": "task"}, kind="PRODUCER") as s:
             s.set_attribute("xsm.result.status", "delivered")
             traceparent = s.traceparent()
         rows = paths.read_jsonl(telemetry.SPANS)
@@ -63,20 +72,19 @@ class SpanTest(TempState):
 
     def test_a_nested_span_hangs_off_the_one_already_running(self):
         from xsm import paths, telemetry
-        with telemetry.span("outer") as outer:
-            with telemetry.span("inner") as inner:
+        with opened("outer") as outer:
+            with opened("inner") as inner:
                 self.assertEqual(inner.trace_id, outer.trace_id)
                 self.assertEqual(inner.parent_id, outer.span_id)
-            with telemetry.span("sibling") as sibling:
+            with opened("sibling") as sibling:
                 self.assertEqual(sibling.parent_id, outer.span_id)
                 self.assertNotEqual(sibling.span_id, inner.span_id)
         names = [r["name"] for r in paths.read_jsonl(telemetry.SPANS)]
         self.assertEqual(names, ["inner", "sibling", "outer"], "children close first")
 
     def test_a_traceparent_continues_the_senders_trace(self):
-        from xsm import telemetry
         incoming = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
-        with telemetry.span("xsm.receive.gate", traceparent=incoming) as s:
+        with opened("xsm.receive.gate", traceparent=incoming) as s:
             self.assertEqual(s.trace_id, "a" * 32)
             self.assertEqual(s.parent_id, "b" * 16)
             self.assertNotEqual(s.span_id, "b" * 16, "a new span, not the sender's")
@@ -88,7 +96,7 @@ class SpanTest(TempState):
                     "00-%s-%s-01" % ("a" * 32, "0" * 16),      # all-zero span id
                     "00-%s-01" % ("a" * 32)):
             self.assertIsNone(telemetry.parse_traceparent(bad), bad)
-            with telemetry.span("x", traceparent=bad) as s:
+            with opened("x", traceparent=bad) as s:
                 self.assertEqual(len(s.trace_id), 32)
                 self.assertIsNone(s.parent_id)
 
@@ -155,7 +163,7 @@ class NeverBreaksTheCallerTest(TempState):
     @needs_telemetry
     def test_an_unserializable_attribute_is_dropped_not_raised(self):
         from xsm import paths, telemetry
-        with telemetry.span("xsm.send") as s:
+        with opened("xsm.send") as s:
             s.set_attribute("bad", object())
         self.assertEqual(paths.read_jsonl(telemetry.SPANS), [], "nothing written, nothing raised")
 
@@ -254,7 +262,7 @@ class ReceiveInstrumentationTest(TempState):
     def test_the_receiver_joins_the_trace_the_sender_started(self):
         from xsm import envelope, paths, telemetry
         sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa", "session_id": "s1"}
-        with telemetry.span("xsm.send") as sending:
+        with opened("xsm.send") as sending:
             wire = envelope.build("hi", msg_id="m1", sender=sender, scope="dir:x",
                                   traceparent=sending.traceparent())
             sent = (sending.trace_id, sending.span_id)
@@ -269,6 +277,7 @@ class ReceiveInstrumentationTest(TempState):
         from xsm import envelope, paths, telemetry
         sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa", "session_id": "s1"}
         out = self._gate(envelope.build("hi", msg_id="m1", sender=sender, scope="dir:x"))
+        assert out is not None, "a peer message always gets a decision"
         self.assertEqual(out["decision"], "block", "unchanged: still refused")
         gate = [r for r in paths.read_jsonl(telemetry.SPANS) if r["name"] == "xsm.receive.gate"][0]
         self.assertEqual(gate["status"], "ERROR")
@@ -278,11 +287,12 @@ class ReceiveInstrumentationTest(TempState):
                  if r["name"] == "xsm.receive.count"][0]
         self.assertEqual(point["attributes"], {"xsm.receive.decision": "held"})
 
-    def test_a_human_prompt_is_not_a_span(self):
+    def test_a_human_prompt_opens_no_gate(self):
         from xsm import paths, telemetry
         self.assertIsNone(self._gate("my own prompt"))
-        self.assertEqual(paths.read_jsonl(telemetry.SPANS), [],
-                         "the gate only opens a span for peer messages")
+        names = [r["name"] for r in paths.read_jsonl(telemetry.SPANS)]
+        self.assertEqual(names, ["xsm.hook.UserPromptSubmit"],
+                         "the hook ran and is on record; the gate only opens for peer messages")
 
 
 @needs_telemetry
@@ -294,10 +304,9 @@ class OverheadTest(TempState):
 
     def test_a_span_costs_nowhere_near_a_millisecond(self):
         import time
-        from xsm import telemetry
         start = time.time()
         for _ in range(100):
-            with telemetry.span("xsm.send", {"xsm.msg.kind": "task"}) as span:
+            with opened("xsm.send", {"xsm.msg.kind": "task"}) as span:
                 span.set_attribute("xsm.result.status", "sent-unconfirmed")
         each_ms = (time.time() - start) * 1000 / 100
         self.assertLess(each_ms, 10, "a span should cost microseconds; 10ms means something "
@@ -343,11 +352,9 @@ class SendIsUnchangedByTelemetryTest(TempState):
     def test_the_same_results_with_telemetry_missing(self):
         baseline = self._result_fields()
         self.setUp()
-        sys.modules["xsm.telemetry"] = None                  # what an ImportError looks like
-        try:
+        # A None entry in sys.modules is what makes an import raise ImportError.
+        with mock.patch.dict(sys.modules, {"xsm.telemetry": None}):
             self.assertEqual(self._result_fields(), baseline)
-        finally:
-            sys.modules.pop("xsm.telemetry", None)
 
     def test_the_same_results_when_telemetry_itself_fails(self):
         baseline = self._result_fields()

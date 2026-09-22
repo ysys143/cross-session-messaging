@@ -390,13 +390,26 @@ def me(session_id: str | None = None, cwd: str | None = None):
     a shell that inherited neither — never for one that knows its session id,
     where a cwd match would be some other session's identity.
     """
+    rec, how = _me(session_id, cwd)
+    try:
+        from . import telemetry
+        telemetry.annotate("xsm.identity.via", how)
+    except ImportError:
+        pass
+    return rec
+
+
+def _me(session_id: str | None, cwd: str | None) -> tuple:
+    """(record or None, which rule found it) — the rule is what a span of a
+    refused command needs, since "cannot tell who is posting" has one cause
+    per rule that could have matched and did not."""
     rows = records()
     own_session = os.environ.get("CLAUDE_CODE_SESSION_ID")
     session_id = session_id or own_session
     if session_id:
         for rec in rows:
             if rec.get("session_id") == session_id:
-                return rec
+                return rec, "session_id"
     # Codex puts its thread id in every shell it runs, and the thread id is
     # what a Codex record is keyed by. It has to come before the process walk:
     # the Codex sandbox refuses to run `ps` ("operation not permitted",
@@ -406,25 +419,28 @@ def me(session_id: str | None = None, cwd: str | None = None):
     if thread:
         for rec in rows:
             if rec.get("runtime") == "codex" and rec.get("session_id") == thread:
-                return rec
+                return rec, "codex_thread_id"
     sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
     if sock:
         pid = identity.pid_from_socket(sock)
         for rec in rows:
             if rec.get("pid") == pid:
-                return rec
+                return rec, "socket"
     # The CLI runs as a descendant of the session process, so walking up to the
     # agent gives an exact answer even when two sessions share a directory.
     own = identity.ancestor_pid({"claude", "codex"})
     if own:
         for rec in rows:
             if rec.get("pid") == own:
-                return rec
+                return rec, "ancestor"
     if own_session and session_id == own_session:
-        return adopt_self()
+        adopted = adopt_self()
+        return adopted, "adopted" if adopted else "none:unregistered-session"
     cwd = os.path.realpath(cwd or os.getcwd())
     live = [r for r in rows if r.get("cwd") == cwd and r.get("state") == "live"]
-    return live[0] if len(live) == 1 else None
+    if len(live) == 1:
+        return live[0], "cwd"
+    return None, "none:cwd-%d-live" % len(live)
 
 
 def inbound_setting(home: str) -> str | None:

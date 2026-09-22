@@ -1088,4 +1088,53 @@ def main(argv=None) -> int:
     paths.ensure_home()
     if args.command not in ("hook", "statusline", "prune", "pump", "reap", "mcp"):
         housekeeping.maybe_prune()
-    return args.func(args)
+    try:
+        from . import telemetry
+    except ImportError:
+        telemetry = None
+    # Long-running (mcp, pump) or redrawn on every prompt (statusline): a span
+    # each would be noise, or would never close. And the two that read the
+    # telemetry itself: each export would leave a span for the next export to
+    # ship, and metrics would count its own calls.
+    if telemetry is None or args.command in ("mcp", "pump", "statusline",
+                                             "metrics", "otlp-export"):
+        return args.func(args)
+    return _traced(telemetry, args)
+
+
+class _StderrTail:
+    """Passes stderr through and keeps its last line: a refusal's reason is
+    printed there, and it is what a span of a failed command should say."""
+
+    def __init__(self, inner):
+        self.inner, self.tail = inner, ""
+
+    def write(self, text):
+        line = text.strip()
+        if line:
+            self.tail = line.splitlines()[-1][:300]
+        return self.inner.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def _traced(telemetry, args) -> int:
+    """One span per command. Before this only send and receive were traced,
+    and the S10 pilot ran three sessions for half an hour on doc, list and
+    post — several hundred calls, some of them refused, and not one span."""
+    attrs = {"xsm.cli.command": args.command}
+    if isinstance(getattr(args, "action", None), str):
+        attrs["xsm.cli.action"] = args.action
+    with telemetry.span("xsm.cli.%s" % args.command, attrs) as span:
+        tail = _StderrTail(sys.stderr)
+        sys.stderr = tail
+        try:
+            code = args.func(args)
+        finally:
+            sys.stderr = tail.inner
+        if span is not None:
+            span.set_attribute("xsm.cli.exit", code)
+            if code:
+                span.set_status("ERROR", tail.tail or "exit %s" % code)
+        return code

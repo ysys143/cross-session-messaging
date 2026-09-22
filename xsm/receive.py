@@ -134,6 +134,20 @@ def block(runtime: str, reason: str) -> dict:
 
 
 def handle(data: dict) -> dict | None:
+    """One span per hook call. A session's first sign of life is its
+    SessionStart hook; without a span there, a session that never came up
+    and one that came up and did nothing look the same from outside."""
+    try:
+        from . import telemetry
+    except ImportError:
+        return _handle(data)
+    event = data.get("hook_event_name") or "unknown"
+    with telemetry.span("xsm.hook.%s" % event, {"xsm.hook.event": event,
+                                                "xsm.hook.runtime": detect_runtime(data)}):
+        return _handle(data)
+
+
+def _handle(data: dict) -> dict | None:
     runtime = detect_runtime(data)
     if data.get("hook_event_name") == "PermissionRequest":
         return workers.permission_request(data, runtime)

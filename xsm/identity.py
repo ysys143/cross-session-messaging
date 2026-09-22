@@ -29,7 +29,14 @@ def pid_alive(pid) -> bool:
     try:
         os.kill(int(pid), 0)
         return True
-    except (OSError, TypeError, ValueError):
+    except OSError as err:
+        try:
+            from . import telemetry
+            telemetry.bump("xsm.state.kill_errno_%s" % err.errno)
+        except ImportError:
+            pass
+        return False
+    except (TypeError, ValueError):
         return False
 
 
@@ -68,18 +75,37 @@ def state_of(record: dict) -> str:
     deliberate for a Codex session whose pid we could not confirm: unknown must
     not read as dead (ADR-0001).
     """
+    verdict, why = _state_of(record)
+    try:
+        from . import telemetry
+        telemetry.bump("xsm.state.%s" % why)
+    except ImportError:
+        pass
+    return verdict
+
+
+def _state_of(record: dict) -> tuple:
+    """(state, reason). The reason is counted on the command's span: a list
+    that shows no live peers has one cause per check below, and from inside a
+    sandbox they are not the ones they look like from outside."""
     pid = record.get("pid")
     if not pid:
-        return "unknown"
+        return "unknown", "no_pid"
     gone = "ended" if record.get("ended_at") else "stale"
     if not pid_alive(pid):
-        return gone
+        return gone, "pid_dead"
     recorded = record.get("lstart")
-    if recorded and lstart(pid) != recorded:
-        return gone             # pid reused by a different process
+    if recorded:
+        now = lstart(pid)
+        if now is None:
+            return gone, "lstart_unmeasured"
+        if now != recorded:
+            return gone, "lstart_changed"   # pid reused by a different process
     if record.get("runtime") == "claude":
-        return "live" if socket_live(record.get("socket") or "") else gone
-    return "live"
+        if socket_live(record.get("socket") or ""):
+            return "live", "live"
+        return gone, "socket_dead"
+    return "live", "live"
 
 
 def ancestor_pid(names, max_hops: int = 10) -> int | None:
