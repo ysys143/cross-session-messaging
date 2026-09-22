@@ -286,6 +286,25 @@ class ReceiveInstrumentationTest(TempState):
 
 
 @needs_telemetry
+class OverheadTest(TempState):
+    """A guard, not a measurement. docs/references/telemetry-overhead.md holds
+    the real numbers (0.175ms per send, measured); this only catches something
+    going catastrophically wrong, because a microbenchmark with a tight bound
+    turns flaky the moment the machine is busy."""
+
+    def test_a_span_costs_nowhere_near_a_millisecond(self):
+        import time
+        from xsm import telemetry
+        start = time.time()
+        for _ in range(100):
+            with telemetry.span("xsm.send", {"xsm.msg.kind": "task"}) as span:
+                span.set_attribute("xsm.result.status", "sent-unconfirmed")
+        each_ms = (time.time() - start) * 1000 / 100
+        self.assertLess(each_ms, 10, "a span should cost microseconds; 10ms means something "
+                                     "is writing far more than one line (measured: ~0.09ms)")
+
+
+@needs_telemetry
 class WorkerInstrumentationTest(TempState):
     def test_stopping_a_worker_records_its_lifetime(self):
         import time
