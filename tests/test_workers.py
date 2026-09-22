@@ -939,3 +939,109 @@ class Adr0009FixesTest(TempState):
             with self.assertRaises(workers.WorkerError) as cm:
                 workers.spawn("claude", cwd=there, caller=caller, background=True)
         self.assertIn("outside-scope", str(cm.exception))
+
+
+class AttemptsTest(TempState):
+    TEXT = "Run the tests in ./pkg and report failures"
+
+    def _fail(self, key, worker="w"):
+        from xsm import attempts
+        attempts.start(key, self.TEXT, self.tmp, worker, "t-%s" % worker)
+        attempts.finish(key, "failed")
+
+    def test_the_same_words_in_another_folder_are_another_job(self):
+        from xsm import attempts
+        here = attempts.key_for(self.TEXT, self.tmp)
+        self.assertEqual(here, attempts.key_for("  run the TESTS in ./pkg\n and report failures  ",
+                                                self.tmp),
+                         "case and whitespace do not make it a different task")
+        self.assertNotEqual(here, attempts.key_for(self.TEXT, os.path.dirname(self.tmp)))
+
+    def test_a_success_clears_the_count_and_an_unknown_answer_does_not(self):
+        from xsm import attempts
+        key = attempts.key_for(self.TEXT, self.tmp)
+        self._fail(key, "w1")
+        self._fail(key, "w2")
+        self.assertEqual(attempts.failures(key), 2)
+        attempts.start(key, self.TEXT, self.tmp, "w3", "t-w3")
+        attempts.finish(key, None)
+        self.assertEqual(attempts.failures(key), 2,
+                         "xsm does not read the prose to decide: an answer without an outcome "
+                         "neither counts nor clears")
+        attempts.start(key, self.TEXT, self.tmp, "w4", "t-w4")
+        attempts.finish(key, "succeeded")
+        self.assertEqual(attempts.failures(key), 0)
+
+    def test_the_first_close_wins(self):
+        from xsm import attempts
+        key = attempts.key_for(self.TEXT, self.tmp)
+        attempts.start(key, self.TEXT, self.tmp, "w1", "t1")
+        attempts.finish(key, "succeeded", "", "t1")
+        attempts.finish(key, "failed", "stopped without answering", "t1")
+        self.assertEqual(attempts.failures(key), 0,
+                         "the stop that follows a reply must not paint over the reply")
+
+    def test_check_refuses_after_the_limit_with_a_token_to_branch_on(self):
+        from xsm import attempts
+        key = attempts.key_for(self.TEXT, self.tmp)
+        for i in range(3):
+            self._fail(key, "w%d" % i)
+        attempts.check(key, 4)
+        with self.assertRaises(attempts.AttemptsError) as cm:
+            attempts.check(key, 3)
+        self.assertIn("task-attempts-exhausted", str(cm.exception))
+        self.assertIn("xsm attempts clear %s" % key, str(cm.exception))
+
+    def test_a_retry_worded_differently_joins_the_same_lineage(self):
+        from xsm import attempts
+        key = attempts.key_for(self.TEXT, self.tmp)
+        attempts.start(key, self.TEXT, self.tmp, "w1", "task-9")
+        self.assertEqual(attempts.key_of_task("task-9"), key)
+        self.assertIsNone(attempts.key_of_task("never-sent"))
+
+    def test_spawn_refuses_the_fourth_try_and_creates_nothing(self):
+        from unittest import mock
+        from xsm import attempts, workers
+        workers.human_terminal = lambda: True
+        workers._check_installed = lambda home, runtime: None
+        workers.check_concurrency = lambda caller: None
+        key = attempts.key_for(self.TEXT, self.tmp)
+        for i in range(3):
+            self._fail(key, "w%d" % i)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_", "TMUX"))}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(workers.WorkerError) as cm:
+                workers.spawn("claude", name="w9", cwd=self.tmp, background=True,
+                              caller={"ref": "pppppp", "cwd": self.tmp, "runtime": "claude"},
+                              task={"id": "t9", "text": self.TEXT})
+        self.assertIn("task-attempts-exhausted", str(cm.exception))
+        self.assertFalse(os.path.exists(workers._dir("w9")),
+                         "the refusal comes before anything is created")
+
+    def test_clear_is_a_persons(self):
+        import contextlib
+        import io
+        from xsm import attempts, cli, workers
+        key = attempts.key_for(self.TEXT, self.tmp)
+        self._fail(key)
+        workers.human_terminal = lambda: False
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["attempts", "clear", key]), 2)
+        self.assertIn("only a person", err.getvalue())
+        self.assertTrue(attempts.read(key), "still there")
+        workers.human_terminal = lambda: True
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["attempts", "clear", key]), 0)
+        self.assertFalse(attempts.read(key))
+
+    def test_housekeeping_forgets_an_untouched_lineage(self):
+        import time
+        from xsm import attempts, housekeeping, paths
+        key = attempts.key_for(self.TEXT, self.tmp)
+        self._fail(key)
+        rec = attempts.read(key)
+        rec["tries"][0]["t"] = time.time() - 30 * 86400
+        paths.write_json(attempts._path(key), rec)
+        self.assertIn(key, housekeeping.prune()["attempts"])
+        self.assertFalse(attempts.read(key))

@@ -985,7 +985,7 @@ def cmd_spawn(args) -> int:
                                approval_timeout=args.approval_timeout,
                                wait=args.wait, caller=caller, max_depth=args.max_depth,
                                full_access=args.full_access, trust_hooks=args.trust_hooks,
-                               grant=args.grant, task=task)
+                               grant=args.grant, task=task, retry_of=args.retry_of)
     except workers.WorkerError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return REFUSED
@@ -1092,6 +1092,48 @@ def _cmd_workers(args) -> int:
             "  once" if w.get("once") else "", "  task %s" % done if done else "",
             "  FULL-ACCESS" if w.get("full_access") else "",
             "  hooks-untrusted" if w.get("trust_hooks") else ""))
+    return OK
+
+
+def cmd_attempts(args) -> int:
+    """What has been tried and how it went. `clear` is a person's: an agent that
+    could lift its own limit does not have one."""
+    from . import attempts
+    if args.action == "clear":
+        if not args.key:
+            print("which lineage? xsm attempts clear <key>", file=sys.stderr)
+            return USAGE
+        if not workers.human_terminal():
+            print("refused: only a person at a terminal clears a task's attempts. Tell your "
+                  "user what failed and what the worker said it needed; they run "
+                  "`xsm attempts clear %s`." % args.key, file=sys.stderr)
+            return REFUSED
+        print("cleared %s" % args.key if attempts.clear(args.key) else "no such lineage %s"
+              % args.key)
+        return OK
+    if args.action == "show":
+        rec = attempts.read(args.key or "")
+        if not rec:
+            print("no such lineage", file=sys.stderr)
+            return REFUSED
+        print(json.dumps(rec, ensure_ascii=False, indent=1) if args.json else
+              "\n".join(["%s  %s  %s" % (rec["key"], rec.get("cwd"), rec.get("text"))] +
+                        ["  %s %s %s" % (time.strftime("%m-%d %H:%M", time.localtime(t.get("t", 0))),
+                                         t.get("worker"), t.get("outcome") or "no answer")
+                         for t in rec.get("tries") or []]))
+        return OK
+    rows = attempts.all_records()
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=1))
+        return OK
+    if not rows:
+        print("nothing tried yet")
+        return OK
+    for rec in rows:
+        failed = attempts.failures(rec["key"])
+        print("%s  %d try/tries, %d failure(s) since the last success  %s" % (
+            rec["key"], len(rec.get("tries") or []), failed,
+            (rec.get("text") or "").replace("\n", " ")[:50]))
     return OK
 
 
@@ -1344,6 +1386,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--trust-hooks", action="store_true",
                     help="Codex pane worker: --dangerously-bypass-hook-trust; needs --grant from an agent")
     sp.add_argument("--grant", help="the id xsm_grant returned after your user allowed it")
+    sp.add_argument("--retry-of", help="the task id this one tries again: it joins that task's "
+                    "lineage even if you reworded it")
     sp.add_argument("--max-depth", type=int, help="worker levels this worker's subtree may use "
                     "(default: XSM_MAX_DEPTH or config max_depth, 1; a worker can only lower it)")
     sp.set_defaults(func=cmd_spawn)
@@ -1424,6 +1468,12 @@ def build_parser() -> argparse.ArgumentParser:
         bp = sub.add_parser(verb, help=helptext)
         bp.add_argument("ref")
         bp.set_defaults(func=cmd_block)
+    at = sub.add_parser("attempts", help="how often a task has been handed to a worker, and "
+                                         "how it went (clear needs a person)")
+    at.add_argument("action", nargs="?", default="list", choices=["list", "show", "clear"])
+    at.add_argument("key", nargs="?")
+    at.add_argument("--json", action="store_true")
+    at.set_defaults(func=cmd_attempts)
     fw = sub.add_parser("frameworks", help="whether xsm starts workers inside Orca or herdr "
                                            "(ignore needs a person)")
     fw.add_argument("action", nargs="?", default="list", choices=["list", "ignore", "respect"])

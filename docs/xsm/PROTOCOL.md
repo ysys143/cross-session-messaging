@@ -113,6 +113,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 | `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?, "ended_at"?, "end_reason"?}` |
 | `ledger/<msg-id>.json` | `{"id", "status": "queued", "t", "kind", "scope", "from": {...}, "to": {...}, "preview", "outcome"?, "closed_t"?, "closed_by"?}`. `outcome`은 그 과제를 끝맺는 답장이 도착했을 때 붙는다. `status`와 **별도 키**다 — 조회 시 영수증의 판정이 `status`를 덮어쓰므로 같은 키에 두면 사라진다 |
 | `ledger/<msg-id>.recv.json` | `{"id", "decision": "delivered"\|"held"\|"blocked", "reason", "t", "receiver": {...}, "outcome"?}` |
+| `attempts/<key>.json` | `{"key", "text"(200자), "cwd", "first_t", "tries": [{"t", "worker", "task_id", "ended_t"?, "outcome"?, "why"?}]}`. `key`는 `sha256(정규화한 과제 문장 + "\|" + realpath(cwd))`의 앞 12자다. 같은 문장이라도 폴더가 다르면 다른 일이다. 최근 20건만 남긴다 |
 | `held/<밀리초>.json` | `{"t", "reason", "runtime", "receiver", "id"?, "from"?, "scope"?, "body"}` |
 | `decisions.jsonl` | 한 줄에 판정 하나. 최소 `{"t", "decision", "reason"}` |
 
@@ -338,7 +339,16 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 - **위험한 옵션.** `full_access`와 `trust_hooks`는 부른 쪽이 사람(`human_terminal()`)이 아니면 허가를 요구한다. 허가는 `grants/<id>.json`에 저장되며 `{asked_by, runtime, cwd, options, expires}`로 묶인다. `spawn`은 파일을 `.used`로 rename해서 한 번만 쓰고, 세션·런타임·폴더가 다르거나, 옵션을 다 덮지 못하거나, 만료됐으면 거부한다. 허가는 MCP `xsm_grant`만 만든다. 이 도구는 elicitation으로 `deny`/`allow once`를 묻고, 결과를 채널에 `decision`(작성자 `사람 via mcp-elicitation`)으로 남긴다. `trust_hooks`는 Codex 워커에만 된다.
 - **동시 수.** 새 워커를 띄우기 전에 부른 세션(`parent_ref`)의 워커 가운데 `gone`이 아닌 것을 센다. `XSM_MAX_WORKERS`, 없으면 config `max_workers`(기본 4) 이상이면 거부한다. 세기 전에 남은 워커를 먼저 정리한다.
 - **남은 워커.** 워커의 `parent_ref`에 해당하는 레코드가 없거나 `ended`/`stale`이면 그 워커는 남은 것이다. 만든 지 120초가 지났는데 자기 프로세스가 없는 워커도 같다. 이런 워커는 `stop`으로 정리한다. 확인 시점은 셋이다. (1) 부모의 SessionEnd 훅: 부모 프로세스가 아직 살아 있으므로, 분리된 `xsm reap --after-pid <부모 pid>`가 그 프로세스가 끝나길(최대 120초) 기다렸다가 정리한다. (2) `workers`와 `spawn`. (3) 매시간 정리. 훅 경로에서는 늘 분리된 프로세스로 한다.
-- **종료.** `stop`은 pid와 시작 시각이 기록과 같을 때만 신호를 보낸다(프로세스 그룹에 SIGTERM, 5초 뒤 SIGKILL). 패널 워커는 `tmux kill-pane`. 대기 중인 승인은 `denied`로 닫고, 워커 기록·폴더·세션 포인터를 지운다. 원장은 보존 기간 규칙을 따른다. `once`는 `--task`가 있어야 쓸 수 있다. 과제 id는 보내기 전에 워커 기록에 저장한다. 그 과제(`task_id`)에 대한 `reply`가 부모(`parent_ref`)의 훅을 통과하면, 훅이 분리된 프로세스로 `xsm stop --internal`을 띄운다. 훅 안에서 종료를 기다리지 않기 위해서다. `task_id`가 없으면 어떤 답장으로도 멈추지 않는다. **`outcome`은 이 판정을 바꾸지 않는다.** `failed`라고 답해도 답한 것이므로 `once` 워커는 멈춘다. 같은 일을 다시 맡길지는 사람의 판단이다. 과제의 성패는 워커 기록이 아니라 부모가 이미 id를 쥐고 있는 원장 항목(`ledger/<과제 id>.json`의 `outcome`)에 남는다 — 워커 기록은 몇 초 뒤 지워진다.
+- **종료.** `stop`은 pid와 시작 시각이 기록과 같을 때만 신호를 보낸다(프로세스 그룹에 SIGTERM, 5초 뒤 SIGKILL). 패널 워커는 `tmux kill-pane`. 대기 중인 승인은 `denied`로 닫고, 워커 기록·폴더·세션 포인터를 지운다. 원장은 보존 기간 규칙을 따른다. `once`는 `--task`가 있어야 쓸 수 있다. 과제 id는 보내기 전에 워커 기록에 저장한다. 그 과제(`task_id`)에 대한 `reply`가 부모(`parent_ref`)의 훅을 통과하면, 훅이 분리된 프로세스로 `xsm stop --internal`을 띄운다. 훅 안에서 종료를 기다리지 않기 위해서다. `task_id`가 없으면 어떤 답장으로도 멈추지 않는다.
+
+- **재시도 계보와 연속 실패 차단.** `--task`가 있는 `spawn`은 그 과제의 계보(`attempts/<key>.json`)를 먼저 본다. 마지막 성공 이후 실패가 `max_task_attempts`(설정, `XSM_MAX_TASK_ATTEMPTS`, 기본 3)에 이르면 거부한다. 거부 메시지에는 안정적인 토큰 `task-attempts-exhausted`와 시도 이력이 들어가고, **새 종료 코드를 만들지 않는다**(거부는 2다). 검사는 폴더가 정해진 직후, 워커 디렉터리·tmux 창·프로세스가 생기기 전에 한다.
+  - 계보의 시작은 `spawn` 호출이 아니라 **과제가 실제로 나가는 순간**이다. 뜨지도 못한 워커는 시도가 아니다.
+  - 끝맺음: 답장이 오면 그 `outcome`으로, 답장 없이 `stop`되면 `failed`("stopped without answering")로 닫는다. `finish`는 멱등이라 먼저 닫은 쪽이 이긴다 — 답장 뒤에 따라오는 `stop`이 답장을 덮어쓰지 못한다.
+  - 세는 규칙: `failed` +1, `succeeded`면 0으로, **`outcome`이 없으면 세지도 리셋하지도 않는다.** 본문을 읽어 성패를 추측하지 않기 때문이다.
+  - `--retry-of <과제 id>`를 주면 그 과제의 계보에 붙는다. 문장을 고쳐 쓴 재시도도 한 계보다. 계보만 잇고 모델·폴더 같은 배치는 상속하지 않는다.
+  - 해제는 `xsm attempts clear <key>`이고 **사람만** 한다(승인과 같은 터미널 검사). MCP 도구도, `--force-retry` 같은 우회 플래그도 없다. 예스가 나올 때까지 다시 묻는 경로를 만들지 않기 위해서다. `xsm attempts`(목록)와 `xsm attempts show <key>`는 누구나 본다.
+  - 보존은 `attempt_retention_days`(기본 7일). 한도는 몰아치기를 막으려는 것이지 실패를 영구 기록하려는 것이 아니다.
+  - **새 타이머도 상주 주체도 없다.** 계보는 이미 도는 두 경로(`spawn`, 답장 또는 `stop`)에서만 움직인다. **`outcome`은 이 판정을 바꾸지 않는다.** `failed`라고 답해도 답한 것이므로 `once` 워커는 멈춘다. 같은 일을 다시 맡길지는 사람의 판단이다. 과제의 성패는 워커 기록이 아니라 부모가 이미 id를 쥐고 있는 원장 항목(`ledger/<과제 id>.json`의 `outcome`)에 남는다 — 워커 기록은 몇 초 뒤 지워진다.
 
 ### 5.6 채널과 MCP 서버
 

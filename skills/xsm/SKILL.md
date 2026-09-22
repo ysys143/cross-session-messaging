@@ -220,6 +220,14 @@ xsm stop <worker>           # stop it and remove its records
   form it shows is the permission. Never ask them to type shell commands.
 - If your user answers the grant form with deny, do not start that worker with
   those options; carry on without them or ask what they prefer.
+- **The same task three times is the end of it.** When a worker answers
+  `--outcome failed`, that failure is recorded against the task. After three
+  in a row, `spawn` refuses with `task-attempts-exhausted` and lists what was
+  tried. Do not reword it and send it again — the lineage follows the task, and
+  `--retry-of <task id>` is how you say a reworded try belongs to it. Tell your
+  user what failed and what the worker said it needed; only they can clear it,
+  with `xsm attempts clear <key>` in a terminal. `xsm attempts` and
+  `xsm attempts show <key>` show what has been tried.
 - Workers cannot start workers unless the depth limit allows it (`max_depth`,
   default 1), and one session runs at most `max_workers` (default 4) at once.
   If spawn refuses for either, report it; do not raise the limit. Workers stop

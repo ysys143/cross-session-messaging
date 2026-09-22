@@ -20,11 +20,12 @@ import json
 import os
 import time
 
-from . import config, identity, inbox, paths
+from . import attempts, config, identity, inbox, paths
 
 STAMP = "last-prune"
 INTERVAL = 3600.0
-DEFAULTS = {"retention_days": 7, "ledger_retention_days": 30, "telemetry_retention_days": 7}
+DEFAULTS = {"retention_days": 7, "ledger_retention_days": 30, "telemetry_retention_days": 7,
+            "attempt_retention_days": 7}
 
 
 def _setting(name: str) -> float:
@@ -47,7 +48,8 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
     now = time.time() if now is None else now
     pointer_cutoff = now - _setting("retention_days") * 86400
     record_cutoff = now - _setting("ledger_retention_days") * 86400
-    removed = {"sessions": [], "ledger": [], "held": [], "inbox": [], "telemetry": {}}
+    removed = {"sessions": [], "ledger": [], "held": [], "inbox": [], "telemetry": {},
+               "attempts": []}
 
     for p in glob.glob(paths.path(paths.SESSIONS, "*.json")):
         rec = paths.read_json(p)
@@ -77,6 +79,10 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
                 _unlink(p)
 
     removed["telemetry"] = prune_telemetry(now, dry_run)
+    # A week without a try is a job nobody is retrying. Short on purpose: the
+    # limit exists to stop a burst, not to keep a permanent record of failure.
+    removed["attempts"] = attempts.prune(now - _setting("attempt_retention_days") * 86400,
+                                         dry_run)
 
     # A copy for a Codex session that never read it: the queue item it
     # duplicates is gone with the session, so it goes with the pointer window.

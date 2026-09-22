@@ -18,6 +18,7 @@ SESSIONS = "sessions"
 HELD = "held"
 LEDGER = "ledger"
 MCP = "mcp"                 # one beacon per running xsm MCP server (Codex thread liveness)
+ATTEMPTS = "attempts"       # one file per task lineage: how often it has been tried, and how it went
 
 
 def path(*parts: str) -> str:
@@ -25,7 +26,7 @@ def path(*parts: str) -> str:
 
 
 def ensure_home() -> None:
-    for sub in ("", SESSIONS, HELD, LEDGER, MCP):
+    for sub in ("", SESSIONS, HELD, LEDGER, MCP, ATTEMPTS):
         os.makedirs(path(sub), mode=0o700, exist_ok=True)
 
 

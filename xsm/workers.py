@@ -47,7 +47,7 @@ import time
 import uuid
 from contextlib import nullcontext
 
-from . import config, identity, install, paths, registry
+from . import attempts, config, identity, install, paths, registry
 
 WORKERS = "workers"
 APPROVALS = "approvals"
@@ -456,7 +456,8 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
           once: bool = False, background: bool = False, approval_timeout: int = APPROVAL_TIMEOUT,
           wait: float = 90.0, caller: dict | None = None,
           max_depth: int | None = None, full_access: bool = False, trust_hooks: bool = False,
-          grant: str | None = None, task: dict | None = None) -> dict:
+          grant: str | None = None, task: dict | None = None,
+          retry_of: str | None = None) -> dict:
     """Start a worker. If it stops at a folder-trust screen in the background,
     return at once with worker["waiting"] set to an approval request: the
     caller is an agent blocked in this call, and it has to be free to ask its
@@ -484,6 +485,17 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
     home = os.path.realpath(os.path.expanduser(home)) if home else _default_home(runtime, caller)
     _check_installed(home, runtime)
     cwd = os.path.realpath(os.path.expanduser(cwd or (caller or {}).get("cwd") or os.getcwd()))
+    # Wants cwd (the same words in another repository are another job), so it
+    # sits here rather than beside the other limits — still before any
+    # directory, tmux window or process exists.
+    attempt_key = None
+    if task and task.get("text"):
+        attempt_key = retry_of and attempts.key_of_task(retry_of) \
+            or attempts.key_for(task["text"], cwd)
+        try:
+            attempts.check(attempt_key, _limit("max_task_attempts", "XSM_MAX_TASK_ATTEMPTS", 3))
+        except attempts.AttemptsError as exc:
+            raise WorkerError(str(exc))
     pane = None if background else tmux_pane()
     if runtime == "codex" and not trust_hooks:
         trust = install.codex_trust(home)
@@ -505,7 +517,7 @@ def spawn(runtime: str, *, name: str | None = None, model: str | None = None,
               "parent_ref": (caller or {}).get("ref"), "session_id": None,
               "depth": depth, "max_depth": limit, "full_access": full_access,
               "trust_hooks": trust_hooks, "grant": (granted or {}).get("id"),
-              "pending_task": task}
+              "pending_task": task, "attempt_key": attempt_key}
     if runtime == "codex" and not worker["model"]:
         worker["model"] = CODEX_MODEL
     os.makedirs(_dir(name), mode=0o700, exist_ok=True)
@@ -733,6 +745,11 @@ def finish(name: str) -> int:
             from . import send as send_mod
             worker["task_id"] = task["id"]
             save(worker)
+            # The try opens when the task is really on its way, not when spawn
+            # was called: a worker that never came up was never a try.
+            if worker.get("attempt_key"):
+                attempts.start(worker["attempt_key"], task["text"], worker["cwd"],
+                               worker["name"], task["id"])
             send_mod.send("ref:%s" % worker["ref"], task["text"], sender=parent, kind="task",
                           msg_id=task["id"])
     else:
@@ -963,6 +980,11 @@ def stop(name: str, reason: str = "stopped") -> dict:
         telemetry.histogram("xsm.worker.lifetime", time.time() - (worker.get("created") or
                                                                   time.time()),
                             {"xsm.worker.runtime": worker.get("runtime")})
+    if worker.get("attempt_key"):
+        # No answer is not a success. Idempotent, so a `stop` that follows the
+        # worker's own reply leaves what the reply said alone.
+        attempts.finish(worker["attempt_key"], "failed", "stopped without answering",
+                        worker.get("task_id"))
     if worker.get("pane"):
         subprocess.run(["tmux", "kill-pane", "-t", worker["pane"]], capture_output=True, timeout=5)
     if worker.get("pid") and worker.get("lstart"):
@@ -1068,9 +1090,15 @@ def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None
     if not sender_ref or not receiver:
         return
     for worker in all_workers():
-        if worker.get("ref") == sender_ref and worker.get("once") and worker.get("task_id") \
-                and worker.get("parent_ref") == receiver.get("ref") \
-                and worker.get("task_id") == reply_to:
+        if not (worker.get("ref") == sender_ref and worker.get("task_id")
+                and worker.get("parent_ref") == receiver.get("ref")
+                and worker.get("task_id") == reply_to):
+            continue
+        if worker.get("attempt_key"):
+            # Closed here, before the stop below, so the stop finds the try
+            # already closed and does not call an answered task abandoned.
+            attempts.finish(worker["attempt_key"], outcome, "", worker.get("task_id"))
+        if worker.get("once"):
             # Stopping waits on signals; a hook must not. Hand it to a detached
             # process so the reply's context still reaches the parent in time.
             env = dict(os.environ)
