@@ -34,6 +34,39 @@ class FrameworkTest(TempState):
                 workers.spawn("claude")
         self.assertIn("herdr", str(cm.exception))
 
+    def test_a_person_can_let_xsm_start_workers_inside_a_framework(self):
+        """2026-09-23: a Codex session inside Orca is to orchestrate xsm
+        workers itself, so the refusal can be lifted, per framework."""
+        from unittest import mock
+        from xsm import config, workers
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "HERDR_"))}
+        env["ORCA_TERMINAL_HANDLE"] = "t1"
+        config.set_framework_ignored("orca", True)
+        with mock.patch.dict(os.environ, env, clear=True):
+            workers.refuse_inside_framework()           # no longer refused
+            env["ORCA_TERMINAL_HANDLE"], env["HERDR_PANE_ID"] = "", "p1"
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(workers.WorkerError, msg="only orca was lifted"):
+                workers.refuse_inside_framework()
+        config.set_framework_ignored("all", True)
+        with mock.patch.dict(os.environ, env, clear=True):
+            workers.refuse_inside_framework()
+        config.set_framework_ignored("all", False)
+        self.assertEqual(config.ignored_frameworks(), set(), "respect all restores every one")
+
+    def test_only_a_person_lifts_the_refusal(self):
+        from xsm import cli, config
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main(["frameworks", "ignore", "orca"])     # a test has no terminal
+        self.assertNotEqual(code, 0)
+        self.assertEqual(config.ignored_frameworks(), set())
+        config.set_framework_ignored("orca", True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["frameworks", "respect", "orca"]), 0,
+                             "restoring narrows, so anyone may")
+        self.assertEqual(config.ignored_frameworks(), set())
+
     def test_stale_tmux_variables_are_not_a_pane(self):
         from xsm import workers
         self.assertIsNone(workers.tmux_pane({"TMUX": "/nonexistent,1,0", "TMUX_PANE": "%999999"}))

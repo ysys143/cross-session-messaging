@@ -89,10 +89,13 @@ def framework_host(env=None) -> str | None:
 
 def refuse_inside_framework() -> None:
     host = framework_host()
-    if host:
+    ignored = config.ignored_frameworks()
+    if host and not (host in ignored or "all" in ignored):
         raise WorkerError(
             "this terminal belongs to %s, which owns starting and stopping workers here; "
-            "use %s for that. xsm still carries messages between sessions." % (host, host))
+            "use %s for that. xsm still carries messages between sessions. (A person can "
+            "let xsm start workers here anyway: `xsm frameworks ignore %s` in a terminal.)"
+            % (host, host, host))
 
 
 def tmux_pane(env=None) -> str | None:

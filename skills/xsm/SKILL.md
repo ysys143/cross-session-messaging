@@ -192,6 +192,9 @@ xsm stop <worker>           # stop it and remove its records
   by themselves when the session that started them ends.
 - Inside Orca or herdr, `spawn` and `stop` refuse: that framework manages
   workers there. Use its own tools; xsm only carries messages between sessions.
+  Your user can lift that per framework with `xsm frameworks ignore orca` in a
+  terminal; you cannot, and must not work round it. `xsm frameworks` shows
+  the current setting.
 
 ## Receiving
 

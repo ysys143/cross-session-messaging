@@ -355,6 +355,38 @@ def cmd_block(args) -> int:
     return OK
 
 
+def cmd_frameworks(args) -> int:
+    """Whether xsm starts workers inside Orca or herdr. By default it does not
+    (the framework owns them); a person can lift that per framework."""
+    if args.action == "ignore":
+        why = _person_or_refuse("letting xsm start workers inside %s" % args.name, "no")
+        if why:
+            print("refused: only a person at a terminal can let xsm start workers inside a "
+                  "framework (run `xsm frameworks ignore %s` there)" % args.name, file=sys.stderr)
+            return REFUSED
+    if args.action in ("ignore", "respect"):
+        if not args.name:
+            print("usage: xsm frameworks %s orca|herdr|all" % args.action, file=sys.stderr)
+            return USAGE
+        try:
+            changed = config.set_framework_ignored(args.name, args.action == "ignore")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return USAGE
+        print("%s: %s" % (args.name, "no change" if not changed else
+                          "xsm starts workers inside it" if args.action == "ignore" else
+                          "xsm leaves its workers to it"))
+        return OK
+    ignored = config.ignored_frameworks()
+    here = workers.framework_host()
+    for name in config.FRAMEWORK_NAMES:
+        off = name in ignored or "all" in ignored
+        print("%-6s %s%s" % (name, "ignored: xsm starts workers inside it" if off else
+                             "respected: xsm starts no workers inside it",
+                             "  (this terminal)" if here == name else ""))
+    return OK
+
+
 def cmd_projects(args) -> int:
     here = _here(args)
     root = config.project_root(here)
@@ -1253,6 +1285,11 @@ def build_parser() -> argparse.ArgumentParser:
         bp = sub.add_parser(verb, help=helptext)
         bp.add_argument("ref")
         bp.set_defaults(func=cmd_block)
+    fw = sub.add_parser("frameworks", help="whether xsm starts workers inside Orca or herdr "
+                                           "(ignore needs a person)")
+    fw.add_argument("action", nargs="?", default="list", choices=["list", "ignore", "respect"])
+    fw.add_argument("name", nargs="?")
+    fw.set_defaults(func=cmd_frameworks)
     pj = sub.add_parser("projects", help="named xsm projects and their member folders")
     pj.add_argument("--table", action="store_true", help="a Markdown table (for a session's TUI)")
     pj.add_argument("--dir", help="mark membership relative to this folder")

@@ -217,7 +217,7 @@ xsm approvals | approve <id> | deny <id>
 |---|---|---|
 | tmux 안 | 부른 패널 옆에 분할한 패널에서 실제 TUI. Claude는 `--permission-mode default`, Codex는 `-s workspace-write -a on-request`로 띄워 사용자 기본 설정(auto, YOLO)을 따르지 않는다 | 사람이 그 패널에서 답한다 |
 | 일반 셸, 또는 `--background` | 분리된 tmux 세션 `xsm-workers`의 창에서 실제 TUI. 헤드리스(`claude -p`, `codex exec`)로는 띄우지 않는다 | 작업 폴더 샌드박스 안은 묻지 않는다(Codex `-s workspace-write -a never`, Claude `acceptEdits` + OS 샌드박스). 그 밖은 Claude만 xsm이 사람에게 넘긴다(`xsm approve`/`deny`, `xsm_approve`) |
-| Orca·herdr 안 | 띄우지 않는다. 워커 관리는 그 도구의 몫이고, xsm은 세션 간 메시지만 맡는다 | |
+| Orca·herdr 안 | 띄우지 않는다. 워커 관리는 그 도구의 몫이고, xsm은 세션 간 메시지만 맡는다. 사람이 `xsm frameworks ignore orca`로 끄면 밖과 같다 | |
 
 - **워커는 권한 때문에 놀지 않는다.** 백그라운드 워커가 승인을 기다리기 시작하면, 부모 세션에 `task`가 간다. 내용은 "지금 `xsm_approve`를 불러라"다. 부모가 MCP 도구 `xsm_approve`를 부르면 사용자 화면에 워커의 요청이 양식으로 뜬다. 사용자는 허용이나 거부만 고르면 된다. 터미널도 `!`도 필요 없다. 대기 시간이 지나거나 거부되면 부모에게 결과가 간다. 워커의 과제에는 규칙이 붙는다. 할 수 있는 것은 다 하고, 막힌 단계는 "못 했다"로 끝내지 말고 필요한 권한과 이유를 적어 보고하고, 한 것과 확인한 것만 말하라는 것이다. 작업 폴더도 명시된다.
 - **auto 모드에서 도구 호출이 막히면 묻는다.** Claude Code auto 모드의 분류기가 `xsm_approve`나 `xsm_grant` 호출을 막을 수 있다. 그때 에이전트는 멈추지 않고 질문 도구로 사용자에게 물은 뒤, 동의를 받으면 다시 부른다. 실측에서는 동의 뒤의 재호출이 통과해 양식이 떴다.

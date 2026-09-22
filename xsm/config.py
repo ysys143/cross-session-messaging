@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "max_depth": 1,           # worker levels below a top-level session (1: workers spawn none)
     "max_workers": 4,         # workers one session may have running at once
     "deny": [],               # session refs that may neither send nor receive (ADR-0009)
+    "ignore_frameworks": [],  # frameworks inside which xsm still starts workers: orca, herdr, all
 }
 
 
@@ -265,5 +266,35 @@ def unblock(ref: str) -> bool:
     if ref not in refs:
         return False
     raw["deny"] = [r for r in refs if r != ref]
+    _save(raw)
+    return True
+
+
+# --- frameworks whose terminals xsm leaves alone -------------------------------------
+#
+# Inside Orca or herdr, xsm starts and stops no workers: the framework owns them
+# (user decision, 2026-09-21). A person can lift that per framework (2026-09-23:
+# a Codex session inside Orca is to orchestrate xsm workers itself). Lifting
+# widens what agents can do there, so only a person may; restoring narrows, so
+# anyone may.
+
+FRAMEWORK_NAMES = ("orca", "herdr")
+
+
+def ignored_frameworks() -> set:
+    return set(load().get("ignore_frameworks") or [])
+
+
+def set_framework_ignored(name: str, ignore: bool) -> bool:
+    if name not in FRAMEWORK_NAMES + ("all",):
+        raise ValueError("unknown framework %r: one of %s, or all" % (
+            name, ", ".join(FRAMEWORK_NAMES)))
+    raw = _raw()
+    current = set(raw.get("ignore_frameworks") or [])
+    names = set(FRAMEWORK_NAMES) | {"all"} if (name == "all" and not ignore) else {name}
+    updated = (current | names) if ignore else (current - names)
+    if updated == current:
+        return False
+    raw["ignore_frameworks"] = sorted(updated)
     _save(raw)
     return True
