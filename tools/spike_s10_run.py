@@ -11,7 +11,7 @@ Every turn states its sandbox. `exec resume` takes no --sandbox flag and falls
 back to the user's config (measured in xsm/workers.py); here that config is
 danger-full-access, so `-c sandbox_mode="workspace-write"` goes on every call.
 
-    tools/spike_s10_run.py --condition 2 --slots 3 --minutes 30 --out <dir>
+    tools/spike_s10_run.py --condition 2 --minutes 15 --out <dir> [--agents codex:gpt-5.6-luna,claude:haiku,...]
 
 Conditions (docs/spikes/S10-swarm-duplication.md §3):
   1 isolated: each slot its own folder and XSM_HOME
@@ -31,8 +31,9 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASK = os.path.join(REPO, "docs", "spikes", "s10", "task")
-MODEL = "gpt-5.6-sol"
-EFFORT = "medium"
+EFFORT = "medium"                  # codex only; claude has no equivalent flag
+DEFAULT_AGENTS = "codex:gpt-5.6-luna,claude:haiku,claude:sonnet"
+CLAUDE_TOOLS = "Bash,Read,Write,Edit,Glob,Grep"
 
 PEERS = ("You are one of several agents working on this problem at the same time, in this "
          "folder, on the same shared record. ")
@@ -61,7 +62,7 @@ def brief(condition: int) -> str:
 def workspace(root: str, deadline: float) -> str:
     """A fresh folder: task files, the seed graph, and two helper scripts."""
     os.makedirs(os.path.join(root, "candidates"), exist_ok=True)
-    for name in ("eval.py", "answers.json", "lcs_baseline.py"):
+    for name in ("eval.py", "corpus.txt", "baseline.py"):
         shutil.copy(os.path.join(TASK, name), root)
     home = os.path.join(root, ".xsm")
     os.makedirs(home, exist_ok=True)
@@ -78,13 +79,36 @@ def workspace(root: str, deadline: float) -> str:
     return home
 
 
-def codex_args(root: str, thread: str | None, prompt: str) -> list:
-    common = ["--json", "--skip-git-repo-check", "-m", MODEL,
+def agent_args(runtime: str, model: str, root: str, thread: str | None, prompt: str) -> list:
+    """One headless turn of either runtime. Codex runs in its workspace-write
+    sandbox; `exec resume` takes no --sandbox flag, so the sandbox goes in as
+    config on every turn. Claude has no sandbox: its tools are limited to the
+    file and shell tools the task needs, and the brief confines it to the folder."""
+    if runtime == "claude":
+        args = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+                "--allowedTools", CLAUDE_TOOLS, "--permission-mode", "acceptEdits"]
+        return args + (["--resume", thread] if thread else []) + [prompt]
+    common = ["--json", "--skip-git-repo-check", "-m", model,
               "-c", 'model_reasoning_effort="%s"' % EFFORT,
               "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"']
     if thread:
         return ["codex", "exec", "resume"] + common + [thread, prompt]
     return ["codex", "exec", "-C", root] + common + [prompt]
+
+
+def _events(text: str):
+    for line in text.splitlines():
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue
+
+
+def started(text: str) -> bool:
+    """The turn is under way: codex's turn.started, or claude's system/init."""
+    return any(ev.get("type") == "turn.started" or
+               (ev.get("type") == "system" and ev.get("subtype") == "init")
+               for ev in _events(text))
 
 
 def watch(root: str, deadline: float, dest: str) -> None:
@@ -132,13 +156,11 @@ def exporter(home: str, endpoint: str) -> subprocess.Popen:
 
 
 def _thread_of(stdout: str) -> str | None:
-    for line in stdout.splitlines():
-        try:
-            ev = json.loads(line)
-        except ValueError:
-            continue
+    for ev in _events(stdout):
         if ev.get("type") == "thread.started":
             return ev.get("thread_id")
+        if ev.get("type") == "system" and ev.get("subtype") == "init":
+            return ev.get("session_id")
     return None
 
 
@@ -186,13 +208,13 @@ def _turn(argv: list, root: str, env: dict, deadline: float, out_path: str, err,
     with open(out_path, "w") as out:
         proc = subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=out,
                                 stderr=err, start_new_session=True)
-        started = False
+        began = False
         while proc.poll() is None:
             time.sleep(2)
-            if not started:
+            if not began:
                 with open(out_path) as fh:
-                    started = '"turn.started"' in fh.read()
-                if not started and time.time() - start > STARTUP_WATCHDOG:
+                    began = started(fh.read())
+                if not began and time.time() - start > STARTUP_WATCHDOG:
                     _sample_group(proc.pid, hang_path, "no turn.started after %ds" % STARTUP_WATCHDOG)
                     _stop_group(proc)
                     return "hung", None
@@ -202,7 +224,8 @@ def _turn(argv: list, root: str, env: dict, deadline: float, out_path: str, err,
     return "done", proc.returncode
 
 
-def slot(n: int, root: str, home: str, condition: int, deadline: float, log_dir: str) -> None:
+def slot(n: int, runtime: str, model: str, root: str, home: str, condition: int,
+         deadline: float, log_dir: str) -> None:
     env = dict(os.environ, XSM_HOME=home, PYTHONDONTWRITEBYTECODE="1", RUST_LOG="info")
     for k in [k for k in env if k.startswith(("CLAUDE_", "ORCA_", "CODEX_COMPANION"))]:
         del env[k]                          # this harness runs inside a Claude session
@@ -219,7 +242,8 @@ def slot(n: int, root: str, home: str, condition: int, deadline: float, log_dir:
             err.write("===== turn %d %s\n" % (turns, time.strftime("%H:%M:%S")))
             err.flush()
             out_path = os.path.join(log_dir, "slot%d.turn.jsonl" % n)
-            outcome, code = _turn(codex_args(root, thread, prompt), root, env, deadline,
+            outcome, code = _turn(agent_args(runtime, model, root, thread, prompt), root, env,
+                                  deadline,
                                   out_path, err, hang_path)
             with open(out_path) as fh:
                 text = fh.read()
@@ -239,18 +263,22 @@ def slot(n: int, root: str, home: str, condition: int, deadline: float, log_dir:
                 log.write(json.dumps({"harness": "no-thread", "code": code}) + "\n")
                 break
     with open(os.path.join(log_dir, "slot%d.done" % n), "w") as fh:
-        json.dump({"thread": thread, "turns": turns, "hangs": hangs, "ended": time.time()}, fh)
+        json.dump({"runtime": runtime, "model": model, "thread": thread, "turns": turns,
+                   "hangs": hangs, "ended": time.time()}, fh)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--condition", type=int, choices=[1, 2, 3, 4], required=True)
-    parser.add_argument("--slots", type=int, default=3)
+    parser.add_argument("--agents", default=DEFAULT_AGENTS,
+                        help="one runtime:model per slot, comma-separated (default: %(default)s)")
     parser.add_argument("--minutes", type=float, default=30)
     parser.add_argument("--out", required=True)
     parser.add_argument("--otlp", help="OTLP/HTTP endpoint to ship xsm telemetry to while running")
     args = parser.parse_args()
+    agents = [a.split(":", 1) for a in args.agents.split(",")]
+    args.slots = len(agents)
 
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=False)
@@ -262,7 +290,7 @@ def main() -> int:
         homes[root] = workspace(root, deadline)
     with open(os.path.join(out, "run.json"), "w") as fh:
         json.dump({"condition": args.condition, "slots": args.slots, "minutes": args.minutes,
-                   "model": MODEL, "effort": EFFORT, "started": time.time(),
+                   "agents": args.agents, "effort": EFFORT, "started": time.time(),
                    "deadline": deadline, "roots": sorted(set(roots))}, fh, indent=1)
     watchers = [threading.Thread(target=watch, daemon=True,
                                  args=(root, deadline,
@@ -271,8 +299,8 @@ def main() -> int:
     for w in watchers:
         w.start()
     shipping = [exporter(home, args.otlp) for home in homes.values()] if args.otlp else []
-    threads = [threading.Thread(target=slot, args=(i, roots[i], homes[roots[i]], args.condition,
-                                                   deadline, out))
+    threads = [threading.Thread(target=slot, args=(i, agents[i][0], agents[i][1], roots[i],
+                                                   homes[roots[i]], args.condition, deadline, out))
                for i in range(args.slots)]
     for t in threads:
         t.start()

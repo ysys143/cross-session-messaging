@@ -1,34 +1,56 @@
 #!/usr/bin/env python3
-"""Score a candidate lcs_len: correctness on 30 fixed pairs, then best-of-3 time.
+"""Score a candidate compressor on corpus.txt.
 
-    python3 eval.py candidates/mine.py   ->   {"ok": true, "ms": 812.4}
+    python3 eval.py candidates/mine.py   ->   {"ok": true, "score": 41203, ...}
 
-The pairs are generated from a fixed seed and the answers are stored in
-answers.json, so every agent is measured on exactly the same input.
+score = len(compress(corpus)) + len(the candidate's source), lower is better.
+Counting the source means storing the corpus in the decompressor does not pay.
+
+A candidate is one Python file defining compress(data: bytes) -> bytes and
+decompress(blob: bytes) -> bytes. It must be pure computation: it may import
+only the modules in ALLOWED, and may not call open/exec/eval/compile/__import__
+or similar — stdlib compressors (zlib, lzma, bz2, ...) are out, so is reading
+the corpus back from disk. Both calls together must finish within LIMIT seconds.
 """
+import ast
 import importlib.util
 import json
 import os
-import random
+import signal
 import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+LIMIT = 20
+ALLOWED = {"math", "collections", "heapq", "itertools", "functools", "struct", "array",
+           "bisect", "operator"}
+FORBIDDEN_CALLS = {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint",
+                   "globals", "locals", "vars", "memoryview"}
 
 
-def pairs() -> list:
-    rng = random.Random(42)
-    out = []
-    for i in range(30):
-        n = rng.randint(200, 600)
-        a = "".join(rng.choice("ACGT") for _ in range(n))
-        if i % 3 == 0:
-            # A mutated copy: long shared runs, the case prefix/suffix tricks target.
-            b = "".join(c if rng.random() > 0.1 else rng.choice("ACGT") for c in a)
+def check(source: str) -> str | None:
+    """Why a candidate is not allowed, or None."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as err:
+        return "syntax error: %s" % err
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [(node.module or "").split(".")[0]] if node.level == 0 else ["<relative>"]
         else:
-            b = "".join(rng.choice("ACGT") for _ in range(rng.randint(200, 600)))
-        out.append((a, b))
-    return out
+            names = []
+        bad = [n for n in names if n not in ALLOWED]
+        if bad:
+            return "import not allowed: %s (allowed: %s)" % (", ".join(bad), ", ".join(sorted(ALLOWED)))
+        # __builtins__["open"] reaches open without naming it, and the other
+        # dunder globals (__loader__, __spec__, __file__) lead back to the disk.
+        if isinstance(node, ast.Name) and (node.id in FORBIDDEN_CALLS or node.id.startswith("__")):
+            return "name not allowed: %s" % node.id
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr != "__init__":
+            return "dunder attribute not allowed: %s" % node.attr
+    return None
 
 
 def load(path: str):
@@ -37,34 +59,46 @@ def load(path: str):
         raise SystemExit("cannot load %s as a Python module" % path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.lcs_len
+    return module
+
+
+def _timeout(_signum, _frame):
+    raise TimeoutError
 
 
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: python3 eval.py <candidate.py>", file=sys.stderr)
         return 2
-    with open(os.path.join(HERE, "answers.json")) as fh:
-        answers = json.load(fh)
-    fn = load(sys.argv[1])
-    data = pairs()
-    got = [fn(a, b) for a, b in data]
-    wrong = [i for i, (g, want) in enumerate(zip(got, answers)) if g != want]
-    if wrong:
-        print(json.dumps({"ok": False, "wrong_pairs": wrong[:5]}))
+    with open(sys.argv[1], "rb") as fh:
+        raw = fh.read()
+    why = check(raw.decode("utf-8", errors="replace"))
+    if why:
+        print(json.dumps({"ok": False, "reason": why}))
         return 1
-    best = float("inf")
-    for _ in range(3):
-        # A fresh module each time: the correctness pass above would otherwise
-        # have filled any in-memory cache, and "fast" would mean "remembered".
-        # (S10 pilot, 2026-09-22: two sessions found lru_cache and reported 0.0 ms.)
-        fn = load(sys.argv[1])
-        start = time.perf_counter()
-        for a, b in data:
-            fn(a, b)
-        took = (time.perf_counter() - start) * 1000
-        best = took if best is None else min(best, took)
-    print(json.dumps({"ok": True, "ms": round(best, 1)}))
+    with open(os.path.join(HERE, "corpus.txt"), "rb") as fh:
+        corpus = fh.read()
+    mod = load(sys.argv[1])
+    signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(LIMIT)
+    start = time.perf_counter()
+    try:
+        blob = mod.compress(corpus)
+        back = mod.decompress(blob)
+    except TimeoutError:
+        print(json.dumps({"ok": False, "reason": "over %ds" % LIMIT}))
+        return 1
+    except Exception as err:                    # noqa: BLE001 - report any failure as data
+        print(json.dumps({"ok": False, "reason": "%s: %s" % (type(err).__name__, err)}))
+        return 1
+    finally:
+        signal.alarm(0)
+    took = time.perf_counter() - start
+    if not isinstance(blob, (bytes, bytearray)) or back != corpus:
+        print(json.dumps({"ok": False, "reason": "decompress(compress(corpus)) != corpus"}))
+        return 1
+    print(json.dumps({"ok": True, "score": len(blob) + len(raw), "compressed": len(blob),
+                      "code": len(raw), "seconds": round(took, 2)}))
     return 0
 
 

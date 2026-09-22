@@ -43,7 +43,7 @@ from xsm import doc  # noqa: E402
 
 THRESHOLDS = (0.2, 0.3, 0.4, 0.5, 0.6)
 EXCLUDED = {"setup", "wip", "verification"}
-FIXED_FILES = ("eval.py", "lcs_baseline.py")
+FIXED_FILES = ("eval.py", "baseline.py")
 BOILERPLATE = set("""
 ok true false correct correctly pairs pair all fixed created create wrote candidate candidates
 change changed changes one single from parent parents node eval evaluated evaluation measured
@@ -57,11 +57,19 @@ CODE_TOKEN_RE = re.compile(r"[A-Za-z_]\w*|\d+|<<|>>|[-+*/&|^~%<>=!]=?")
 
 def words(text: str) -> set:
     text = FILE_RE.sub(" ", text.lower())
-    return {t for t in re.split(r"[^a-z]+", text) if len(t) > 2 and t not in BOILERPLATE}
+    return {t for t in re.split(r"[^a-z0-9가-힣]+", text) if len(t) > (1 if re.match("[가-힣]", t) else 2) and t not in BOILERPLATE}
 
 
 def jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b) if a | b else 0.0
+
+
+def who(node: dict) -> str:
+    """The session behind a node: its ref, not its author string. A Claude
+    session's auto name can change mid-run (seen in the first mixed run:
+    one ref under two names), and the name is part of the string."""
+    m = re.search(r"\[([0-9a-f]{6})\]\s*$", node["author"])
+    return m.group(1) if m else node["author"]
 
 
 def when(node: dict) -> float:
@@ -97,7 +105,7 @@ class History:
             self.versions.setdefault(name, []).append((int(ns) / 1e9, path))
         for v in self.versions.values():
             v.sort()
-        with open(os.path.join(REPO, "docs", "spikes", "s10", "task", "lcs_baseline.py")) as fh:
+        with open(os.path.join(REPO, "docs", "spikes", "s10", "task", "baseline.py")) as fh:
             self.baseline = fh.read()
 
     def code_at(self, name: str | None, t: float) -> str | None:
@@ -105,7 +113,7 @@ class History:
         after t (node timestamps have one-second resolution)."""
         if not name:
             return None
-        if name == "lcs_baseline.py":
+        if name == "baseline.py":
             return self.baseline
         latest = None
         for mtime, path in self.versions.get(name, []):
@@ -152,11 +160,11 @@ def analyse(run: str) -> dict:
         for n in mine:
             code[n["id"]] = added_tokens(n, byid, hist)
             if "result" in n["tags"] and primary_file(n):
-                overwrites.setdefault((folder, primary_file(n)), set()).add(n["author"])
+                overwrites.setdefault((folder, primary_file(n)), set()).add(who(n))
     prose = {n["id"]: words(n["body"]) for n in counted}
     pairs = []
     for a, b in itertools.combinations(counted, 2):
-        if a["author"] == b["author"] or sorted(a["tags"]) != sorted(b["tags"]):
+        if who(a) == who(b) or sorted(a["tags"]) != sorted(b["tags"]):
             continue
         ca, cb = code.get(a["id"]), code.get(b["id"])
         pairs.append({"a": a["id"], "b": b["id"],
@@ -176,8 +184,8 @@ def analyse(run: str) -> dict:
     for n in byid.values():
         if "seed" not in n["author"]:
             key = "/".join(n["tags"])
-            authors.setdefault(n["author"], {}).setdefault(key, 0)
-            authors[n["author"]][key] += 1
+            authors.setdefault(who(n), {}).setdefault(key, 0)
+            authors[who(n)][key] += 1
     return {"run": run, "nodes_counted": len(counted),
             "code_coverage": round(sum(1 for n in counted if code.get(n["id"])) / len(counted), 3)
             if counted else 0.0,
