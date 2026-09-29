@@ -209,6 +209,14 @@ def _gate_case(case):
                                     reply_to=message.get("reply_to"),
                                     outcome=message.get("outcome"))
 
+        if message.get("via_socket_of"):
+            # The envelope Claude fills in names the socket the message really
+            # came through, whatever the header inside claims (ADR-0013).
+            import re as _re
+            from xsm import registry
+            sock = (registry.by_session("claude", message["via_socket_of"]) or {}).get("socket")
+            prompt = _re.sub(r' from="uds:[^"]*"', "", prompt, count=1)
+            prompt = prompt.replace("<%s" % envelope.TAG, '<%s from="uds:%s"' % (envelope.TAG, sock), 1)
         payload = {"hook_event_name": message.get("event", "UserPromptSubmit"),
                    "session_id": receiver["session_id"], "cwd": receiver["cwd"],
                    "prompt": prompt, "prompt_id": "p", "session_title": receiver["name"],

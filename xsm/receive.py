@@ -367,13 +367,38 @@ def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
             decision, reason = "block", "a blocked session is on this message"
     else:
         sender, why_not = _sender_record(parsed)
+        mismatch = _socket_mismatch(parsed, sender) if sender is not None else None
         if sender is None:
             decision, reason = "block", why_not
+        elif mismatch:
+            decision, reason = "block", mismatch
         else:
             decision, reason, scope = _check_sender(sender, me, cfg, parsed.header.get("from"))
             if decision == "pass" and scope != parsed.header.get("scope"):
                 decision, reason = "block", "scope changed since the message was sent"
     return decision, reason
+
+
+def _socket_mismatch(parsed, sender: dict) -> str | None:
+    """Why the envelope's own sender does not fit the header's, or None.
+
+    The header is text the sender writes; the envelope's from="uds:<socket>"
+    on a Claude message is filled in by Claude. A model talked into writing
+    `[xsm v1 … ref=<someone else's ref>]` at the top of a SendMessage would
+    otherwise be taken for that session (review of ADR-0013, 2026-09-29).
+    xsm's own sends write the sender's socket into the envelope, and a Codex
+    sender has none, so neither is affected. Where either side has no socket
+    there is nothing to compare."""
+    where = parsed.attrs.get("from") or ""
+    if not where.startswith("uds:"):
+        return None
+    if sender.get("runtime") != "claude":
+        return ("the message came through a Claude session's socket (%s) but claims %r, "
+                "which is not a Claude session" % (where, parsed.header.get("from")))
+    if sender.get("socket") and sender["socket"] != where[len("uds:"):]:
+        return ("the message came from %s, which is not the socket of %r"
+                % (where, parsed.header.get("from")))
+    return None
 
 
 def _claimed_sender(parsed) -> str | None:

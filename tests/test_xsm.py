@@ -823,6 +823,21 @@ class NativeClaudeMessageTest(TempState):
         with mock.patch.object(receive.registry, "records", return_value=[]):
             self.assertEqual(receive.check(parsed, me, {"strict_peers": False})[0], "block")
 
+    def test_a_header_over_a_claude_socket_cannot_claim_a_codex_sender(self):
+        from unittest import mock
+        from xsm import envelope, receive
+        codex = {"runtime": "codex", "ref": "cccccc", "name": "c", "alias": "codex",
+                 "state": "live"}
+        body = envelope.build("hi", msg_id="m2", sender=codex, scope="project:ws")
+        parsed = envelope.parse(body.replace("<cross-session-message",
+                                             '<cross-session-message from="uds:/tmp/cc-socks/9.sock"', 1))
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        with mock.patch.object(receive.registry, "records", return_value=[codex]), \
+                mock.patch.object(receive.config, "scope_for", return_value=("project:ws", "")):
+            decision, reason = receive.check(parsed, me, {"strict_peers": False})
+        self.assertEqual(decision, "block")
+        self.assertIn("not a Claude session", reason)
+
     def test_a_stopped_sender_is_held(self):
         sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "stale",
                   "ref": "aaaaaa"}
