@@ -45,12 +45,15 @@ def failed(msg_id: str, reason: str, status: str = "error") -> None:
     paths.write_json(_entry_path(msg_id), entry)
 
 
-def unknown(msg_id: str, reason: str) -> None:
+def unknown(msg_id: str, reason: str, settle_after: float | None = None) -> None:
     """A remote send whose answer was lost: it may have arrived. Neither
     `queued` (on its way) nor `error` (never left) is true, and a sender that
     reads `error` sends again under a new id (issue #4, 2026-09-29)."""
     entry = paths.read_json(_entry_path(msg_id), {}) or {}
     entry.update({"status": "unknown", "error": reason, "unknown_t": time.time()})
+    if settle_after:
+        # Before this, "no record over there" may only mean "not yet" (remote.reconcile).
+        entry["settle_after"] = settle_after
     paths.write_json(_entry_path(msg_id), entry)
 
 

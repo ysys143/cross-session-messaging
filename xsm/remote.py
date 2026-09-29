@@ -509,15 +509,16 @@ def send(sender: dict, spec: str, peer: str, body: str, kind: str, reply_to: str
                                                      "permission_mode")}}
     ledger.queued(msg_id, sender, {"name": spec, "alias": peer, "ref": None, "runtime": "remote"},
                   "remote:%s" % peer, kind, body)
+    timeout = max(30, wait + 20)
     try:
-        reply = call(peer, request, timeout=max(30, wait + 20))
+        reply = call(peer, request, timeout=timeout)
     except RemoteUnreached as exc:
         ledger.failed(msg_id, str(exc))
         return {"ok": False, "status": "error", "error": str(exc), "id": msg_id}
     except RemoteError as exc:
         # The request may have run over there and only the answer was lost;
         # `queued` would claim it is on its way, `error` that it never left.
-        ledger.unknown(msg_id, str(exc))
+        ledger.unknown(msg_id, str(exc), settle_after=time.time() + timeout + UNKNOWN_GRACE)
         return {"ok": False, "status": "unknown", "id": msg_id,
                 "error": "%s; it may or may not have arrived. Check with `xsm status %s` before "
                          "sending it again: a new send is a new message and may run twice"
@@ -537,6 +538,12 @@ def _settle(msg_id: str, peer: str, reply: dict) -> None:
         # The peer answered and did not take it: as final as a local refusal.
         ledger.failed(msg_id, "%s: %s" % (peer, reply.get("error") or "refused"),
                       status="refused" if status == "refused" else "error")
+
+
+# Added to the lost call's own timeout: until then "no record over there" may
+# still mean "not yet" — the call whose answer was lost can still be running
+# on the far side.
+UNKNOWN_GRACE = 60
 
 
 def reconcile(msg_id: str, wait: float = 0.0) -> dict:
@@ -559,10 +566,20 @@ def reconcile(msg_id: str, wait: float = 0.0) -> dict:
         entry["note"] = "%s did not answer for it: %s" % (peer, reply.get("error"))
         return entry
     if reply.get("status") is None:
-        if entry.get("status") == "unknown":
-            # Nothing was recorded over there, so the lost call never got as far
-            # as queueing it: sending it again is safe.
+        settle_after = entry.get("settle_after") or (entry.get("unknown_t") or 0) + 300
+        if entry.get("status") == "unknown" and time.time() >= settle_after:
+            # Nothing was recorded over there, long after any call that could
+            # still be running there has ended: the lost call never got as far
+            # as queueing it, and sending it again is safe.
             ledger.failed(msg_id, "%s has no record of it; it did not arrive" % peer)
+        elif entry.get("status") == "unknown":
+            # Too soon to say: the far side may still be working on the call
+            # whose answer was lost. Calling it failed now is what makes a
+            # person resend under a new id and run the task twice (review of
+            # issue #4, 2026-09-29).
+            entry["note"] = ("%s has no record of it yet; ask again after %s before sending it again"
+                             % (peer, time.strftime("%H:%M:%S", time.localtime(settle_after))))
+            return entry
         else:
             entry["note"] = "%s has no record of it (pruned there, or re-paired)" % peer
             return entry

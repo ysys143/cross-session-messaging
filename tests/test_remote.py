@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import unittest
 
@@ -403,6 +404,16 @@ class LostAnswerTest(unittest.TestCase):
     def test_a_request_that_never_ran_is_settled_as_error_by_asking(self):
         reply = self.send("dropped")
         self.assertEqual(reply["status"], "unknown", reply)
+        # Right after the loss the far side may still be running the call:
+        # "no record" is not yet "did not arrive".
+        soon = self.reconcile(reply["id"])
+        self.assertEqual(soon["status"], "unknown", soon)
+        self.assertIn("no record of it yet", soon.get("note", ""))
+        from xsm import ledger, paths
+        with self.on("hostA"):            # the lost call's time is up
+            entry = paths.read_json(ledger._entry_path(reply["id"]), {})
+            entry["settle_after"] = time.time() - 1
+            paths.write_json(ledger._entry_path(reply["id"]), entry)
         after = self.reconcile(reply["id"])
         self.assertEqual(after["status"], "error", after)
         self.assertIn("no record", after["error"])
