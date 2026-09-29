@@ -93,8 +93,10 @@ If one Claude home has both the plugin and a direct install, the hooks run twice
 `xsm install` refuses such a home (`--force` overrides this). A direct-install copy does not follow changes
 to the repository by itself, so when `xsm doctor` reports it stale, update it with `xsm install --refresh`.
 
-Link `bin/xsm` into a directory on your PATH, such as `~/.local/bin`, to call it as `xsm` afterwards (with the
-plugin, it is on the PATH inside sessions automatically). On Linux, X.Org's session manager is also called
+`install --codex-home` automatically links `bin/xsm` at `~/.local/bin/xsm`; make sure `~/.local/bin` is on
+your PATH. With only `--claude-home` and no plugin, link `bin/xsm` onto PATH yourself.
+After a plugin update, run `install --refresh` using the new version's `bin/xsm`.
+The Claude plugin supplies PATH inside sessions automatically. On Linux, X.Org's session manager is also called
 `xsm` (package x11-session-utils); if it is installed, check with `command -v xsm` that this one comes first.
 
 ### Session registration

@@ -89,8 +89,10 @@ bin/xsm doctor                                                # 설치 상태, �
 거부합니다(`--force`로 넘길 수 있음). 직접 설치한 사본은 저장소가 바뀌어도 자동으로 따라가지 않으므로,
 `xsm doctor`가 낡았다고 알려 주면 `xsm install --refresh`로 갱신합니다.
 
-`~/.local/bin` 등 PATH에 `bin/xsm`을 링크해두면 이후 `xsm`으로 부를 수 있습니다(플러그인으로 설치하면
-세션 안에서는 자동으로 PATH에 들어갑니다). 리눅스에서는 X.Org의 세션 관리자도 이름이 `xsm`입니다(x11-session-utils
+`install --codex-home`은 `bin/xsm`을 `~/.local/bin/xsm`에 자동으로 링크합니다. `~/.local/bin`이 PATH에 있는지 확인하세요.
+플러그인 없이 `--claude-home`만 지정해 직접 설치하면 `bin/xsm`을 PATH에 수동으로 링크해야 합니다.
+플러그인 갱신 후에는 새 버전의 `bin/xsm`으로 `install --refresh`를 실행하세요.
+Claude 플러그인은 세션 안에서 PATH를 자동으로 설정합니다. 리눅스에서는 X.Org의 세션 관리자도 이름이 `xsm`입니다(x11-session-utils
 패키지). 깔려 있다면 `command -v xsm`으로 이쪽이 먼저 잡히는지 확인하세요.
 
 ### 세션 등록

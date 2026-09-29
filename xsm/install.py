@@ -148,6 +148,33 @@ def launcher() -> str:
     return os.path.join(REPO, "bin", "xsm")
 
 
+# A version folder of the xsm plugin. Links into one are the only ones the
+# installer moves on its own: a link to a checkout was made by a person, and a
+# refresh run from the plugin must not pull it away from their working copy.
+PLUGIN_CACHE = r"/plugins/cache/xsm/xsm/[^/]+/"
+
+
+def install_cli() -> str:
+    """Link the launcher on PATH, replacing only a link into an older plugin version."""
+    target = os.path.expanduser("~/.local/bin/xsm")
+    state = "linked"
+    if os.path.islink(target):
+        source = os.path.realpath(target)
+        if source == os.path.realpath(launcher()):
+            return "current"
+        repo = os.path.dirname(os.path.dirname(source))
+        if not re.search(PLUGIN_CACHE + "bin/xsm$", source) or (
+                os.path.exists(source) and not os.path.isfile(os.path.join(repo, "xsm", "install.py"))):
+            return "foreign"
+        os.unlink(target)
+        state = "replaced"
+    elif os.path.lexists(target):
+        return "foreign"
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    os.symlink(launcher(), target)
+    return state
+
+
 def plugin_installed(home: str) -> str | None:
     """The xsm plugin's version in this Claude home, or None.
 
@@ -207,7 +234,7 @@ def stale_copies(home: str, runtime: str = "claude") -> list:
     if runtime == "claude" and plugin_installed(home):
         return []                       # the plugin keeps itself current
     state, detail = skill_state(home)
-    return [detail] if state == "copy-stale" else []
+    return [detail] if state in ("copy-stale", "link-stale") else []
 
 
 def _skill_tree() -> dict:
@@ -230,6 +257,7 @@ def skill_state(home: str) -> tuple:
     """(state, detail) for the skill in this home.
 
     linked        our symlink, in step with the repo
+    link-stale    a link into another version of the xsm plugin
     copy-current  a copied skill directory whose files all match ours
     copy-stale    a copied skill directory that has fallen behind
     nested-link   a link made *inside* an existing directory (ln -sfn into a dir)
@@ -239,7 +267,12 @@ def skill_state(home: str) -> tuple:
     target = os.path.join(home, "skills", "xsm")
     source = os.path.join(REPO, "skills", "xsm")
     if os.path.islink(target):
-        return ("linked" if os.path.realpath(target) == os.path.realpath(source)
+        if os.path.realpath(target) == os.path.realpath(source):
+            return "linked", target
+        if not re.search(PLUGIN_CACHE + "skills/xsm$", os.path.realpath(target)):
+            return "foreign", target
+        header = (_read_text(os.path.join(target, "SKILL.md")) or "").splitlines()[:20]
+        return ("link-stale" if not os.path.exists(target) or "name: xsm" in header
                 else "foreign"), target
     if not os.path.exists(target):
         return "absent", target
@@ -263,6 +296,9 @@ def install_skill(home: str, refresh: bool = False) -> tuple:
     it: it is ours, and telling a person to run `cp` is how two profiles ended
     up eight versions behind (2026-09-23)."""
     state, detail = skill_state(home)
+    if state == "link-stale" and refresh:
+        os.unlink(detail)
+        state = "absent"
     if state == "copy-stale" and refresh:
         for rel, text in _skill_tree().items():
             target = os.path.join(detail, rel)

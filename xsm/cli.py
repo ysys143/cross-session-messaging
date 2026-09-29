@@ -860,12 +860,22 @@ def _install(args, targets) -> int:
         else:
             print("installed into %s (backup: %s)" % (result["file"], result.get("backup", "none")))
         _print_retired(home, install.remove_retired(home))
+        if runtime == "codex":
+            cli_state = install.install_cli()
+            if cli_state == "foreign":
+                print("  cli: link bin/xsm onto PATH yourself: ln -s %s <directory-on-PATH>/xsm"
+                      % shlex.quote(install.launcher()))
+            else:
+                print("  cli: %s (~/.local/bin/xsm)" % cli_state)
+                if os.path.expanduser("~/.local/bin") not in os.environ.get("PATH", "").split(os.pathsep):
+                    print("  warning: add ~/.local/bin to PATH")
         if not args.no_commands:
             state, detail = install.install_skill(home, refresh=args.refresh)
             print("  skill: %s" % {
                 "linked": "linked to the repo",
                 "copy-current": "a copy is in place and matches the repo",
                 "copy-stale": "a copy has fallen behind; refresh it with `xsm install --refresh`",
+                "link-stale": "linked to an older plugin version; refresh it with `xsm install --refresh`",
                 "nested-link": "a link sits inside the existing directory (%s);\n"
                                "           remove it: rm %s" % (detail, detail),
                 "foreign": "something else is at skills/xsm; left alone",
@@ -873,7 +883,7 @@ def _install(args, targets) -> int:
             print("  commands: %s" % ("/xsm list, /xsm send <target> <message>, … "
                                       "(the skill takes them as arguments)" if runtime == "claude"
                                       else "$xsm list, $xsm send <target> <message>, …"))
-            if not shutil.which("xsm"):
+            if runtime != "codex" and not shutil.which("xsm"):
                 print("  warning: `xsm` is not on PATH, and the skill runs it by that name. "
                       "Link it: ln -s %s ~/.local/bin/xsm" % install.launcher())
         if runtime == "claude" and args.statusline:
