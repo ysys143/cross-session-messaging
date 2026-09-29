@@ -7,7 +7,7 @@ else the user's — runs first with the same input and prints unchanged, and
 the S10 line goes under it: a dashboard, Orca's line, anything, keeps its
 place (user decision, 2026-09-22).
 
-    S10 collab1 | 2/4 분석 4:12 | luna:busy haiku:idle sonnet:busy | msg 3 ch 1 doc v2
+    S10 collab1 | 2/4 analyze 4:12 | luna:busy haiku:idle sonnet:busy | msg 3 ch 1 doc v2
 
 Picks the newest .local/s10/*/run.json whose deadline is less than two
 minutes past. Cheap enough to run every few seconds: directory listings, and
