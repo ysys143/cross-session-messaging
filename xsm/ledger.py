@@ -36,12 +36,31 @@ def queued(msg_id: str, sender: dict, target: dict, scope: str, kind: str, body:
     return entry
 
 
-def failed(msg_id: str, reason: str) -> None:
+def failed(msg_id: str, reason: str, status: str = "error") -> None:
     """The send never left: no receipt will come, so the entry itself says so.
-    (Measured 2026-09-22: five sends blocked by a sandbox sat as `queued`.)"""
+    (Measured 2026-09-22: five sends blocked by a sandbox sat as `queued`.)
+    `status` is "refused" when a remote peer answered that it would not take it."""
     entry = paths.read_json(_entry_path(msg_id), {}) or {}
-    entry.update({"status": "error", "error": reason, "failed_t": time.time()})
+    entry.update({"status": status, "error": reason, "failed_t": time.time()})
     paths.write_json(_entry_path(msg_id), entry)
+
+
+def unknown(msg_id: str, reason: str) -> None:
+    """A remote send whose answer was lost: it may have arrived. Neither
+    `queued` (on its way) nor `error` (never left) is true, and a sender that
+    reads `error` sends again under a new id (issue #4, 2026-09-29)."""
+    entry = paths.read_json(_entry_path(msg_id), {}) or {}
+    entry.update({"status": "unknown", "error": reason, "unknown_t": time.time()})
+    paths.write_json(_entry_path(msg_id), entry)
+
+
+def reached(msg_id: str) -> None:
+    """The peer says an `unknown` message is queued there: it is on its way."""
+    entry = paths.read_json(_entry_path(msg_id), {}) or {}
+    if entry.get("status") == "unknown":
+        entry["status"] = "queued"
+        entry.pop("error", None)
+        paths.write_json(_entry_path(msg_id), entry)
 
 
 def receipt(msg_id: str, decision: str, receiver: dict | None, reason: str = "",

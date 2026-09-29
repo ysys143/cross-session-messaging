@@ -852,13 +852,15 @@ def stuck(now: float | None = None) -> dict:
                             "tool": req.get("tool"), "waiting_s": int(now - (req.get("t") or now))})
     rows = ledger.recent(200)
     undelivered = [r for r in rows if r.get("status") == "queued" and now - (r.get("t") or now) > 120]
+    uncertain = [r for r in rows if r.get("status") == "unknown"]
     failures = {}
     for r in rows:
         if r.get("status") == "error":
             failures[(r.get("error") or "unknown").split(":")[0]] = \
                 failures.get((r.get("error") or "unknown").split(":")[0], 0) + 1
     replaced = [r for r in registry.records() if r.get("end_reason") == "thread_replaced"]
-    return {"approvals": waiting, "undelivered": undelivered, "send_failures": failures,
+    return {"approvals": waiting, "undelivered": undelivered, "uncertain": uncertain,
+            "send_failures": failures,
             "threads_replaced": [{"name": r.get("name"), "ref": r.get("ref")} for r in replaced]}
 
 

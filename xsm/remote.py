@@ -37,7 +37,22 @@ MARK = "xsm-remote"            # comment tag on authorized_keys lines xsm wrote
 
 
 class RemoteError(Exception):
-    pass
+    """A call that did not come back with an answer. Whether the request
+    reached the peer is unknown: it may have run there and lost its reply."""
+
+
+class RemoteUnreached(RemoteError):
+    """A call that certainly never reached the peer's xsm: no pairing, no ssh
+    to run, or ssh gave up before logging in. Nothing ran over there."""
+
+
+# ssh's own messages for failures before the forced command could start. ssh
+# exits 255 for these, but also for a connection that drops mid-session, so
+# the exit code alone cannot say the request never ran (issue #4, 2026-09-29).
+_BEFORE_LOGIN = ("Could not resolve hostname", "connect to host", "Connection refused",
+                 "No route to host", "Network is unreachable", "Permission denied (",
+                 "Host key verification failed", "kex_exchange_identification",
+                 "during banner exchange")
 
 
 # --- keys and authorized_keys ----------------------------------------------------------
@@ -209,15 +224,21 @@ def call(peer: str, request: dict, timeout: float = 60) -> dict:
 def _call(peer: str, request: dict, timeout: float) -> dict:
     pairing = pairing_for(peer)
     if not pairing:
-        raise RemoteError("%s is not a paired remote; pair it first: xsm remote add %s"
-                          % (peer, peer))
+        raise RemoteUnreached("%s is not a paired remote; pair it first: xsm remote add %s"
+                              % (peer, peer))
     try:
         out = subprocess.run(ssh_argv(pairing["host"]), input=json.dumps(request),
                              capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RemoteError("%s did not answer within %ds" % (peer, timeout))
+    except OSError as exc:
+        raise RemoteUnreached("cannot run ssh: %s" % exc)
     if out.returncode != 0:
-        raise RemoteError("ssh to %s failed: %s" % (peer, (out.stderr or out.stdout).strip()[:300]))
+        why = "ssh to %s failed: %s" % (peer, (out.stderr or out.stdout).strip()[:300])
+        if out.returncode == 255 and not out.stdout.strip() \
+                and any(p in (out.stderr or "") for p in _BEFORE_LOGIN):
+            raise RemoteUnreached(why)
+        raise RemoteError(why)
     try:
         return json.loads(out.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -346,6 +367,8 @@ def _serve(peer: str, request: dict, span=None) -> dict:
             return {"ok": bool(call(peer, {"op": "ping"}).get("ok"))}
         except RemoteError as exc:
             return {"ok": False, "error": str(exc)}
+    if op == "status":
+        return _inbound_status(peer, str(request.get("id") or ""), request.get("wait"))
     project = pairing["local_project"]
     if op == "sessions":
         rows = [r for r in registry.records() if r.get("state") == "live"
@@ -375,9 +398,20 @@ def _serve(peer: str, request: dict, span=None) -> dict:
                 "error": "%s is not in project %s here" % (target.get("name"), project)}
     if target.get("ref") in config.blocked():
         return {"ok": False, "status": "refused", "error": "the target is blocked here"}
+    msg_id = request["id"]
+    if ledger.status(msg_id) and not recorded_inbound(msg_id, peer):
+        # An id this machine already holds for something else: taking it would
+        # overwrite that entry and let `status` answer for it.
+        return {"ok": False, "status": "refused", "error": "message id %s is already in use here"
+                                                           % msg_id}
+    if ledger.received(msg_id):
+        # The same message again, after the sender lost our answer. It was
+        # handed over once; say how, and do not hand it over twice.
+        state = ledger.status(msg_id)
+        return {"ok": True, "status": state.get("status"), "duplicate": True,
+                "target": {k: (state.get("to") or {}).get(k) for k in ("name", "alias", "ref")}}
     sender = dict(request.get("sender") or {})
     sender.update({"socket": None, "alias": "%s@%s" % (sender.get("alias"), peer)})
-    msg_id = request["id"]
     content = envelope.build(request.get("body") or "", msg_id=msg_id, sender=sender,
                              scope="remote:%s" % peer, kind=request.get("kind") or "note",
                              reply_to=request.get("reply_to"), origin=peer,
@@ -401,6 +435,8 @@ def _serve(peer: str, request: dict, span=None) -> dict:
         else:
             adapters.to_codex(target.get("home"), str(target.get("session_id")), content)
     except adapters.DeliveryError as err:
+        # Recorded, so a later `status` from the sender reads error, not queued.
+        ledger.failed(msg_id, "%s: %s" % (err.reason, err.detail))
         return {"ok": False, "status": "error", "error": "%s: %s" % (err.reason, err.detail)}
     state = ledger.wait_for(msg_id, float(request.get("wait") or 0)) if request.get("wait") else {}
     return {"ok": True, "status": state.get("status") or "queued",
@@ -411,6 +447,24 @@ def _serve(peer: str, request: dict, span=None) -> dict:
 def recorded_inbound(msg_id: str, peer: str) -> bool:
     rec = paths.read_json(paths.path(REMOTE, "inbound-%s.json" % msg_id)) or {}
     return rec.get("peer") == peer
+
+
+def _inbound_status(peer: str, msg_id: str, wait=None) -> dict:
+    """What became of a message `peer` sent here, for a sender that lost the
+    answer to its send. Only for ids this receiver recorded as coming from that
+    peer: any other id reads as unknown, so a peer learns nothing about
+    messages that are not its own. `status: null` means no record here."""
+    if not msg_id or os.path.basename(msg_id) != msg_id or msg_id.startswith(".") \
+            or not recorded_inbound(msg_id, peer):
+        return {"ok": True, "status": None}
+    state = ledger.status(msg_id)
+    if state.get("scope") != "remote:%s" % peer:
+        return {"ok": True, "status": None}
+    if wait and state.get("status") == "queued":
+        state = ledger.wait_for(msg_id, min(float(wait), 30))
+    return {"ok": True, "status": state.get("status"),
+            "reason": (state.get("receipt") or {}).get("reason") or state.get("error") or "",
+            "target": {k: (state.get("to") or {}).get(k) for k in ("name", "alias", "ref")}}
 
 
 def main(argv=None) -> int:
@@ -457,10 +511,64 @@ def send(sender: dict, spec: str, peer: str, body: str, kind: str, reply_to: str
                   "remote:%s" % peer, kind, body)
     try:
         reply = call(peer, request, timeout=max(30, wait + 20))
-    except RemoteError as exc:
+    except RemoteUnreached as exc:
+        ledger.failed(msg_id, str(exc))
         return {"ok": False, "status": "error", "error": str(exc), "id": msg_id}
-    if reply.get("status") in ("delivered", "held", "blocked"):
-        ledger.receipt(msg_id, reply["status"], dict(reply.get("target") or {}, alias="%s@%s" % (
-            (reply.get("target") or {}).get("alias"), peer)), reply.get("error") or "")
+    except RemoteError as exc:
+        # The request may have run over there and only the answer was lost;
+        # `queued` would claim it is on its way, `error` that it never left.
+        ledger.unknown(msg_id, str(exc))
+        return {"ok": False, "status": "unknown", "id": msg_id,
+                "error": "%s; it may or may not have arrived. Check with `xsm status %s` before "
+                         "sending it again: a new send is a new message and may run twice"
+                         % (exc, msg_id)}
+    _settle(msg_id, peer, reply)
     reply["id"] = msg_id
     return reply
+
+
+def _settle(msg_id: str, peer: str, reply: dict) -> None:
+    """Write what the peer answered into this side's ledger."""
+    status = reply.get("status")
+    if status in ("delivered", "held", "blocked"):
+        ledger.receipt(msg_id, status, dict(reply.get("target") or {}, alias="%s@%s" % (
+            (reply.get("target") or {}).get("alias"), peer)), reply.get("error") or "")
+    elif not reply.get("ok"):
+        # The peer answered and did not take it: as final as a local refusal.
+        ledger.failed(msg_id, "%s: %s" % (peer, reply.get("error") or "refused"),
+                      status="refused" if status == "refused" else "error")
+
+
+def reconcile(msg_id: str, wait: float = 0.0) -> dict:
+    """Ask the peer what became of a message sent to it that this side holds
+    as `queued` or `unknown`, and record the answer. A remote message gets no
+    local receipt, so without asking it stays unconfirmed here even after the
+    far side recorded it delivered (issue #4)."""
+    entry = ledger.status(msg_id)
+    scope = entry.get("scope") or ""
+    if not scope.startswith("remote:") or entry.get("status") not in ("queued", "unknown"):
+        return entry
+    peer = scope[len("remote:"):]
+    try:
+        reply = call(peer, {"op": "status", "id": msg_id, "wait": min(wait, 30)},
+                     timeout=max(30, min(wait, 30) + 20))
+    except RemoteError as exc:
+        entry["note"] = "could not ask %s: %s" % (peer, exc)
+        return entry
+    if not reply.get("ok"):
+        entry["note"] = "%s did not answer for it: %s" % (peer, reply.get("error"))
+        return entry
+    if reply.get("status") is None:
+        if entry.get("status") == "unknown":
+            # Nothing was recorded over there, so the lost call never got as far
+            # as queueing it: sending it again is safe.
+            ledger.failed(msg_id, "%s has no record of it; it did not arrive" % peer)
+        else:
+            entry["note"] = "%s has no record of it (pruned there, or re-paired)" % peer
+            return entry
+    elif reply["status"] == "queued":
+        ledger.reached(msg_id)
+    else:
+        _settle(msg_id, peer, dict(reply, ok=reply["status"] in ("delivered", "held", "blocked"),
+                                   error=reply.get("reason")))
+    return ledger.status(msg_id)
