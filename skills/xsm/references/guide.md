@@ -153,12 +153,18 @@ Read the result as it is written:
 | `sent-unconfirmed` | it is queued; nothing has confirmed arrival |
 | `refused` | rejected here, before sending: out of scope, ambiguous, stopped, unregistered |
 | `held` / `blocked` | the receiver's gate stopped it; the body is kept in `xsm held list` |
-| `error` | the delivery path failed; the message says why |
-| `unknown` | a remote send lost its answer: it may or may not have arrived on the other machine |
+| `error` | the delivery path failed; the message says why. To try again, `--resend <id>` keeps the id |
+| `unknown` | a remote send lost its answer: it may or may not have arrived on the other machine; `xsm status <id>`, then `--resend <id>` |
 
 After `unknown`, run `xsm status <id>` before anything else: it asks the other
 machine and settles the status. Do not send the same text again as a new
-message; that is a second message, and a task may run twice.
+message; that is a second message, and a task may run twice. If it is still
+`unknown` (or `error`) and you want it delivered, send it again under the same
+id: `xsm send <target> --text "<the same text>" --kind <the same kind> --resend <id>`
+(MCP: the `resend` argument of `xsm_send`). The receiver drops an id it already
+holds, so it cannot run twice. It is refused unless you sent that id, to that
+same target, as that same kind and text, and it is still queued, unknown or error;
+change the text and it is a new message, without `--resend`.
 
 `delivered` is a receipt, not a content-integrity check. When a body contains a
 `cross-session-message` tag, Claude Code rewrites it on receipt to

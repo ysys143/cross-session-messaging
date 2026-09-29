@@ -38,7 +38,8 @@ class SendResult:
 
 def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
          reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
-         msg_id: str | None = None, outcome: str | None = None) -> SendResult:
+         msg_id: str | None = None, outcome: str | None = None,
+         resend: bool = False) -> SendResult:
     """One span around the whole attempt, refusals included.
 
     A refusal is as worth timing as a delivery: "out of scope" and "target has
@@ -53,7 +54,8 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
                              kind="PRODUCER") if telemetry else nullcontext()
     with span_cm as span:
         result = _send(target_spec, body, sender=sender, kind=kind, reply_to=reply_to,
-                       priority=priority, wait=wait, msg_id=msg_id, outcome=outcome, span=span)
+                       priority=priority, wait=wait, msg_id=msg_id, outcome=outcome,
+                       resend=resend, span=span)
         if span is not None:
             span.set_attribute("xsm.result.status", result.status)
             if result.msg_id:
@@ -70,16 +72,23 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
 
 def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
           reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
-          msg_id: str | None = None, outcome: str | None = None, span=None) -> SendResult:
+          msg_id: str | None = None, outcome: str | None = None, resend: bool = False,
+          span=None) -> SendResult:
     sender = sender or registry.me()
     if not sender:
         return SendResult("refused", "this session is not registered; run `xsm doctor`")
+    if resend and not msg_id:
+        return SendResult("refused", "--resend needs the id of the message to send again")
 
     from . import remote
     local_spec, peer = remote.split_target(target_spec)
     if peer:
         if sender.get("ref") in config.blocked():
             return SendResult("refused", "this session is blocked (xsm block)")
+        why = resend_refusal(msg_id, sender, body, kind, peer=peer, spec=local_spec) \
+            if resend else None
+        if why:
+            return SendResult("refused", why, msg_id)
         reply = remote.send(sender, local_spec, peer, body, kind, reply_to, wait, msg_id,
                             traceparent=span.traceparent() if span is not None else None,
                             outcome=outcome)
@@ -122,6 +131,10 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
     if forecast in ("refuse",):
         return SendResult("refused", "the receiver would drop this: %s" % why, target=target)
 
+    if resend:
+        why = resend_refusal(msg_id, sender, body, kind, target=target)
+        if why:
+            return SendResult("refused", why, msg_id, target)
     msg_id = msg_id or envelope.new_id()
     content = envelope.build(body, msg_id=msg_id, sender=sender, scope=scope, kind=kind,
                              reply_to=reply_to, outcome=outcome,
@@ -169,6 +182,50 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
     elif forecast == "unknown":
         note = "queued; %s, so the receiver's own gate may hold it" % why
     return SendResult("sent-unconfirmed", note, msg_id, target)
+
+
+RESENDABLE = ("queued", "unknown", "error")
+
+
+def resend_refusal(msg_id: str, sender: dict, body: str, kind: str, *, target: dict | None = None,
+                   peer: str | None = None, spec: str | None = None) -> str | None:
+    """Why `msg_id` may not be sent again as it is, or None when it may.
+
+    Sending again under the same id is safe only because the receiver drops an
+    id it already holds a receipt for; so the id must be one this session sent
+    from here, to this same target, and not yet answered. Otherwise a caller
+    could reuse someone else's id, or aim a delivered id at a new target and
+    get the receiver's dedup to swallow the real message (2026-09-29). The
+    ledger keeps only a 200-char preview, so the body is checked against that:
+    a resend cannot turn into a different message. The ledger records `from.ref`
+    only, so that is what "the same sender" means.
+    """
+    if os.path.basename(msg_id) != msg_id or msg_id.startswith("."):
+        return "%r is not a message id" % msg_id
+    state = ledger.status(msg_id)
+    if not state.get("from"):
+        return ("no message %s in this machine's ledger; only an id sent from here can be "
+                "resent" % msg_id)
+    if not sender.get("ref") or (state["from"] or {}).get("ref") != sender.get("ref"):
+        return "message %s was not sent by this session" % msg_id
+    if state.get("status") not in RESENDABLE:
+        return ("message %s is %s; only a message still queued, unknown or error can be sent "
+                "again" % (msg_id, state.get("status")))
+    was = state.get("to") or {}
+    if peer:
+        same = was.get("runtime") == "remote" and was.get("name") == spec \
+            and was.get("alias") == peer
+    else:
+        same = bool((target or {}).get("ref")) and was.get("ref") == target.get("ref")
+    if not same:
+        return "message %s went to %s@%s, not to this target; a resend keeps its target" % (
+            msg_id, was.get("name"), was.get("alias"))
+    if state.get("kind") != kind:
+        return "message %s was a %s, not a %s" % (msg_id, state.get("kind"), kind)
+    if body[:200] != (state.get("preview") or ""):
+        return ("this text differs from message %s; a resend must be the same message. Send the "
+                "new text without --resend as a new message" % msg_id)
+    return None
 
 
 def not_running(target: dict) -> str | None:

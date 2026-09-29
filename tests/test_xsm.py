@@ -1540,6 +1540,116 @@ class SandboxedSendTest(TempState):
         self.assertEqual(send.send("b", "hi", sender=a).status, "sent-unconfirmed")
 
 
+class ResendTest(TempState):
+    """`xsm send --resend <id>`: the same message again under its id, only from
+    the session that sent it, to the same target, while nothing answered it
+    (2026-09-29, issue #4 follow-up)."""
+
+    def setUp(self):
+        super().setUp()
+        from xsm import registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        self.me = registry.upsert("codex", home, "t-me", os.getpid(), self.tmp, name="me")
+        self.alone = registry.upsert("codex", home, "t-alone", os.getpid(), self.tmp, name="alone")
+        self.peer = registry.upsert("codex", home, "t-peer", os.getpid(), self.tmp, name="peer")
+        self.other = registry.upsert("codex", home, "t-other", os.getpid(), self.tmp, name="other")
+        self.handed = []
+        from xsm import adapters
+        patch = mock.patch.object(adapters, "to_codex", lambda *a: self.handed.append(a[1]))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def failing(self):
+        from xsm import adapters
+
+        def fail(*a):
+            raise adapters.DeliveryError("queue-failed", "no")
+        return mock.patch.object(adapters, "to_codex", fail)
+
+    def test_an_own_errored_message_is_resent_under_its_id_and_delivered_once(self):
+        from xsm import ledger, receive, send
+        with self.failing():
+            first = send.send("peer", "run the task", sender=self.me, kind="task")
+        self.assertEqual(first.status, "error", first.reason)
+        before = ledger.status(first.msg_id)
+        again = send.send("peer", "run the task", sender=self.me, kind="task",
+                          msg_id=first.msg_id, resend=True)
+        self.assertEqual((again.status, again.msg_id), ("sent-unconfirmed", first.msg_id),
+                         again.reason)
+        after = ledger.status(first.msg_id)
+        self.assertEqual(after["status"], "queued")
+        self.assertNotIn("error", after)
+        self.assertEqual(after["t"], before["t"], "the row keeps its first time")
+        self.assertIn("resent_t", after)
+        # A second resend before any receipt puts a second copy in the queue;
+        # the receiver's gate still hands the id over once.
+        send.send("peer", "run the task", sender=self.me, kind="task",
+                  msg_id=first.msg_id, resend=True)
+        texts = receive.take_inbox(self.peer)
+        self.assertEqual(len(texts), 1, texts)
+        self.assertEqual(receive.take_inbox(self.peer), [])
+        self.assertEqual(ledger.status(first.msg_id)["status"], "delivered")
+
+    def test_a_delivered_id_cannot_be_resent(self):
+        from xsm import ledger, send
+        sent = send.send("peer", "hello", sender=self.me)
+        ledger.receipt(sent.msg_id, "delivered", self.peer)
+        r = send.send("peer", "hello", sender=self.me, msg_id=sent.msg_id, resend=True)
+        self.assertEqual(r.status, "refused")
+        self.assertIn("is delivered", r.reason)
+
+    def test_another_sessions_id_cannot_be_reused(self):
+        from xsm import ledger, send
+        with self.failing():
+            theirs = send.send("peer", "hello", sender=self.other)
+        self.assertEqual(theirs.status, "error")
+        r = send.send("peer", "hello", sender=self.me, msg_id=theirs.msg_id, resend=True)
+        self.assertEqual(r.status, "refused")
+        self.assertIn("not sent by this session", r.reason)
+        self.assertEqual(ledger.status(theirs.msg_id)["status"], "error", "left as it was")
+
+    def test_an_unknown_id_and_a_path_are_refused(self):
+        from xsm import send
+        for bad in ("nosuchid", "../config", ".hidden"):
+            r = send.send("peer", "hello", sender=self.me, msg_id=bad, resend=True)
+            self.assertEqual(r.status, "refused", bad)
+        self.assertEqual(self.handed, [])
+
+    def test_a_different_target_is_refused(self):
+        from xsm import ledger, send
+        with self.failing():
+            first = send.send("peer", "hello", sender=self.me)
+        r = send.send("alone", "hello", sender=self.me, msg_id=first.msg_id, resend=True)
+        self.assertEqual(r.status, "refused")
+        self.assertIn("keeps its target", r.reason)
+        self.assertEqual(ledger.status(first.msg_id)["status"], "error")
+        self.assertEqual(self.handed, [])
+
+    def test_a_changed_body_or_kind_is_refused(self):
+        from xsm import send
+        with self.failing():
+            first = send.send("peer", "run the task", sender=self.me, kind="task")
+        r = send.send("peer", "run another task", sender=self.me, kind="task",
+                      msg_id=first.msg_id, resend=True)
+        self.assertEqual(r.status, "refused")
+        self.assertIn("differs", r.reason)
+        r = send.send("peer", "run the task", sender=self.me, kind="note",
+                      msg_id=first.msg_id, resend=True)
+        self.assertEqual(r.status, "refused")
+        self.assertEqual(self.handed, [])
+
+    def test_the_cli_flag_reaches_send(self):
+        from xsm import cli, registry, send
+        with self.failing():
+            first = send.send("peer", "hello", sender=self.me)
+        with mock.patch.object(registry, "me", lambda *a, **k: self.me), \
+                mock.patch("sys.stdout", new=io.StringIO()) as out:
+            code = cli.main(["send", "peer", "--text", "hello", "--resend", first.msg_id, "--json"])
+        self.assertEqual(code, cli.UNCONFIRMED, out.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["id"], first.msg_id)
+
+
 class CodexInboxTest(TempState):
     """A Codex session takes its queue only between turns. In S10 collab run 4
     the Codex worker never ended one (it polled with sleep) and read none of

@@ -463,6 +463,56 @@ class LostAnswerTest(unittest.TestCase):
         self.assertEqual(self.delivered, ["alive"], "handed over once")
         self.assertEqual(self.state("hostA", first["id"])["status"], "delivered")
 
+    def resend(self, how, msg_id, body="hi", target="codex:alive@hostB", kind="task", sender=None):
+        """`xsm send --resend`, through send.send, from hostA."""
+        from xsm import send
+        with self.ssh(how), self.on("hostA"):
+            return send.send(target, body, sender=sender or self.sender, kind=kind,
+                             msg_id=msg_id, resend=True)
+
+    def test_a_lost_answer_is_resent_under_its_id_and_runs_once(self):
+        first = self.send("lost", then=self.gate_delivers)
+        self.assertEqual(first["status"], "unknown")
+        before = self.state("hostA", first["id"])
+        again = self.resend("ok", first["id"])
+        self.assertEqual((again.status, again.msg_id), ("delivered", first["id"]), again.reason)
+        self.assertEqual(self.delivered, ["alive"], "handed over once")
+        after = self.state("hostA", first["id"])
+        self.assertEqual(after["t"], before["t"])
+        self.assertIn("resent_t", after)
+        self.assertNotIn("settle_after", after)
+
+    def test_an_errored_remote_send_can_be_resent(self):
+        first = self.send("refused")
+        self.assertEqual(first["status"], "error")
+        again = self.resend("ok", first["id"])
+        self.assertEqual(again.status, "sent-unconfirmed", again.reason)
+        self.assertEqual(again.msg_id, first["id"])
+
+    def test_a_resend_that_breaks_a_rule_is_refused_and_sends_nothing(self):
+        from xsm import ledger
+        lost = self.send("lost")                    # ran over there, no receipt yet
+        done = self.send("ok", then=self.gate_delivers)
+        self.reconcile(done["id"])                  # hostA learns the receipt
+        elsewhere = dict(self.sender, ref="bbbbbb")
+        handed = list(self.delivered)
+        cases = [
+            ("a delivered id", self.resend("ok", done["id"]), "is delivered"),
+            ("someone else's id", self.resend("ok", lost["id"], sender=elsewhere),
+             "not sent by this session"),
+            ("another target", self.resend("ok", lost["id"], target="codex:other@hostB"),
+             "keeps its target"),
+            ("a changed body", self.resend("ok", lost["id"], body="something else"), "differs"),
+            ("a changed kind", self.resend("ok", lost["id"], kind="note"), "was a task"),
+            ("an unknown id", self.resend("ok", "nosuchid"), "no message nosuchid"),
+        ]
+        for label, result, why in cases:
+            self.assertEqual(result.status, "refused", label)
+            self.assertIn(why, result.reason, label)
+        self.assertEqual(self.state("hostA", lost["id"])["status"], "unknown", "left as it was")
+        self.assertNotIn("resends", self.state("hostA", lost["id"]))
+        self.assertEqual(self.delivered, handed, "no refused resend reached the peer")
+
     def test_a_peer_refusal_is_recorded_not_left_queued(self):
         reply = self.send("ok", target="codex:nobody")
         self.assertEqual(reply["status"], "refused", reply)

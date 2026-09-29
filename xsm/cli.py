@@ -588,7 +588,8 @@ def cmd_send(args) -> int:
               % args.kind, file=sys.stderr)
         return REFUSED
     result = send.send(args.target, body, kind=args.kind, reply_to=args.reply_to,
-                       priority=args.priority, wait=args.wait, outcome=args.outcome)
+                       priority=args.priority, wait=args.wait, outcome=args.outcome,
+                       msg_id=args.resend, resend=bool(args.resend))
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=False))
     else:
@@ -1758,6 +1759,10 @@ def build_parser() -> argparse.ArgumentParser:
     snd.add_argument("--reply-to", help="message id being answered")
     snd.add_argument("--outcome", choices=list(envelope.OUTCOMES),
                      help="on a reply that closes a task: how the task ended")
+    snd.add_argument("--resend", metavar="ID",
+                     help="send the message with this id again, unchanged: same target, same text "
+                          "and kind, and only while it is queued, unknown or error. The receiver "
+                          "drops an id it already has, so it cannot run twice")
     snd.add_argument("--priority", choices=["next", "now", "later"], default="next")
     snd.add_argument("--wait", type=float, default=0.0,
                      help="seconds to wait for the receiver's own record of delivery")

@@ -26,12 +26,20 @@ def queued(msg_id: str, sender: dict, target: dict, scope: str, kind: str, body:
            forecast: str | None = None) -> dict:
     """`forecast` is what Claude's own gate was expected to do (send.native_forecast);
     "hold" is kept so a message that never arrives reads as waiting for a person."""
+    before = paths.read_json(_entry_path(msg_id), {}) or {}
     entry = {"id": msg_id, "status": "queued", "t": time.time(), "kind": kind, "scope": scope,
              "from": {k: sender.get(k) for k in ("name", "alias", "ref", "runtime")},
              "to": {k: target.get(k) for k in ("name", "alias", "ref", "runtime")},
              "preview": body[:200]}
     if forecast == "hold":
         entry["forecast"] = forecast
+    if before:
+        # A resend under the same id (xsm send --resend, 2026-09-29): `t` stays
+        # the first send's so the row keeps its place; the stale error and
+        # settle_after go, because they described the attempt being replaced.
+        entry["t"] = before.get("t", entry["t"])
+        entry["resent_t"] = time.time()
+        entry["resends"] = int(before.get("resends") or 0) + 1
     paths.write_json(_entry_path(msg_id), entry)
     return entry
 

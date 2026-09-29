@@ -72,6 +72,10 @@ TOOLS = [
                      "description": "only on a reply that closes a task you were given: how it "
                                     "ended. Say a failure here, not only in the words — the flag "
                                     "is what the sender can act on."},
+         "resend": {"type": "string",
+                    "description": "the id of an earlier send that ended unknown or error: sends "
+                                   "that same message again under its id, which the receiver "
+                                   "drops if it already has it. Same target, kind and text only."},
          "wait": {"type": "number", "default": 15}}, "required": ["target", "text"]}},
     {"name": "xsm_inbox",
      "description": ("Codex sessions: read messages other sessions sent you that are still "
@@ -299,7 +303,9 @@ class Server:
             r = send_mod.send(args.get("target") or "", args.get("text") or "", sender=me,
                               kind=args.get("kind") or "note", reply_to=args.get("reply_to"),
                               wait=float(args.get("wait") or 0),
-                              outcome=args.get("outcome") if args.get("kind") == "reply" else None)
+                              outcome=args.get("outcome") if args.get("kind") == "reply" else None,
+                              msg_id=args.get("resend") or None,
+                              resend=bool(args.get("resend")))
             return "%s: %s" % (r.status, r.reason or "")
         if name == "xsm_doc_endorse":
             return self.endorse(me, args)
