@@ -410,7 +410,7 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 | `refused` | 발신 단계에서 거부했다 | 2 |
 | `error` | 전달 경로가 실패했다 | 4 |
 
-**`delivered`는 영수증이지 내용 무결성 검사가 아니다.** 본문에 `<cross-session-message ...>` 태그가 중첩되어 있으면 Claude Code는 수신 시 이를 `<\cross-session-message ...>`와 `<\/cross-session-message>`로 바꾼다(0.4.7, Claude Code 2.1.284에서 Claude에서 Claude로 보내 측정했다. 본문이 2바이트 늘었고 나머지는 바이트 단위로 같았다). xsm은 봉투를 만들 때와 읽을 때 본문을 그대로 두며(`tests/test_envelope_nested.py`), 이 변환은 훅이 기록한 뒤 Claude 쪽에서 일어나므로 되돌릴 수 없다. Codex 수신자는 바이트를 그대로 받는다(이슈 #3 보고). 코드 블록이나 파일 경로로 보내면 온전히 전해지는지는 측정하지 않았다.
+**`delivered`는 영수증이지 내용 무결성 검사가 아니다.** 본문에 `<cross-session-message ...>` 태그가 중첩되어 있으면 Claude Code는 수신 시 이를 `<\cross-session-message ...>`와 `<\/cross-session-message>`로 바꾼다(0.4.7, Claude Code 2.1.284에서 Claude에서 Claude로 보내 측정했다. 본문이 2바이트 늘었고 나머지는 바이트 단위로 같았다). xsm은 봉투를 만들 때와 읽을 때 본문을 그대로 두며(`tests/test_envelope_nested.py`), 변환은 Claude 쪽에서 일어나고 xsm은 되돌리지 않는다(xsm 훅보다 앞인지 뒤인지는 측정하지 않았다). Codex 수신자는 바이트를 그대로 받는다(이슈 #3 보고). 코드 블록이나 파일 경로로 보내면 온전히 전해지는지는 측정하지 않았다.
 
 `list`, `who`, `ledger`, `held`, `doctor`는 성공하면 0, 등록되지 않은 세션에서의 `who`는 2다.
 
