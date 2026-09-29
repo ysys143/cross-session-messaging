@@ -340,6 +340,70 @@ def _hooks_will_register(home: str) -> bool:
     return all(trust.get(k) for k in ("SessionStart", "UserPromptSubmit"))
 
 
+def _codex_thread_row(home: str, thread_id: str):
+    """(name, cwd, parent_thread_id) of one thread in a Codex home's state DB,
+    or None if the home does not have it. Read-only. A sub-agent thread names
+    its parent in `source` as {"subagent":{"thread_spawn":{"parent_thread_id":..}}}
+    (measured 2026-09-30 in a Codex 0.158 state_5.sqlite)."""
+    db = os.path.join(os.path.expanduser(home), "state_5.sqlite")
+    if not os.path.exists(db):
+        return None
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    try:
+        row = con.execute("select name, cwd, source from threads where id = ?",
+                          (thread_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    if not row:
+        return None
+    parent = None
+    try:
+        spawn = ((json.loads(row[2]) or {}).get("subagent") or {}).get("thread_spawn") or {}
+        parent = spawn.get("parent_thread_id")
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return row[0], row[1], parent if isinstance(parent, str) else None
+
+
+def adopt_codex_thread(thread_id: str, pid: int, homes: list, mcp_pid: int | None = None):
+    """Register the Codex thread that just called the MCP server, so a call
+    from a thread with no record yet connects instead of being refused (user
+    decision, 2026-09-30: prefer connecting over refusing).
+
+    `homes` are candidate Codex homes, likeliest first; the first whose state
+    DB has the thread is its home. Consent is adopt_open_codex's: xsm installed
+    there with both hooks trusted; otherwise None and the caller falls back.
+    `pid` is the app-server daemon's, as for any hosted thread.
+
+    A sub-agent thread is not registered: it lives minutes and there are
+    hundreds of them (1693 spawn edges in one home), so it signs as its parent
+    when the parent has a live record on this pid. An orphan (parent unknown or
+    unregistered) is registered as itself. Returns the record to act as."""
+    for home in homes:
+        found = _codex_thread_row(home, thread_id)
+        if not found:
+            continue
+        if not _hooks_will_register(home):
+            return None
+        name, cwd, parent = found
+        if parent:
+            live = next((r for r in records() if r.get("session_id") == parent
+                         and r.get("runtime") == "codex" and r.get("state") == "live"
+                         and r.get("pid") == pid), None)
+            if live:
+                return live
+        rec = upsert("codex", home, thread_id, pid, cwd or "", name=name, mcp_pid=mcp_pid)
+        rec["adopted"] = True
+        paths.write_json(_record_path("codex", thread_id), rec)
+        return _enrich(rec)
+    return None
+
+
 def adopt_open_codex() -> list:
     """Register open Codex threads that have not run their hook yet.
 

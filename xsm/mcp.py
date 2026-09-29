@@ -263,33 +263,46 @@ class Server:
         if not pid:
             return None
         rows = [r for r in registry.records() if r.get("pid") == pid and r.get("state") == "live"]
-        if self.call_thread and any(r.get("runtime") == "codex" for r in rows):
+        codex = [r for r in rows if r.get("runtime") == "codex"]
+        if self.call_thread and (codex or not rows):
             # Codex 0.158 names the calling thread in every tools/call
             # (`params._meta.threadId`; measured 2026-09-29 with two TUIs on one
             # daemon: one MCP server process per thread, all children of the
-            # daemon, so the pid alone names all of them). Exact or nothing: a
-            # thread with no live record here (a sub-agent's, or one whose hook
-            # has not run) is not signed as its neighbour.
-            for r in rows:
-                if r.get("runtime") == "codex" and r.get("session_id") == self.call_thread:
+            # daemon, so the pid alone names all of them).
+            for r in codex:
+                if r.get("session_id") == self.call_thread:
                     return r
-            raise channel.ChannelError(
-                "this call comes from Codex thread %s, which xsm has no live record of, so it "
-                "will not act as another thread; it is registered by its hooks at its next "
-                "prompt (trust them in /hooks first)" % self.call_thread)
-        codex = [r for r in rows if r.get("runtime") == "codex"]
-        if len(codex) > 1:
-            # Several threads share this pid (one app-server daemon per
-            # CODEX_HOME) and the client did not say which one is calling: the
-            # newest record was the wrong thread in that case (measured
-            # 2026-09-29: the first TUI's call was signed as the second's).
-            # Scope, reach grants and consent hang on the sender, so refuse.
-            raise channel.ChannelError(
-                "%d live Codex threads share this process and this Codex did not say which one "
-                "is calling, so xsm cannot tell who you are; run the same command with the "
-                "`xsm` shell command, or update Codex (0.158 names the thread in each call)"
-                % len(codex))
+            # No live record: a sub-agent's thread, or one whose hook has not
+            # run. Connect it rather than refuse (user decision, 2026-09-30:
+            # "prefer easy connection; accidental connection failures must not
+            # happen"). Adoption needs the same consent as `xsm list`'s: xsm
+            # installed in that home with trusted hooks; without it, fall
+            # through to the most recent record below.
+            adopted = registry.adopt_codex_thread(
+                self.call_thread, pid, self.codex_homes(codex), mcp_pid=os.getpid())
+            if adopted:
+                return adopted
+        # No thread id (old Codex) or nothing adoptable: the newest live record,
+        # as before 0840ee3 (user decision, 2026-09-30: a possibly wrong
+        # neighbour is better than a refusal).
         return max(rows, key=lambda r: r.get("updated", 0)) if rows else None
+
+    @staticmethod
+    def codex_homes(codex_rows: list) -> list:
+        """Candidate CODEX_HOMEs for a thread with no record, likeliest first:
+        this server's own env, the homes of records sharing the daemon, the
+        declared Codex homes, then the default. The caller keeps the first one
+        whose state DB knows the thread."""
+        from . import config
+        found = []
+        for h in ([os.environ.get("CODEX_HOME")] + [r.get("home") for r in codex_rows]
+                  + [h.get("path") for h in config.homes() if h.get("runtime") == "codex"]
+                  + ["~/.codex"]):
+            if h:
+                h = os.path.realpath(os.path.expanduser(h))
+                if h not in found:
+                    found.append(h)
+        return found
 
     # -- tools --------------------------------------------------------------------
     def call(self, name: str, args: dict) -> str:
