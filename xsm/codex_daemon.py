@@ -9,10 +9,11 @@ daemon starts a queued item on request: `thread/queue/start`. Measured
 call returned a turn in progress, the TUI showed the message and ran it, and
 the xsm gate recorded the receipt.
 
-This is the only thing we ask the daemon. Never `thread/resume` (a second
-writer on the thread) and never `turn/start` (it steers into a turn already
-running). The API is experimental; anything unexpected is "unavailable" and
-the item stays queued, which is where it would have been anyway.
+Besides that we only read which threads it has loaded (loaded_threads), the
+liveness of a thread it hosts. Never `thread/resume` (a second writer on the
+thread) and never `turn/start` (it steers into a turn already running). The
+API is experimental; anything unexpected is "unavailable" and the item stays
+queued, which is where it would have been anyway.
 
 Protocol: WebSocket over the control socket, JSON-RPC in text frames. The
 socket is 0600 and takes no token. Stdlib only, never raises.
@@ -77,6 +78,64 @@ def start_queued(codex_home: str, thread_id: str, queued_id: str, timeout: float
     if isinstance(turn, dict):
         return STARTED, str(turn.get("id") or turn.get("status") or "")
     return UNAVAILABLE, "unexpected reply: %s" % json.dumps(reply)[:200]
+
+
+_LOADED_CACHE = {}          # realpath(home) -> (monotonic time, set | None)
+_LOADED_TTL = 2.0
+
+
+def loaded_threads(codex_home: str, timeout: float = 1.0):
+    """The thread ids the home's daemon has loaded, or None if it cannot say.
+
+    A thread hosted by the daemon runs its hooks under the daemon, so every
+    thread of a home records the same pid and outlives its window on it (issue
+    #5). The daemon itself knows: `thread/loaded/list` drops a thread about 60 s
+    after the last TUI holding it quits, the moment its MCP servers stop, and
+    lists it again when a TUI reconnects after a daemon restart (measured
+    2026-09-29, 0.158/0.159). None — no socket, a sandbox refusal, a timeout,
+    an unexpected reply — says nothing about the thread. Cached briefly: a list
+    of sessions asks once per home, not once per record."""
+    key = os.path.realpath(os.path.expanduser(codex_home or ""))
+    now = time.monotonic()
+    hit = _LOADED_CACHE.get(key)
+    if hit and now - hit[0] < _LOADED_TTL:
+        return hit[1]
+    result = _ask_loaded(key, timeout)
+    _LOADED_CACHE[key] = (now, result)
+    return result
+
+
+def _ask_loaded(codex_home: str, timeout: float):
+    path = socket_path(codex_home)
+    if not codex_home or not os.path.exists(path):
+        return None
+    deadline = time.monotonic() + timeout
+    conn = None
+    try:
+        conn = _Conn(os.path.realpath(path), deadline)
+        init = conn.call("initialize", "initialize", {
+            "clientInfo": {"name": "xsm", "version": _version()},
+            "capabilities": {"experimentalApi": True}})
+        if "error" in init:
+            return None
+        conn.send({"method": "initialized"})
+        found, cursor = set(), None
+        for page in range(50):
+            reply = conn.call(page + 2, "thread/loaded/list",
+                              {"cursor": cursor} if cursor else {})
+            result = reply.get("result")
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                return None
+            found.update(str(t) for t in result["data"])
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return found
+        return None
+    except (OSError, _Fail, ValueError):
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _version() -> str:

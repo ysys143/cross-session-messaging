@@ -92,6 +92,12 @@ class FakeDaemon:
         rid = msg["id"]
         if msg["method"] == "initialize":
             return {"id": rid, "result": {"userAgent": "fake"}}
+        if msg["method"] == "thread/loaded/list":
+            # One page per list in self.loaded; the cursor is the next index.
+            pages = getattr(self, "loaded", None) or [[]]
+            i = int((msg.get("params") or {}).get("cursor") or 0)
+            return {"id": rid, "result": {"data": pages[i],
+                                          "nextCursor": str(i + 1) if i + 1 < len(pages) else None}}
         if msg["method"] != "thread/queue/start":
             return {"id": rid, "error": {"code": -32601, "message": "not here"}}
         if self.mode == "busy":
@@ -353,6 +359,98 @@ class InterruptedListTest(Base):
         rows = {line.split("|")[2].strip(): line for line in out.getvalue().splitlines()[2:]}
         self.assertIn("interrupted (Esc)", rows["stopped"])
         self.assertNotIn("interrupted", rows["running"])
+
+
+class HostedThreadLivenessTest(Base):
+    """Issue #5: a thread hosted by the app-server daemon runs its hooks under
+    the daemon, so every thread of a home records the daemon's pid. Whether
+    the thread is still open is the daemon's `thread/loaded/list`."""
+
+    DEAD_PID = 999999
+
+    def loaded(self, *pages):
+        d = self.daemon("started")
+        d.loaded = [list(p) for p in pages]
+        return d
+
+    def record(self, thread, pid, **extra):
+        rec = {"runtime": "codex", "home": self.home, "session_id": thread, "pid": pid,
+               "app_server": True}
+        rec.update(extra)
+        return rec
+
+    def test_the_list_is_read_across_pages(self):
+        from xsm import codex_daemon
+        d = self.loaded(["T1", "T2"], ["T3"])
+        self.assertEqual(codex_daemon.loaded_threads(self.home), {"T1", "T2", "T3"})
+        methods = [r.get("method") for r in d.requests]
+        self.assertEqual(methods, ["initialize", "initialized", "thread/loaded/list",
+                                   "thread/loaded/list"])
+        self.assertEqual(d.requests[3]["params"], {"cursor": "1"})
+
+    def test_one_home_is_asked_once_for_a_whole_list(self):
+        from xsm import codex_daemon
+        d = self.loaded(["T1"])
+        for _ in range(5):
+            codex_daemon.loaded_threads(self.home)
+        self.assertEqual([r.get("method") for r in d.requests].count("initialize"), 1)
+
+    def test_no_answer_is_none_not_an_empty_list(self):
+        from xsm import codex_daemon
+        self.assertIsNone(codex_daemon.loaded_threads(self.home))       # no socket
+        codex_daemon._LOADED_CACHE.clear()
+        self.daemon("garbage")
+        self.assertIsNone(codex_daemon.loaded_threads(self.home))
+
+    def test_a_silent_daemon_is_none_within_the_timeout(self):
+        from xsm import codex_daemon
+        self.daemon("silent")
+        began = time.monotonic()
+        self.assertIsNone(codex_daemon.loaded_threads(self.home, timeout=0.5))
+        self.assertLess(time.monotonic() - began, 2.0)
+
+    def test_a_thread_the_daemon_let_go_is_ended_though_the_daemon_lives(self):
+        from xsm import identity
+        self.loaded(["other"])
+        self.assertEqual(identity.state_reason(self.record("T1", os.getpid())),
+                         ("ended", "thread_unloaded"))
+
+    def test_a_loaded_thread_is_live_though_the_daemon_it_registered_under_is_gone(self):
+        """Measured 2026-09-29: the daemon updated itself to 0.159 under a
+        running TUI, which reconnected to the new one; the pid on record died."""
+        from xsm import identity
+        self.loaded(["T1"])
+        self.assertEqual(identity.state_reason(self.record("T1", self.DEAD_PID)),
+                         ("live", "thread_loaded"))
+
+    def test_no_answer_falls_back_to_the_pid_and_ignores_the_beacon(self):
+        """Every hosted thread's MCP server is a child of the daemon, so the
+        beacon on record may be another thread's; a dead one says nothing."""
+        from xsm import identity
+        with mock.patch.object(identity, "lstart", lambda pid: None):
+            rec = self.record("T1", os.getpid(), mcp_pid=self.DEAD_PID)
+            self.assertEqual(identity.state_of(rec), "live")
+            self.assertEqual(identity.state_of(self.record("T1", self.DEAD_PID)), "stale")
+
+    def test_a_thread_under_its_own_tui_still_uses_the_pid(self):
+        from xsm import identity
+        self.loaded([])
+        rec = self.record("T1", os.getpid())
+        rec.pop("app_server")
+        with mock.patch.object(identity, "lstart", lambda pid: None):
+            self.assertEqual(identity.state_of(rec), "live")
+
+    def test_list_shows_the_unloaded_thread_as_ended(self):
+        from xsm import registry
+        registry._running_codex = lambda: []
+        self.loaded(["T-open"])
+        with mock.patch.object(registry.identity, "is_app_server", lambda pid: True):
+            registry.upsert("codex", self.home, "T-open", os.getpid(), self.tmp, name="open")
+            registry.upsert("codex", self.home, "T-quit", os.getpid(), self.tmp, name="quit")
+        by = {r["session_id"]: r for r in registry.records()}
+        self.assertEqual(by["T-open"]["state"], "live")
+        self.assertEqual(by["T-quit"]["state"], "ended")
+        self.assertEqual(by["T-quit"]["end_reason"], "thread_unloaded")
 
 
 if __name__ == "__main__":

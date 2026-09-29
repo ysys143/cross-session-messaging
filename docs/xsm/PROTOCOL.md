@@ -112,7 +112,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 | `asked/<ref>.json` | `{"verb": "link"\|"join"\|"leave"\|"reach", "args": str, "cwd", "t", "session_id", "runtime"}`, 모드 0600. 사람이 세션에 직접 입력한 xsm 명령으로, 그 세션의 동의다(§5.3.3). 한 번 쓰면 지운다 |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |
-| `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?, "ended_at"?, "end_reason"?}` |
+| `sessions/<runtime>-<session-id>.json` | `{"runtime", "home", "alias", "session_id", "pid", "lstart", "cwd", "ref", "updated", "permission_mode"?, "name"?, "ended_at"?, "end_reason"?, "mcp_pid"?, "mcp_lstart"?, "app_server"?}`. `app_server`는 Codex 기록의 pid가 TUI가 아니라 그 홈의 app-server 데몬일 때 `true`다(§4.3) |
 | `ledger/<msg-id>.json` | `{"id", "status": "queued", "t", "kind", "scope", "from": {...}, "to": {...}, "preview", "outcome"?, "closed_t"?, "closed_by"?}`. `outcome`은 그 과제를 끝맺는 답장이 도착했을 때 붙는다. `status`와 **별도 키**다 — 조회 시 영수증의 판정이 `status`를 덮어쓰므로 같은 키에 두면 사라진다 |
 | `ledger/<msg-id>.recv.json` | `{"id", "decision": "delivered"\|"held"\|"blocked", "reason", "t", "receiver": {...}, "outcome"?}` |
 | `attempts/<key>.json` | `{"key", "text"(200자), "cwd", "first_t", "tries": [{"t", "worker", "task_id", "ended_t"?, "outcome"?, "why"?}]}`. `key`는 `sha256(정규화한 과제 문장 + "\|" + realpath(cwd))`의 앞 12자다. 같은 문장이라도 폴더가 다르면 다른 일이다. 최근 20건만 남긴다 |
@@ -165,6 +165,7 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 |---|---|
 | Claude | pid 생존 + `ps lstart` 일치 + inbox 소켓 연결 성공 |
 | Codex | pid 생존 + `ps lstart` 일치 + **xsm MCP 서버 생존**(`mcp_pid`, 있을 때) |
+| Codex, 데몬이 호스트하는 스레드(`app_server`) | **데몬의 `thread/loaded/list`에 스레드가 있다.** 데몬이 답하지 않으면 pid 생존 + `ps lstart` 일치(비콘은 보지 않는다) |
 
 - 수신 세션은 자기 pid를 `CLAUDE_CODE_MESSAGING_SOCKET`(경로에 pid가 들어 있다)이나 조상 프로세스 탐색으로 얻고, 둘 다 실패하면 같은 `session_id`로 이미 남아 있는 포인터에서 되찾는다. 그래도 알 수 없으면 5.1절 3번 규칙이 적용된다.
 - 종료 훅에 의존하지 않는다. 강제 종료 시 `SessionEnd`는 실행되지 않는다(S3).
@@ -172,6 +173,8 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 
 
 **Codex 스레드 교체.** 한 Codex TUI 프로세스는 `/new`나 resume으로 스레드를 바꾼다. 옛 스레드는 그 프로세스 안에서 약 60초 뒤 `Shutdown`되고, 그 뒤로는 자기 대기열을 읽지 않는다(실측 2026-09-23: 살아 있는 pid 앞으로 보낸 메시지 2건이 영원히 `queued`). Codex는 스레드가 열릴 때마다 MCP 서버를 새로 띄우고 닫힐 때 죽이므로, **xsm MCP 서버의 pid가 곧 스레드의 생존이다.** MCP 서버는 시작할 때 비콘(`mcp/<pid>.json`: pid, ppid, lstart, started, cwd)을 쓰고 끝날 때 지운다. Codex 훅은 등록할 때 자기 Codex pid 아래 가장 최근 비콘의 pid를 `mcp_pid`로 적는다. 그 프로세스가 죽었으면 기록은 pid가 살아 있어도 `ended`(`end_reason: thread_replaced`)다. 비콘이 없으면(MCP 서버 미설치, adopt) pid 판정만 쓴다.
+
+**데몬이 호스트하는 Codex 스레드.** 0.157부터 Codex TUI는 기본으로 `CODEX_HOME`마다 하나인 app-server 데몬의 클라이언트다. 그러면 훅과 MCP 서버가 TUI가 아니라 데몬 아래에서 돈다. 조상 탐색이 찾는 `codex`는 데몬이므로 그 홈의 모든 스레드가 같은 pid를 적고, 멈춘 스레드도 데몬이나 다른 TUI가 사는 한 `live`로 보였다(issue #5; 실측 2026-09-29: 한 데몬 pid에 스레드 14개). 모든 스레드의 MCP 서버가 데몬의 자식이라 "pid 아래 가장 최근 비콘"도 마지막에 열린 스레드의 것이다(실측: 두 번째 TUI의 비콘이 첫 스레드 기록에 적혀, 열려 있는 첫 스레드가 `ended`로 읽혔다). 그래서 등록할 때 pid가 `codex app-server …`이면 기록에 `app_server: true`를 적고, 생존은 데몬 제어 소켓(`$CODEX_HOME/app-server-control/app-server-control.sock`)의 `thread/loaded/list`로 판정한다. 목록에 있으면 `live`, 없으면 `ended`(`end_reason: thread_unloaded`)다. 데몬은 스레드를 잡은 마지막 TUI가 끝나고 약 60초 뒤 그 스레드를 내려놓고(그 순간 MCP 서버도 끝난다), 데몬이 스스로 업데이트해 pid가 바뀌어도 TUI가 다시 붙으면 스레드를 다시 올린다(실측 2026-09-29, 0.158/0.159). 소켓이 없거나 샌드박스가 연결을 거부하거나 1초 안에 답이 없으면 아무것도 말하지 않은 것으로 보고 pid 판정으로 넘어간다. 목록은 홈마다 2초 동안 캐시한다.
 
 **첫 프롬프트 전의 Codex 스레드.** Codex는 첫 프롬프트나 `/rename` 전에는 스레드 행도 rollout도 쓰지 않고 훅도 부르지 않는다. 그래도 로그 DB(`logs_<n>.sqlite`)에는 TUI가 스레드를 연 지 몇 초 안에 `process_uuid = pid:<pid>:…`와 스레드 id가 함께 찍힌다. xsm은 어떤 기록도 가리키지 않는 MCP 비콘마다 그 부모 pid의 로그에서 비콘 시작 시각에 가장 가까이 처음 나타난 스레드(±30초)를 찾아 그 스레드를 **adopt**한다(`adopted`, `unprompted`, `mcp_pid`). 신뢰된 훅이 설치된 홈만 대상이다. 이름은 붙지 않았으므로 `codex-<id 끝 6자>`다(UUIDv7은 앞자리가 시각이라 몇 분 사이 연 스레드끼리 앞 8자가 같았다). 로그에서 id를 찾지 못한 비콘은 `codex-<pid>@codex [-] (… no prompt yet …)`로만 보인다.
 
@@ -185,11 +188,11 @@ ref = sha256("<runtime>:<홈의 realpath>:<session-id>")[:6]
 | 상태 | 뜻 | 어떻게 정해지나 |
 |---|---|---|
 | `live` | 메시지를 받을 수 있다 | pid 생존 + `ps lstart` 일치 + (Claude) 소켓 연결 |
-| `ended` | 정상 종료했다 | `SessionEnd` 훅이 `ended_at`과 `end_reason`을 기록했고 프로세스가 없다 |
+| `ended` | 정상 종료했다 | `SessionEnd` 훅이 `ended_at`과 `end_reason`을 기록했고 프로세스가 없다. xsm이 멈춘 워커(`end_reason: worker-stopped`)는 기록된 pid가 살아 있어도 `ended`다. 데몬이 내려놓은 Codex 스레드(`thread_unloaded`)도 `ended`다 |
 | `stale` | 인사 없이 사라졌다 | 프로세스가 없는데 종료 기록이 없다. 강제 종료, 터미널 닫힘, 충돌 |
 | `unknown` | 판단할 근거가 없다 | pid를 모르는 Codex 세션. 죽은 것으로 취급하지 않는다 |
 
-Codex에는 `SessionEnd`가 없으므로 멈춘 Codex 세션은 항상 `stale`이다.
+Codex에는 `SessionEnd`가 없으므로 멈춘 Codex 세션은 `stale`이다. 예외는 위의 `thread_replaced`, `thread_unloaded`, `worker-stopped`다.
 
 **재개.** `claude --resume <세션 id>`는 **같은 세션 id**로 돌아온다(2026-09-21 실측: pid는 바뀌고 ref와 이름은 그대로). 그래서 SessionStart 훅이 같은 포인터를 다시 쓰고, 이때 종료 기록을 지워 `live`로 되돌린다. 주소와 ref가 끊기지 않는다.
 
@@ -356,7 +359,7 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 - **위험한 옵션.** `full_access`와 `trust_hooks`는 부른 쪽이 사람(`human_terminal()`)이 아니면 허가를 요구한다. 허가는 `grants/<id>.json`에 저장되며 `{asked_by, runtime, cwd, options, expires}`로 묶인다. `spawn`은 파일을 `.used`로 rename해서 한 번만 쓰고, 세션·런타임·폴더가 다르거나, 옵션을 다 덮지 못하거나, 만료됐으면 거부한다. 허가는 MCP `xsm_grant`만 만든다. 이 도구는 elicitation으로 `deny`/`allow once`를 묻고, 결과를 채널에 `decision`(작성자 `사람 via mcp-elicitation`)으로 남긴다. `trust_hooks`는 Codex 워커에만 된다.
 - **동시 수.** 새 워커를 띄우기 전에 부른 세션(`parent_ref`)의 워커 가운데 `gone`이 아닌 것을 센다. `XSM_MAX_WORKERS`, 없으면 config `max_workers`(기본 4) 이상이면 거부한다. 세기 전에 남은 워커를 먼저 정리한다.
 - **남은 워커.** 워커의 `parent_ref`에 해당하는 레코드가 없거나 `ended`/`stale`이면 그 워커는 남은 것이다. 만든 지 120초가 지났는데 자기 프로세스가 없는 워커도 같다. 이런 워커는 `stop`으로 정리한다. 확인 시점은 셋이다. (1) 부모의 SessionEnd 훅: 부모 프로세스가 아직 살아 있으므로, 분리된 `xsm reap --after-pid <부모 pid>`가 그 프로세스가 끝나길(최대 120초) 기다렸다가 정리한다. (2) `workers`와 `spawn`. (3) 매시간 정리. 훅 경로에서는 늘 분리된 프로세스로 한다.
-- **종료.** `stop`은 pid와 시작 시각이 기록과 같을 때만 신호를 보낸다(프로세스 그룹에 SIGTERM, 5초 뒤 SIGKILL). 패널 워커는 `tmux kill-pane`. 대기 중인 승인은 `denied`로 닫고, 워커 기록·폴더·세션 포인터를 지운다. 원장은 보존 기간 규칙을 따른다. `once`는 `--task`가 있어야 쓸 수 있다. 과제 id는 보내기 전에 워커 기록에 저장한다. 그 과제(`task_id`)에 대한 `reply`가 부모(`parent_ref`)의 훅을 통과하면, 훅이 분리된 프로세스로 `xsm stop --internal`을 띄운다. 훅 안에서 종료를 기다리지 않기 위해서다. `task_id`가 없으면 어떤 답장으로도 멈추지 않는다.
+- **종료.** `stop`은 pid와 시작 시각이 기록과 같을 때만 신호를 보낸다(프로세스 그룹에 SIGTERM, 5초 뒤 SIGKILL). 패널 워커는 `tmux kill-pane`. 대기 중인 승인은 `denied`로 닫고, 워커 기록과 폴더를 지운다. 세션 포인터는 지우지 않고 `ended`(`end_reason: worker-stopped`)로 적는다. 포인터가 없는 Codex 스레드는 아무도 등록하지 않은 스레드로 보여, 같은 폴더에 열린 다른 TUI에 adopt되어 그 pid로 `live`가 됐다(issue #5). 멈춘 포인터는 다른 멈춘 포인터처럼 보관 기간(§4.4)이 지나면 정리가 지운다. 원장은 보존 기간 규칙을 따른다. `once`는 `--task`가 있어야 쓸 수 있다. 과제 id는 보내기 전에 워커 기록에 저장한다. 그 과제(`task_id`)에 대한 `reply`가 부모(`parent_ref`)의 훅을 통과하면, 훅이 분리된 프로세스로 `xsm stop --internal`을 띄운다. 훅 안에서 종료를 기다리지 않기 위해서다. `task_id`가 없으면 어떤 답장으로도 멈추지 않는다.
 
 - **재시도 계보와 연속 실패 차단.** `--task`가 있는 `spawn`은 그 과제의 계보(`attempts/<key>.json`)를 먼저 본다. 마지막 성공 이후 실패가 `max_task_attempts`(설정, `XSM_MAX_TASK_ATTEMPTS`, 기본 3)에 이르면 거부한다. 거부 메시지에는 안정적인 토큰 `task-attempts-exhausted`와 시도 이력이 들어가고, **새 종료 코드를 만들지 않는다**(거부는 2다). 검사는 폴더가 정해진 직후, 워커 디렉터리·tmux 창·프로세스가 생기기 전에 한다.
   - 계보의 시작은 `spawn` 호출이 아니라 **과제가 실제로 나가는 순간**이다. 뜨지도 못한 워커는 시도가 아니다.

@@ -124,6 +124,22 @@ def _state_of(record: dict) -> tuple:
     if not pid:
         return "unknown", "no_pid"
     gone = "ended" if record.get("ended_at") else "stale"
+    if record.get("ended_at") and record.get("end_reason") == "worker-stopped":
+        # xsm stopped this worker itself; its recorded pid may be a shared
+        # process that lives on (a Codex daemon). A new hook clears the mark.
+        return "ended", "worker_stopped"
+    hosted = record.get("runtime") == "codex" and record.get("app_server")
+    if hosted:
+        # The pid is the home's app-server daemon, shared by every thread it
+        # hosts (issue #5: 14 threads on one pid), and replaced when it updates
+        # itself while the TUIs reconnect. Only the daemon knows which of its
+        # threads are still open. No answer falls through to the pid.
+        from . import codex_daemon
+        loaded = codex_daemon.loaded_threads(record.get("home") or "")
+        if loaded is not None:
+            if str(record.get("session_id")) in loaded:
+                return "live", "thread_loaded"
+            return "ended", "thread_unloaded"
     if not pid_alive(pid):
         return gone, "pid_dead"
     recorded = record.get("lstart")
@@ -135,7 +151,12 @@ def _state_of(record: dict) -> tuple:
         # `ps` refused (the Codex sandbox) is not evidence of reuse; the pid is
         # alive and we could not look further.
         unverified = now is None
-    if record.get("runtime") == "codex" and record.get("mcp_pid"):
+    if record.get("runtime") == "codex" and record.get("mcp_pid") and not hosted:
+        # Not for a daemon-hosted thread: every thread's MCP servers are
+        # children of the one daemon, so "the newest beacon under the pid" is
+        # whichever thread opened last. Measured 2026-09-29: a second TUI's
+        # beacon was written into the first thread's record, which then read
+        # ended while it was open.
         # A Codex TUI starts a fresh set of MCP servers for every thread it
         # opens and kills the old set about a minute after leaving that thread
         # (measured 2026-09-23, Codex 0.155). So xsm's own MCP server, whose
@@ -184,6 +205,19 @@ def ancestor_pid(names, max_hops: int = 10) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def is_app_server(pid) -> bool:
+    """Whether this pid is a Codex app-server (`codex app-server ...`), the
+    daemon a TUI is a client of since 0.157. A thread it hosts runs its hooks
+    under it, so ancestor_pid finds it instead of the TUI."""
+    try:
+        out = subprocess.run(["ps", "-o", "args=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    argv = out.stdout.split()
+    return len(argv) > 1 and os.path.basename(argv[0]) == "codex" and argv[1] == "app-server"
 
 
 def pid_from_socket(sock_path: str) -> int | None:
