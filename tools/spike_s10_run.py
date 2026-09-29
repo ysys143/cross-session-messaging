@@ -56,10 +56,10 @@ COLLAB_SHARES = (0.15, 0.40, 0.20, 0.25)    # agree, analyse, discuss, revise
 # measure two sessions doing the same work; these measure two sessions writing
 # over each other in one file. 5 is the current xsm with no rule at all; 6 adds
 # the one line that condition 4 adds to the compress brief, in its own terms.
-COEDIT_RULE = ("\n## 겹치지 않게\n\n문서의 어느 구간을 고치기 전에 채널에 한 줄 남겨라: "
-               "`./xsm post --tag note --text \"taking <절 이름>\"`. 다른 세션이 이미 잡은 "
-               "구간은 피한다.\n")
-PHASE_NAMES = ("합의", "분석", "논의", "수정")
+COEDIT_RULE = ("\n## Do not overlap\n\nBefore you edit a section of the document, leave one line in the channel: "
+               "`./xsm post --tag note --text \"taking <section name>\"`. Stay away from a "
+               "section another session has already taken.\n")
+PHASE_NAMES = ("agree", "analyze", "discuss", "revise")
 DEFAULT_AGENTS = "codex:gpt-5.6-luna,claude:haiku,claude:sonnet"
 FIRST_PROMPT = "Read BRIEF.md in this folder and do what it says."
 SCREEN_EVERY = 30               # seconds between screen snapshots of each worker
@@ -280,7 +280,7 @@ def clock(home: str, root: str, workers_: list, start: float, minutes: float) ->
             continue                        # phase 1 began with the brief
         while time.time() < at:
             time.sleep(1)
-        text = "단계 %d/4 %s 시작. ./phase 로 남은 시간을 확인해라." % (i + 1, PHASE_NAMES[i])
+        text = "Phase %d/4 (%s) has started. Run ./phase to see the time left." % (i + 1, PHASE_NAMES[i])
         for w in workers_:
             try:
                 send_mod.send("ref:%s" % w["ref"], text, sender=me, kind="note")

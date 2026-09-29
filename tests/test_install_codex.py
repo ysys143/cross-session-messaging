@@ -22,9 +22,9 @@ class CodexInstallTest(unittest.TestCase):
             self.assertEqual(install.install_cli(), "linked")
             self.assertEqual(install.install_cli(), "current")
             link.unlink()
-            link.write_text("아브라카다브라")
+            link.write_text("abracadabra")
             self.assertEqual(install.install_cli(), "foreign")
-            self.assertEqual(link.read_text(), "아브라카다브라")
+            self.assertEqual(link.read_text(), "abracadabra")
             link.unlink()
             foreign = Path(tmp) / "other-tool"
             link.symlink_to(foreign)
