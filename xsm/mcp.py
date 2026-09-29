@@ -685,10 +685,34 @@ def remove_beacon() -> None:
         pass
 
 
+def preload() -> list:
+    """Import every xsm module now, while the files this server started from
+    are still there. The tools import most of them on first use; a plugin
+    update deletes the old version folder (Codex removes it on `codex plugin
+    add`), and a session left open then failed its first xsm tool call with
+    the modules gone (measured 2026-09-30: three open Codex sessions still ran
+    0.4.7 servers from a deleted folder). With everything loaded, an open
+    session keeps working on the version it started with until it restarts.
+    Returns the modules that could not be imported."""
+    import importlib
+    import pkgutil
+    from . import __path__ as package_path
+    failed = []
+    for info in pkgutil.iter_modules(package_path):
+        if info.name == "__main__":
+            continue
+        try:
+            importlib.import_module("%s.%s" % (__package__, info.name))
+        except Exception:                # noqa: BLE001 - a module the server never uses must not stop it
+            failed.append(info.name)
+    return failed
+
+
 def main() -> int:
     # The MCP server runs outside any sandbox (that is why it exists); a
     # worker's `env` setting must not make it refuse like a sandboxed shell.
     os.environ.pop("XSM_SANDBOXED", None)
+    preload()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     write_beacon()
     try:
