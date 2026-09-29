@@ -155,6 +155,14 @@ Read the result as it is written:
 | `held` / `blocked` | the receiver's gate stopped it; the body is kept in `xsm held list` |
 | `error` | the delivery path failed; the message says why |
 
+`delivered` is a receipt, not a content-integrity check. When a body contains a
+`cross-session-message` tag, Claude Code rewrites it on receipt to
+`<\cross-session-message ...>` and `<\/cross-session-message>` (measured on xsm 0.4.7,
+Claude Code 2.1.284, Claude to Claude: +2 bytes, everything else identical); xsm
+itself keeps the body verbatim and cannot undo it. A Codex receiver gets the bytes
+unchanged (reported in issue #3). Whether a code block or a file path avoids the
+rewrite was not measured.
+
 A Codex session picks up a queued message within about ten seconds when its
 thread is loaded and idle, otherwise at its user's next input. It cannot be
 interrupted mid-turn. A session stopped with Esc (`interrupted (Esc)` in
