@@ -1029,12 +1029,13 @@ def _terminate(pid: int, lstart: str) -> None:
 
 def _cleanup(worker: dict) -> None:
     if worker.get("session_id"):
-        pointer = paths.path(paths.SESSIONS, "%s-%s.json" % (worker["runtime"],
-                                                              worker["session_id"]))
-        try:
-            os.unlink(pointer)
-        except OSError:
-            pass
+        # Kept, marked ended, not deleted: a Codex thread with no pointer is
+        # one nobody registered, and adopt_open_codex handed the stopped
+        # worker's thread to another TUI open in the same folder, which then
+        # showed it live under that TUI's pid (issue #5). Housekeeping prunes
+        # it like any other ended pointer.
+        registry.mark_ended(worker["runtime"], worker["session_id"], "worker-stopped",
+                            home=worker.get("home"))
     shutil.rmtree(_dir(worker["name"]), ignore_errors=True)
     try:
         os.unlink(_record_path(worker["name"]))

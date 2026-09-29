@@ -1332,6 +1332,42 @@ class CodexThreadLivenessTest(TempState):
         self.assertEqual(rec["end_reason"], "thread_replaced")
         self.assertIn("opened another thread", resolve_hint(rec))
 
+    def test_a_resume_after_options_is_still_a_resume(self):
+        """Issue #5: `codex --no-alt-screen resume <id>` read as a fresh TUI,
+        which was then handed the newest thread in its folder."""
+        from xsm import registry
+        cases = {("codex", "resume", "T1"): "T1",
+                 ("codex", "--no-alt-screen", "resume", "T1"): "T1",
+                 ("codex", "-c", "k=v", "resume", "T1", "--yolo"): "T1",
+                 ("codex", "resume"): "?",
+                 ("codex", "resume", "--last"): "?",
+                 ("codex",): None,
+                 ("codex", "--no-alt-screen"): None}
+        for argv, want in cases.items():
+            self.assertEqual(registry._resumed_thread(list(argv)), want, argv)
+
+    def test_the_app_server_daemon_is_told_apart_from_a_tui(self):
+        from xsm import identity
+        daemon = "/h/.codex/packages/app-server-daemon/releases/0.158.0/bin/codex app-server " \
+                 "--listen unix:// --managed-daemon\n"
+        for args, want in ((daemon, True), ("/usr/bin/codex --no-alt-screen resume T1\n", False),
+                           ("/usr/bin/codex app-server daemon pid-update-loop\n", True),
+                           ("python3 app-server\n", False), ("", False)):
+            with mock.patch.object(identity.subprocess, "run",
+                                   lambda *a, **k: mock.Mock(stdout=args)):
+                self.assertEqual(identity.is_app_server(4242), want, args)
+
+    def test_a_thread_registered_under_the_daemon_is_marked_hosted(self):
+        from xsm import identity, registry
+        home = os.path.join(self.tmp, "homes", "codex")
+        os.makedirs(home, exist_ok=True)
+        with mock.patch.object(identity, "is_app_server", lambda pid: True):
+            rec = registry.upsert("codex", home, "t1", os.getpid(), self.tmp)
+        self.assertTrue(rec.get("app_server"))
+        with mock.patch.object(identity, "is_app_server", lambda pid: False):
+            rec = registry.upsert("codex", home, "t1", os.getpid(), self.tmp)
+        self.assertNotIn("app_server", rec, "a TUI pid on the next registration clears it")
+
     def test_the_hook_records_the_newest_mcp_server_under_its_codex(self):
         from xsm import receive, registry
         self._beacon(4001, os.getpid(), started=100)
@@ -2429,6 +2465,40 @@ class AdoptionTest(TempState):
         self._home(trusted=False)
         self._open_thread()
         self.assertEqual(registry.adopt_open_codex(), [])
+
+    def test_a_stopped_workers_thread_is_not_handed_to_another_tui(self):
+        """Issue #5: stopping a --once worker deleted its pointer; the next
+        list adopted its thread for another TUI open in the same folder, and
+        showed it live under that TUI's pid. The pointer now stays, ended."""
+        from xsm import registry, workers
+        home = self._home(trusted=True)
+        registry.upsert("codex", home, "t-new", os.getpid(), self.tmp, name="h10-once")
+        workers.save({"name": "h10-once", "runtime": "codex", "home": home,
+                      "session_id": "t-new", "created": time.time()})
+        workers.stop("h10-once")
+        self._open_thread()                            # another TUI, alive, same folder
+        self.assertEqual(registry.adopt_open_codex(), [])
+        rec = registry.by_session("codex", "t-new") or {}
+        self.assertEqual(rec["state"], "ended", "its pid is alive, but xsm stopped it")
+        self.assertEqual(rec["end_reason"], "worker-stopped")
+
+    def test_a_thread_the_daemon_has_not_loaded_is_not_adopted(self):
+        """The folder match is a guess; where the home's daemon answers, a
+        thread it has not loaded is open in none of its TUIs (issue #5)."""
+        from xsm import codex_daemon, registry
+        self._home(trusted=True)
+        self._open_thread()
+        with mock.patch.object(codex_daemon, "loaded_threads", lambda home: set()):
+            self.assertEqual(registry.adopt_open_codex(), [])
+        with mock.patch.object(codex_daemon, "loaded_threads", lambda home: {"t-new"}):
+            self.assertEqual([r["name"] for r in registry.adopt_open_codex()], ["fresh"])
+
+    def test_no_daemon_answer_keeps_adopting_as_before(self):
+        from xsm import codex_daemon, registry
+        self._home(trusted=True)
+        self._open_thread()
+        with mock.patch.object(codex_daemon, "loaded_threads", lambda home: None):
+            self.assertEqual([r["name"] for r in registry.adopt_open_codex()], ["fresh"])
 
     def test_the_hook_takes_over_the_pointer(self):
         from xsm import registry

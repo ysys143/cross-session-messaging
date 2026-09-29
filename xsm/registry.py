@@ -71,6 +71,12 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
         else:
             record.pop("mcp_pid", None)
             record.pop("mcp_lstart", None)
+        # Whether the pid is the home's app-server daemon rather than a TUI:
+        # then the pid is every hosted thread's, and liveness asks the daemon.
+        if identity.is_app_server(pid):
+            record["app_server"] = True
+        else:
+            record.pop("app_server", None)
     if inside is not False:
         # The other runtime's id this session was started with (its own hook
         # inherits it): the session runs inside that one's shell. Only the
@@ -202,6 +208,9 @@ def _enrich(record: dict) -> dict:
         # The TUI is alive but opened another thread (Codex /new, resume);
         # this one is closed inside it and takes nothing from its queue.
         out["end_reason"] = out.get("end_reason") or "thread_replaced"
+    elif why == "thread_unloaded":
+        # No TUI holds the thread any more; the daemon that hosted it let it go.
+        out["end_reason"] = out.get("end_reason") or "thread_unloaded"
     if out["state"] == "live" and record.get("runtime") == "claude" and \
             out.get("native_session_id") and out["native_session_id"] != record.get("session_id"):
         # The process is alive but now runs another session: /clear and
@@ -268,9 +277,7 @@ def _running_codex() -> list:
             continue
         if len(argv) > 1 and argv[1] in ("app-server", "mcp", "mcp-server", "exec", "queue"):
             continue
-        # "?" is `codex resume` from the picker: some older thread, unknown which.
-        resumed = (argv[2] if len(argv) > 2 else "?") if len(argv) > 1 and argv[1] == "resume" \
-            else None
+        resumed = _resumed_thread(argv)
         try:
             res = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
                                  capture_output=True, text=True, timeout=5).stdout
@@ -286,6 +293,18 @@ def _running_codex() -> list:
             epoch = 0
         found.append((os.path.realpath(cwd), epoch, resumed, int(pid)))
     return found
+
+
+def _resumed_thread(argv: list) -> str | None:
+    """The thread a `codex ... resume <id>` command line opened; "?" for
+    `codex resume` from the picker (some older thread, unknown which); None
+    when it resumed nothing. Options may come first: `codex --no-alt-screen
+    resume <id>` was read as a fresh TUI and handed a newer thread in its
+    folder — a stopped worker's (issue #5)."""
+    if "resume" not in argv[1:]:
+        return None
+    rest = argv[argv.index("resume", 1) + 1:]
+    return rest[0] if rest and not rest[0].startswith("-") else "?"
 
 
 def _open_codex_threads(home: str) -> list:
@@ -344,9 +363,18 @@ def adopt_open_codex() -> list:
     for home in config.homes():
         if home["path"] not in trusted:
             continue
+        from . import codex_daemon               # lazy: keeps hook imports small
         for row in _open_codex_threads(home["path"]):
             thread_id, name, cwd, _rollout, _created, _updated, pid = row
             if thread_id in known:
+                continue
+            loaded = codex_daemon.loaded_threads(home["path"])     # cached per home
+            if loaded is not None and thread_id not in loaded:
+                # The TUI-and-folder match is a guess, and it handed a closed
+                # thread to whichever TUI was open in that folder (issue #5).
+                # Where the home's daemon answers, a thread it has not loaded
+                # is not open in any of its TUIs; one open in an embedded TUI
+                # is registered by its own hook at its first prompt instead.
                 continue
             rec = upsert("codex", home["path"], thread_id, pid, cwd or "", name=name,
                          mcp_pid=beacon_for(pid))
@@ -538,8 +566,9 @@ def unregistered() -> list:
 
 def mark_ended(runtime: str, session_id: str, reason: str | None,
                home: str | None = None) -> dict | None:
-    """Record a clean exit. Only the SessionEnd hook calls this; a crash never
-    does, which is exactly how `ended` and `stale` come apart.
+    """Record a clean exit. The SessionEnd hook calls this, and so does
+    stopping a worker (reason `worker-stopped`); a crash never does, which is
+    exactly how `ended` and `stale` come apart.
 
     `home` is where the ending session lives. Pointers are keyed on runtime
     and session id alone, so a thread id that exists in two CODEX_HOMEs (a
