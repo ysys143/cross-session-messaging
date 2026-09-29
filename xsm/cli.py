@@ -1055,7 +1055,8 @@ def _native_note(report: dict) -> str:
     """How the gate treats Claude's own messages (no xsm header), ADR-0013."""
     return ("Claude messages without an xsm header are all held (strict_peers)"
             if report.get("strict_peers") else
-            "Claude messages without an xsm header pass when their sender is in scope")
+            "Claude messages without an xsm header pass unless xsm knows their sender and it is "
+            "out of scope; messages from off this machine are held")
 
 
 def _doctor_rows(report: dict) -> list:

@@ -25,7 +25,8 @@ HOMES = "homes.json"
 
 DEFAULT_CONFIG = {
     # True: every peer message without an xsm header is held. False: Claude's
-    # own messages pass when their sender is in scope (ADR-0013).
+    # own messages pass unless xsm knows the sender and it is out of scope, or
+    # they come from off this machine (ADR-0013, amended 2026-09-30).
     "strict_peers": False,
     "same_repo_scope": True,  # the default rule below
     "scopes": [],             # explicit cross-repo scopes

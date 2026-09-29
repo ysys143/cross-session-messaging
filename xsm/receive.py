@@ -432,13 +432,15 @@ def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
     hook runs, S1). It passes here when its sender is a Claude session xsm
     knows and shares a scope with — the rule an xsm message meets, so
     installing xsm no longer turns off messaging between a project's own
-    sessions (ADR-0013). Anything else is held as before: a sender we cannot
-    name cannot be checked.
+    sessions (ADR-0013). A sender on this machine that xsm cannot name (a
+    profile without xsm, a stale record) passes too: same user, same machine,
+    and holding it only broke a connection Claude allows (user decision,
+    2026-09-30). A sender that is not a socket on this machine is held.
 
     Claude's envelope carries from="uds:<socket>", from-name and from-mode,
     and no session id (measured with Claude 2.1.284, 2026-09-29). The socket
-    is the sender's own claim, as the ref in an xsm header is; it is taken
-    only when exactly one registered session owns it."""
+    is the sender's own claim, as the ref in an xsm header is; it names the
+    sender only when exactly one running session owns it."""
     if cfg.get("strict_peers", False):
         return "block", "peer message without an xsm header (strict_peers)"
     if not me:
@@ -455,14 +457,23 @@ def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
     # id; the old record reads as ended (superseded), and must not make the
     # socket look shared (measured 2026-09-29).
     running = [rec for rec in owners if rec.get("state") in ("live", "unknown")]
-    owners = running or owners[:1]
-    if len(owners) != 1:
-        return "block", ("Claude peer message from %s, which is %s" % (
-            where or "an unnamed sender",
-            "not a session xsm knows" if not owners else "claimed by %d sessions" % len(owners)))
-    decision, reason, _scope = _check_sender(owners[0], me, cfg, parsed.attrs.get("from-name"))
+    if not socket:
+        # Not a socket on this machine: Remote Control, a cloud session or
+        # another machine. Past the uid boundary, so still held (user
+        # decision, 2026-09-30).
+        return "block", "Claude peer message from %s, which is not a session on this machine" % (
+            where or "an unnamed sender")
+    if len(running) != 1:
+        # A session on this machine xsm does not know (a profile without xsm,
+        # a record gone stale) or cannot tell apart. Same user, same machine:
+        # xsm's scope check guards nothing a same-uid process could not get
+        # around, and holding it only made a connection Claude itself allows
+        # fail by accident (user decision, 2026-09-30).
+        return "pass", "local Claude peer message from %s (%s), not a session xsm can check" % (
+            parsed.attrs.get("from-name") or "unnamed", where)
+    decision, reason, _scope = _check_sender(running[0], me, cfg, parsed.attrs.get("from-name"))
     return decision, reason or "Claude peer message from %s@%s, in scope" % (
-        owners[0].get("name"), owners[0].get("alias"))
+        running[0].get("name"), running[0].get("alias"))
 
 
 def take_inbox(me: dict) -> list:

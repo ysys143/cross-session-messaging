@@ -772,14 +772,14 @@ class NativeClaudeMessageTest(TempState):
         self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", claude, [sender])[0], "pass")
         self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", codex, [sender])[0], "block")
 
-    def test_a_socket_two_sessions_claim_names_nobody(self):
+    def test_a_socket_two_sessions_claim_passes_as_local(self):
         sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "live",
                   "ref": "aaaaaa"}
         me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
         decision, reason = self._check("uds:/tmp/cc-socks/1.sock", me,
                                        [sender, dict(sender, ref="cccccc")])
-        self.assertEqual(decision, "block")
-        self.assertIn("claimed by 2 sessions", reason)
+        self.assertEqual(decision, "pass")
+        self.assertIn("not a session xsm can check", reason)
 
     def test_a_session_cleared_on_the_same_socket_is_not_a_second_owner(self):
         sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "live",
@@ -800,15 +800,15 @@ class NativeClaudeMessageTest(TempState):
         me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
         decision, reason = self._check("bridge:remote-control", me, [])
         self.assertEqual(decision, "block")
-        self.assertIn("not a session xsm knows", reason)
+        self.assertIn("not a session on this machine", reason)
 
-    def test_a_socket_whose_only_owner_ended_is_held_as_not_running(self):
+    def test_a_socket_whose_only_owner_ended_passes_as_local(self):
         ended = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "ended",
                  "ref": "aaaaaa"}
         me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
         decision, reason = self._check("uds:/tmp/cc-socks/1.sock", me, [ended])
-        self.assertEqual(decision, "block")
-        self.assertIn("not running", reason)
+        self.assertEqual(decision, "pass")
+        self.assertIn("not a session xsm can check", reason)
 
     def test_a_nested_envelope_is_judged_by_the_outer_sender(self):
         from unittest import mock
@@ -821,7 +821,7 @@ class NativeClaudeMessageTest(TempState):
         self.assertEqual(parsed.attrs["from"], "uds:/tmp/cc-socks/9.sock")
         me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
         with mock.patch.object(receive.registry, "records", return_value=[]):
-            self.assertEqual(receive.check(parsed, me, {"strict_peers": False})[0], "block")
+            self.assertEqual(receive.check(parsed, me, {"strict_peers": False})[0], "pass")
 
     def test_a_header_over_a_claude_socket_cannot_claim_a_codex_sender(self):
         from unittest import mock
@@ -838,11 +838,11 @@ class NativeClaudeMessageTest(TempState):
         self.assertEqual(decision, "block")
         self.assertIn("not a Claude session", reason)
 
-    def test_a_stopped_sender_is_held(self):
+    def test_a_local_sender_whose_record_is_stale_passes(self):
         sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "stale",
                   "ref": "aaaaaa"}
         me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
-        self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", me, [sender])[0], "block")
+        self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", me, [sender])[0], "pass")
 
 
 class PluginPackagingTest(TempState):

@@ -319,6 +319,8 @@ reviewer@claude-5 에게 xsm send로 "정지 확인"이라고 보내고 출력�
 
 xsm을 거치지 않고 Claude의 세션 소켓에 직접 밀어 넣어, 수신 훅이 막는지 본다. 관찰 터미널에서 한다.
 
+기본값(`strict_peers` 거짓)에서는 이 기계의 소켓에서 온 헤더 없는 메시지를 xsm이 발신자를 모르면 **통과**시킨다(ADR-0013, 2026-09-30 개정). 이 항목은 차단 동작을 보는 것이므로 먼저 `~/.xsm/config.json`에 `"strict_peers": true`를 넣고, 끝나면 되돌린다. 넣지 않고 하면 B가 본문을 그대로 받는 것이 기대 결과다.
+
 ```bash
 cd $XSM_REPO
 B=$(xsm list --json | python3 -c "

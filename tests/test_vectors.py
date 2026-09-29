@@ -190,7 +190,8 @@ def _gate_case(case):
         elif message["kind"] == "envelope-only":
             # Claude's own SendMessage: from="uds:<socket>", from-name,
             # from-mode, no xsm header (measured with 2.1.284, ADR-0013).
-            attrs = ""
+            attrs = ' from="%s" from-name="stranger"' % message["raw_from"] \
+                if message.get("raw_from") else ""
             if message.get("from"):
                 from xsm import registry
                 sock = (registry.by_session("claude", message["from"]) or {}).get("socket")
