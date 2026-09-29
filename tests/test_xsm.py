@@ -747,6 +747,89 @@ class ListFromAPlainTerminalTest(TempState):
         self.assertNotIn("out-of-scope", printed)
 
 
+class NativeClaudeMessageTest(TempState):
+    """Claude's own SendMessage carries from="uds:<socket>" and no xsm header
+    (ADR-0013). check() names the sender by that socket and applies the scope
+    rule an xsm message meets."""
+
+    def _parsed(self, where):
+        from xsm import envelope
+        return envelope.parse('<cross-session-message from="%s" from-name="x" from-mode="bypass">'
+                              "\nhello\n</cross-session-message>" % where)
+
+    def _check(self, where, me, records):
+        from unittest import mock
+        from xsm import receive
+        with mock.patch.object(receive.registry, "records", return_value=records), \
+                mock.patch.object(receive.config, "scope_for", return_value=("project:ws", "")):
+            return receive.check(self._parsed(where), me, {"strict_peers": False})
+
+    def test_only_a_claude_receiver_takes_one(self):
+        sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "live",
+                  "ref": "aaaaaa", "name": "a", "alias": "claude"}
+        claude = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        codex = dict(claude, runtime="codex")
+        self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", claude, [sender])[0], "pass")
+        self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", codex, [sender])[0], "block")
+
+    def test_a_socket_two_sessions_claim_names_nobody(self):
+        sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "live",
+                  "ref": "aaaaaa"}
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        decision, reason = self._check("uds:/tmp/cc-socks/1.sock", me,
+                                       [sender, dict(sender, ref="cccccc")])
+        self.assertEqual(decision, "block")
+        self.assertIn("claimed by 2 sessions", reason)
+
+    def test_a_session_cleared_on_the_same_socket_is_not_a_second_owner(self):
+        sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "live",
+                  "ref": "aaaaaa"}
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        before_clear = dict(sender, ref="cccccc", state="ended")
+        self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", me,
+                                     [before_clear, sender])[0], "pass")
+
+    def test_a_repeated_from_cannot_replace_the_first(self):
+        from xsm import envelope
+        parsed = envelope.parse('<cross-session-message from="uds:/tmp/cc-socks/1.sock" '
+                                'from-name="a" from="uds:/tmp/cc-socks/2.sock" x">'
+                                "\nhello\n</cross-session-message>")
+        self.assertEqual(parsed.attrs["from"], "uds:/tmp/cc-socks/1.sock")
+
+    def test_a_sender_without_a_local_socket_is_held(self):
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        decision, reason = self._check("bridge:remote-control", me, [])
+        self.assertEqual(decision, "block")
+        self.assertIn("not a session xsm knows", reason)
+
+    def test_a_socket_whose_only_owner_ended_is_held_as_not_running(self):
+        ended = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "ended",
+                 "ref": "aaaaaa"}
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        decision, reason = self._check("uds:/tmp/cc-socks/1.sock", me, [ended])
+        self.assertEqual(decision, "block")
+        self.assertIn("not running", reason)
+
+    def test_a_nested_envelope_is_judged_by_the_outer_sender(self):
+        from unittest import mock
+        from xsm import envelope, receive
+        inner = envelope.build("hi", msg_id="m1", sender={"name": "x", "alias": "claude",
+                                                          "ref": "cccccc"}, scope="project:ws")
+        parsed = envelope.parse('<cross-session-message from="uds:/tmp/cc-socks/9.sock" '
+                                'from-name="z" from-mode="bypass">\n%s\n</cross-session-message>'
+                                % inner)
+        self.assertEqual(parsed.attrs["from"], "uds:/tmp/cc-socks/9.sock")
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        with mock.patch.object(receive.registry, "records", return_value=[]):
+            self.assertEqual(receive.check(parsed, me, {"strict_peers": False})[0], "block")
+
+    def test_a_stopped_sender_is_held(self):
+        sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "stale",
+                  "ref": "aaaaaa"}
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", me, [sender])[0], "block")
+
+
 class PluginPackagingTest(TempState):
     """The repository is also a Claude Code plugin (user decision, 2026-09-23:
     support both the plugin and `xsm install`). These pin what the manifests

@@ -198,7 +198,11 @@ xsm send agent@hostB --text "..."    # another machine (after xsm remote add)
 ### Receiving messages
 
 The receiving side runs nothing. A hook acts as the gate: it checks the scope and the sender, then puts the
-message directly into the session's prompt. A rejected message is held, not dropped.
+message directly into the session's prompt. A rejected message is held, not dropped. Claude's own
+cross-session messages (`SendMessage`, no xsm header) pass the same scope check: they arrive untouched when the
+sending session is one xsm knows and shares a scope with, and are held otherwise. Set `"strict_peers": true` in
+`~/.xsm/config.json` to hold every message without an xsm header instead (ADR-0013). Claude's own gate still
+decides first: a message it holds for a permission-mode mismatch never reaches xsm.
 
 ```bash
 xsm ledger                           # recent messages and their delivery state

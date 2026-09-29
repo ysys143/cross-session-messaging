@@ -188,8 +188,15 @@ def _gate_case(case):
         if message["kind"] == "raw":
             prompt = message.get("prompt", "")
         elif message["kind"] == "envelope-only":
-            prompt = "<%s from-mode=\"prompting\">\n%s\n</%s>" % (
-                envelope.TAG, message["body"], envelope.TAG)
+            # Claude's own SendMessage: from="uds:<socket>", from-name,
+            # from-mode, no xsm header (measured with 2.1.284, ADR-0013).
+            attrs = ""
+            if message.get("from"):
+                from xsm import registry
+                sock = (registry.by_session("claude", message["from"]) or {}).get("socket")
+                attrs = ' from="uds:%s" from-name="%s"' % (sock, message["from"])
+            prompt = "<%s%s from-mode=\"prompting\">\n%s\n</%s>" % (
+                envelope.TAG, attrs, message["body"], envelope.TAG)
         else:
             sender = records.get(message["from"]) or {
                 "name": "ghost", "alias": "claude-9", "ref": "ffffff",

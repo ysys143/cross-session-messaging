@@ -24,7 +24,9 @@ CONFIG = "config.json"
 HOMES = "homes.json"
 
 DEFAULT_CONFIG = {
-    "strict_peers": True,     # envelope without an xsm header is refused on receive
+    # True: every peer message without an xsm header is held. False: Claude's
+    # own messages pass when their sender is in scope (ADR-0013).
+    "strict_peers": False,
     "same_repo_scope": True,  # the default rule below
     "scopes": [],             # explicit cross-repo scopes
     "max_depth": 1,           # worker levels below a top-level session (1: workers spawn none)

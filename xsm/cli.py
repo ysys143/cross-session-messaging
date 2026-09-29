@@ -965,6 +965,7 @@ def cmd_doctor(args) -> int:
     print("hooks      %d decision(s) recorded, %d internal error(s)"
           % (report["decisions_seen"], report["hook_errors_recent"]))
     print("held       %d message(s)" % report["held"])
+    print("native     %s" % _native_note(report))
     for plan in report["installs"]:
         if plan.get("error"):
             print("install    %s: %s" % (plan["file"], plan["error"]))
@@ -1033,6 +1034,13 @@ def _stuck_lines(stuck: dict) -> list:
     return lines
 
 
+def _native_note(report: dict) -> str:
+    """How the gate treats Claude's own messages (no xsm header), ADR-0013."""
+    return ("Claude messages without an xsm header are all held (strict_peers)"
+            if report.get("strict_peers") else
+            "Claude messages without an xsm header pass when their sender is in scope")
+
+
 def _doctor_rows(report: dict) -> list:
     rows = [("state", _home_tilde(report["xsm_home"])),
             ("python", report["interpreter"] + ("" if report["interpreter_ok"] else " **TOO OLD**")),
@@ -1041,7 +1049,8 @@ def _doctor_rows(report: dict) -> list:
              % report["sessions"]),
             ("hooks", "%d decision(s) recorded, %d internal error(s)"
              % (report["decisions_seen"], report["hook_errors_recent"])),
-            ("held", "%d message(s)" % report["held"])]
+            ("held", "%d message(s)" % report["held"]),
+            ("native", _native_note(report))]
     for plan in report["installs"]:
         rows.append(("install", "%s: %s" % (_home_tilde(plan["file"]), plan["error"])
                      if plan.get("error") else "%s: %s" % (

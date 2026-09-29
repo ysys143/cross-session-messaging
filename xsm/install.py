@@ -901,6 +901,7 @@ def doctor() -> dict:
         "leftovers": {h["path"]: leftovers(h["path"]) for h in homes},
         "retired": {h["path"]: retired_commands(h["path"]) for h in homes},
         "xsm_on_path": shutil.which("xsm"),
+        "strict_peers": bool(config.load().get("strict_peers")),
         "stuck": stuck(),
         "limits": [
             "A peer message without the xsm envelope cannot be told apart from your own typing "

@@ -45,7 +45,13 @@ def new_id() -> str:
 
 
 def _fields(text: str) -> dict:
-    return {k: v.strip('"') for k, v in FIELD_RE.findall(text or "")}
+    """The first value of each key. A later repeat — say one smuggled in through
+    an unescaped quote in a name — must not replace the sender's own `from`
+    (review of ADR-0013, 2026-09-29)."""
+    out: dict = {}
+    for k, v in FIELD_RE.findall(text or ""):
+        out.setdefault(k, v.strip('"'))
+    return out
 
 
 def build(body: str, *, msg_id: str, sender: dict, scope: str, kind: str = "note",

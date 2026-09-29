@@ -257,7 +257,6 @@ xsm unlink ~/src/other-repo  # 누구나 지울 수 있다
 
 ```json
 {
-  "strict_peers": true,
   "same_repo_scope": true,
   "scopes": [
     {"id": "review", "members": [
@@ -267,6 +266,8 @@ xsm unlink ~/src/other-repo  # 누구나 지울 수 있다
   ]
 }
 ```
+
+`"strict_peers": true`를 넣으면 xsm 헤더가 없는 피어 메시지(Claude 자체의 `SendMessage`)를 발신자와 범위에 상관없이 모두 보류한다. 기본값은 거짓으로, 이때는 발신 세션을 소켓으로 찾아 xsm 메시지와 같은 범위 검사를 한다(ADR-0013).
 
 범위는 **보낼 때와 받을 때 두 번** 검사한다. 보낼 때 걸리면 메시지는 아예 나가지 않고, 받을 때 걸리면 본문을 보류 저장소에 남기고 차단한다.
 

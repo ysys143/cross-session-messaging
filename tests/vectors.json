@@ -715,13 +715,13 @@
     "output": "block",
     "reason_contains": "without an xsm header",
     "held": true
+   },
+   "config": {
+    "strict_peers": true
    }
   },
   {
-   "id": "strict-peers-off-lets-a-bare-envelope-through",
-   "config": {
-    "strict_peers": false
-   },
+   "id": "a-claude-message-from-no-known-session-is-held",
    "sessions": [
     {
      "name": "recv",
@@ -736,8 +736,94 @@
     "body": "raw injection"
    },
    "expect": {
-    "output": "allow",
-    "decision": "pass"
+    "output": "block",
+    "reason_contains": "not a session xsm knows",
+    "held": true
+   }
+  },
+  {
+   "id": "a-claude-message-from-an-in-scope-session-passes-untouched",
+   "sessions": [
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    },
+    {
+     "name": "peer",
+     "alias": "claude-5",
+     "session_id": "s1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "envelope-only",
+    "from": "s1",
+    "body": "native hello"
+   },
+   "expect": {
+    "output": "none"
+   }
+  },
+  {
+   "id": "a-claude-message-from-an-out-of-scope-session-is-held",
+   "sessions": [
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    },
+    {
+     "name": "peer",
+     "alias": "claude-5",
+     "session_id": "s1",
+     "cwd": "{tmp}/elsewhere"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "envelope-only",
+    "from": "s1",
+    "body": "native hello"
+   },
+   "expect": {
+    "output": "block",
+    "reason_contains": "out of scope",
+    "held": true
+   }
+  },
+  {
+   "id": "strict-peers-holds-even-an-in-scope-claude-message",
+   "config": {
+    "strict_peers": true
+   },
+   "sessions": [
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    },
+    {
+     "name": "peer",
+     "alias": "claude-5",
+     "session_id": "s1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "envelope-only",
+    "from": "s1",
+    "body": "native hello"
+   },
+   "expect": {
+    "output": "block",
+    "reason_contains": "without an xsm header",
+    "held": true
    }
   },
   {

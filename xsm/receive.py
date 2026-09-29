@@ -309,7 +309,7 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
         paths.append_jsonl("decisions.jsonl", {
             "event": "UserPromptSubmit", "runtime": runtime, "decision": "block",
             "reason": reason, "held": stored, "id": msg_id,
-            "receiver": me and me.get("name"), "from": parsed.header.get("from")})
+            "receiver": me and me.get("name"), "from": _claimed_sender(parsed)})
         if msg_id:
             ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
         if not stored:
@@ -323,7 +323,9 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
         span.set_attribute("xsm.receive.decision", "pass")
     paths.append_jsonl("decisions.jsonl", {
         "event": "UserPromptSubmit", "runtime": runtime, "decision": "pass", "reason": reason,
-        "id": msg_id, "receiver": me and me.get("name"), "from": parsed.header.get("from")})
+        "id": msg_id, "receiver": me and me.get("name"), "from": _claimed_sender(parsed)})
+    if not parsed.header:
+        return None                     # Claude's own framing stands (ADR-0013)
     outcome = _outcome(parsed)
     if msg_id:
         ledger.receipt(msg_id, "delivered", me, outcome=outcome)
@@ -341,8 +343,7 @@ def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
     cfg = cfg if cfg is not None else config.load()
     decision, reason = "pass", ""
     if not parsed.header:
-        decision, reason = ("block", "peer message without an xsm header") \
-            if cfg.get("strict_peers", True) else ("pass", "unheadered peer message allowed")
+        decision, reason = _check_native(parsed, me, cfg)
     elif not me:
         # Without knowing which session we are, scope cannot be checked at all.
         # Passing here would turn an unidentifiable session into an open door.
@@ -368,20 +369,75 @@ def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
         sender, why_not = _sender_record(parsed)
         if sender is None:
             decision, reason = "block", why_not
-        elif sender.get("state") not in ("live", "unknown"):
-            # A stopped session's pointer stays for days; its name must not
-            # carry a message now (S8-e, ADR-0009).
-            decision, reason = "block", "sender %r is not running (%s)" % (
-                parsed.header.get("from"), sender.get("state"))
-        elif sender.get("ref") in config.blocked() or (me.get("ref") in config.blocked()):
-            decision, reason = "block", "a blocked session is on this message"
         else:
-            scope, why = config.scope_for(sender, me, cfg)
-            if not scope:
-                decision, reason = "block", "out of scope: %s" % why
-            elif scope != parsed.header.get("scope"):
+            decision, reason, scope = _check_sender(sender, me, cfg, parsed.header.get("from"))
+            if decision == "pass" and scope != parsed.header.get("scope"):
                 decision, reason = "block", "scope changed since the message was sent"
     return decision, reason
+
+
+def _claimed_sender(parsed) -> str | None:
+    """Who the message says it is from, for the decision log: the xsm header's
+    name, else Claude's envelope name and socket (a native message has no header)."""
+    if parsed.header.get("from"):
+        return parsed.header["from"]
+    name, where = parsed.attrs.get("from-name"), parsed.attrs.get("from")
+    return " ".join(x for x in (name, where and "(%s)" % where) if x) or None
+
+
+def _check_sender(sender: dict, me: dict, cfg: dict, claimed) -> tuple:
+    """(decision, reason, scope) for a sender the registry knows: running, not
+    blocked, and in a scope with this session. The same for an xsm message and
+    for Claude's own (ADR-0013)."""
+    if sender.get("state") not in ("live", "unknown"):
+        # A stopped session's pointer stays for days; its name must not
+        # carry a message now (S8-e, ADR-0009).
+        return "block", "sender %r is not running (%s)" % (claimed, sender.get("state")), None
+    if sender.get("ref") in config.blocked() or (me.get("ref") in config.blocked()):
+        return "block", "a blocked session is on this message", None
+    scope, why = config.scope_for(sender, me, cfg)
+    if not scope:
+        return "block", "out of scope: %s" % why, None
+    return "pass", "", scope
+
+
+def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
+    """A peer message with Claude's envelope and no xsm header: Claude's own
+    SendMessage. Claude's gate has already let it in (it decides before this
+    hook runs, S1). It passes here when its sender is a Claude session xsm
+    knows and shares a scope with — the rule an xsm message meets, so
+    installing xsm no longer turns off messaging between a project's own
+    sessions (ADR-0013). Anything else is held as before: a sender we cannot
+    name cannot be checked.
+
+    Claude's envelope carries from="uds:<socket>", from-name and from-mode,
+    and no session id (measured with Claude 2.1.284, 2026-09-29). The socket
+    is the sender's own claim, as the ref in an xsm header is; it is taken
+    only when exactly one registered session owns it."""
+    if cfg.get("strict_peers", False):
+        return "block", "peer message without an xsm header (strict_peers)"
+    if not me:
+        return "block", "cannot identify this session, so scope was not checked"
+    if me.get("runtime") != "claude":
+        # Claude sessions are the only ones Claude's messaging reaches; the same
+        # text arriving through a Codex queue came some other way.
+        return "block", "peer message without an xsm header"
+    where = parsed.attrs.get("from") or ""
+    socket = where[len("uds:"):] if where.startswith("uds:") else ""
+    owners = [rec for rec in registry.records()
+              if socket and rec.get("runtime") == "claude" and rec.get("socket") == socket]
+    # /clear and --resume keep the process and its socket under a new session
+    # id; the old record reads as ended (superseded), and must not make the
+    # socket look shared (measured 2026-09-29).
+    running = [rec for rec in owners if rec.get("state") in ("live", "unknown")]
+    owners = running or owners[:1]
+    if len(owners) != 1:
+        return "block", ("Claude peer message from %s, which is %s" % (
+            where or "an unnamed sender",
+            "not a session xsm knows" if not owners else "claimed by %d sessions" % len(owners)))
+    decision, reason, _scope = _check_sender(owners[0], me, cfg, parsed.attrs.get("from-name"))
+    return decision, reason or "Claude peer message from %s@%s, in scope" % (
+        owners[0].get("name"), owners[0].get("alias"))
 
 
 def take_inbox(me: dict) -> list:

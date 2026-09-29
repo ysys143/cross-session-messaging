@@ -1,0 +1,89 @@
+# ADR-0013: Claude 네이티브 피어 메시지를 범위로 판정한다
+
+- 상태: Proposed
+- 관련 목표: G2, G5, C1
+- 작성일: 2026-09-29
+
+## 질문
+
+xsm 헤더 없이 들어오는 Claude 자체의 피어 메시지(`SendMessage`)를 xsm 수신 게이트가 어떻게 판정해야 하는가.
+
+## 맥락
+
+- 지금까지는 `strict_peers`의 기본값이 참이었다. 그래서 xsm 헤더가 없는 피어 메시지를 모두 차단하고 `held/`에 넣었다(PROTOCOL §5.1 2번). 헤더가 없으면 발신자를 레지스트리와 대조할 수 없고, 범위도 검사할 수 없다는 이유였다.
+- 그 결과 xsm을 설치하면 같은 프로젝트의 Claude 세션끼리 쓰던 네이티브 메시징이 전부 막혔다. Claude 게이트가 통과시킨 메시지, 사람이 "Deliver"까지 누른 메시지도 xsm 훅이 다시 보류했다. 확인하려면 CLI의 `xsm held list`를 봐야 했다. "있는 것 위에 얹는다"는 원칙(C1)과 어긋난다.
+- Claude 게이트는 xsm 훅보다 먼저 판정한다. 게이트가 보류한 메시지에는 훅이 실행되지 않는다. 2026-09-29 Claude 2.1.284로 재현했다: 보류된 메시지의 레저는 `queued`에 머물렀다(ADR-0009 맥락에도 같은 관찰이 있다). 따라서 xsm은 Claude 게이트를 완화할 수 없다. 할 수 있는 것은 그 위에 두 번째 층을 거느냐 마느냐뿐이다.
+- Claude 게이트의 판정 기준은 권한 모드 계열과 `crossSessionInbound` 설정이다(T2 §3). 프로젝트 범위, link·reach 동의는 모른다.
+- **실측(2026-09-29, Claude 2.1.284):** 네이티브 봉투의 속성은 `from="uds:/tmp/cc-socks/<pid>.sock"`, `from-name="<세션 이름>"`, `from-mode` 세 가지다. `from-session`은 **없다**. 이 속성들을 받는 세션의 transcript에서 직접 읽었다.
+- **실측:** `/clear`는 프로세스와 소켓을 유지한 채 세션 id만 바꾼다. 그래서 한 소켓을 두 레코드가 가진다. 옛 레코드는 레지스트리가 이미 `ended`(superseded)로 판정한다.
+
+## 선택지
+
+### A. 현행 유지: 헤더 없으면 전부 보류
+
+- 방식: `strict_peers=true`가 기본값이다.
+- 장점: "모든 피어 메시지는 xsm 범위 검사를 거친다"는 불변식이 가장 단단하다.
+- 단점: 네이티브 메시징이 조용히 꺼진다. Claude가 이미 통과시키거나 사람이 승인한 메시지를 다시 막는다.
+
+### B. 헤더 없는 메시지는 Claude 게이트에 맡긴다
+
+- 방식: 헤더 없는 메시지를 무조건 통과시킨다. 기존 `strict_peers=false` 동작과 같다. 다만 기존 동작은 xsm 발신 문맥을 붙여 통과시켰다.
+- 장점: 네이티브 메시징이 설치 전과 똑같다.
+- 단점: 범위 밖 세션이나 xsm이 모르는 발신자도 통과한다. `crossSessionInbound: accept`를 켠 환경에서는 네이티브 메시지를 검사하는 층이 하나도 없다.
+
+### C. 발신자를 소켓으로 식별하고 xsm 메시지와 같은 범위 검사를 한다
+
+- 방식:
+  1. 받는 쪽이 Claude 세션일 때만 적용한다.
+  2. 봉투의 `from="uds:<socket>"`를 레지스트리의 Claude 레코드 소켓과 대조한다. 대조할 때는 `live`와 `unknown` 레코드만 센다.
+  3. 정확히 한 세션과 맞으면, xsm 메시지와 같은 검사를 한다. 검사 항목은 생존, `deny` 목록, 공통 scope다.
+  4. 통과하면 xsm 문맥을 붙이지 않는다. Claude 자체 안내가 그대로 보인다.
+  5. 발신자를 모르거나, 여러 세션이 소켓을 주장하거나, 범위 밖이면 지금처럼 보류한다.
+  6. `strict_peers=true`는 "헤더 없으면 전부 보류"를 원하는 사람을 위한 선택지로 남긴다.
+- 장점: 같은 프로젝트(또는 link·reach·join으로 이어진) 세션끼리의 네이티브 메시징이 살아난다. 범위 불변식도 유지된다. `accept` 환경에서도 범위 밖 메시지는 막힌다.
+- 단점:
+  - 소켓 경로도 주장이다. 같은 uid의 프로세스는 소켓에 프레임을 직접 써서 봉투의 `from`도, xsm 헤더의 `ref`도 마음대로 적을 수 있다. 이 공격자에게는 두 경로의 신뢰 수준이 같다. 신뢰 경계는 여전히 uid다(ADR-0009).
+  - 반대로 프롬프트 인젝션을 당한 모델이 `SendMessage` 본문에 남의 `ref`를 담은 xsm 헤더를 쓰는 경우에는 네이티브 경로가 더 강하다. 봉투의 `from`은 Claude가 채우는 값이기 때문이다. 헤더 경로는 이 `from`을 보지 않고 `ref`만 믿는다. 이는 이번 변경 전부터 있던 약점이다. 후속으로, 헤더 경로에서도 봉투의 `uds:` 소켓과 발신 레코드의 소켓이 일치해야 통과시키는 강화를 검토한다.
+  - xsm 훅이 없는 세션, 원격 머신, Remote Control, 클라우드 세션이 보낸 네이티브 메시지는 소켓을 대조할 수 없어 계속 보류된다.
+
+### D. `from-session`으로 식별한다
+
+- 방식: 네이티브 봉투의 세션 id로 레지스트리를 찾는다.
+- 기각: 실측 결과 네이티브 봉투에 `from-session`이 없다.
+
+## 근거
+
+- 실측 스크립트: 이 세션(bypass)에서 tmux로 띄운 Claude 2.1.284 세션(auto)으로 네이티브 `SendMessage`를 보냈다.
+  - link 전: `out of scope`로 보류됐다.
+  - link 후: `Claude peer message from rename-repo-xsm-release@claude, in scope`로 통과했고, 받는 세션이 네이티브로 보낸 답장도 이쪽 게이트를 통과했다.
+  - link를 해제한 뒤: 다시 `out of scope`로 보류됐다.
+  - `/clear`를 거친 세션은 처음에 "claimed by 2 sessions"로 보류됐다. 종료된 레코드를 소켓 주인에서 빼도록 고친 뒤 통과했다.
+- 레퍼런스: `docs/references/supplement/T2-claude-inbound-policy.md` §3 결과표.
+- 적합성: `tests/vectors.json` gate 벡터.
+  - `a-claude-message-from-an-in-scope-session-passes-untouched`
+  - `a-claude-message-from-an-out-of-scope-session-is-held`
+  - `a-claude-message-from-no-known-session-is-held`
+  - `strict-peers-holds-even-an-in-scope-claude-message`
+
+## 남는 한계
+
+- xsm은 Claude 게이트를 완화하지 못한다. 권한 모드가 다른 세션 사이의 보류를 없애려면 받는 쪽에 `crossSessionInbound: accept`를 두거나 모드 계열을 맞춰야 한다. 이 ADR은 `accept`를 켰을 때도 범위 검사가 남게 할 뿐이다.
+- 봉투 없이 들어온 피어 텍스트는 훅에서 사람 입력과 구분되지 않는다(S8-g2). `accept` 환경에서 이 텍스트를 막는 층은 없다.
+- xsm 훅을 끄거나 지우면 `accept`만 남는다.
+- **업그레이드 영향:** 기본값이 바뀌었다. `config.json`에 `strict_peers`를 적지 않은 기존 설치도 업그레이드하는 즉시 새 규칙을 따른다. `xsm doctor`의 `native` 줄이 지금 적용 중인 규칙을 보여 준다. 이전 동작을 원하면 `"strict_peers": true`를 적는다.
+- `/clear`를 거친 세션을 구분하는 방법은 Claude의 `sessions/<pid>.json`에 적힌 `sessionId`에 기댄다(registry의 superseded 판정). 이 파일의 형식이 바뀌면 두 레코드가 모두 살아 있는 것으로 보여 "claimed by 2 sessions"로 보류된다. 보류하는 방향으로 실패하므로 안전하다.
+- 봉투 속성에 같은 키가 두 번 나오면 첫 값을 쓴다. 이름에 이스케이프되지 않은 따옴표가 들어가 뒤쪽 `from`이 끼어드는 경우를 막는다. Claude가 `from-name` 안의 `"`를 이스케이프하는지는 확인하지 않았다.
+- Codex 수신 쪽은 바뀌지 않는다. Codex 대기열로 들어온 헤더 없는 봉투는 여전히 보류된다. Codex는 헤더 없는 큐 메시지를 사람 입력과 구분하지 못하는데, 이 문제는 그대로 남는다(ADR-0009).
+
+## 토론 기록
+
+| 라운드 | 참가자 | 입장 | 근거 | 반론/응답 |
+|---|---|---|---|---|
+| 1 | 사용자 | 네이티브 메시징을 기본으로 끄고 xsm이 승인 게이트를 거는 것이 괜찮은지 고민 | 장단점이 있음 | — |
+| 1 | Claude | C 제안 | 이중 게이트와 C1 위반, 범위 불변식은 소켓 식별로 유지 가능 | 소켓도 주장이라는 반론 → 헤더 `ref`와 같은 신뢰 수준 |
+| 2 | 사용자 | C로 네이티브를 살리고 권한도 완화할 수 있는지 질문 | — | 네이티브는 대부분 살아남, Claude 게이트 완화는 `accept`나 모드 통일로만 가능 |
+| 3 | critic 리뷰(Claude) | 조건부 수락 | 막을 결함 없음. 판정이 어긋나면 모두 보류 쪽으로 실패함 | 속성 중복, 로그의 발신자 누락, 업그레이드 안내, ADR 문구 → 반영 |
+
+## 결정
+
+(Accepted 이후 작성)
