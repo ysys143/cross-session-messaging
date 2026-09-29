@@ -16,3 +16,4 @@ dist/
 node_modules/
 evals/results/
 CLAUDE.local.md
+.claude/pr-policy.json
