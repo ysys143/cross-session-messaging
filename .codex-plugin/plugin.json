@@ -1,0 +1,26 @@
+{
+  "name": "xsm",
+  "version": "0.4.5",
+  "description": "Message the other Claude Code and Codex sessions on this machine: list them, send a task, answer one, start workers, and see what was delivered.",
+  "author": {
+    "name": "jaesolshin"
+  },
+  "repository": "https://github.com/ysys143/xsm",
+  "license": "MIT",
+  "keywords": [
+    "messaging",
+    "sessions",
+    "codex",
+    "orchestration",
+    "multi-agent"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json",
+  "mcpServers": "./hooks/codex-mcp.json",
+  "interface": {
+    "displayName": "Cross-Session Messaging",
+    "shortDescription": "Message the other Claude Code and Codex sessions on this machine.",
+    "developerName": "jaesolshin",
+    "category": "Productivity"
+  }
+}

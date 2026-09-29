@@ -1,0 +1,27 @@
+{
+  "description": "Registers this Codex session so others can address it, and checks every peer message before it reaches the model (ADR-0001, PROTOCOL 5.1).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/xsm-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/xsm-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

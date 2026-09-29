@@ -25,6 +25,8 @@ xsm은 다양한 환경에서 실행되는 Claude Code와 Codex 세션 간의 �
 ```
 ├── .claude-plugin/               # 플러그인·마켓플레이스 매니페스트
 ├── hooks/hooks.json, .mcp.json   # 플러그인이 제공하는 훅과 MCP 서버
+├── .codex-plugin/, .agents/plugins/   # Codex용 같은 매니페스트
+├── hooks/codex-hooks.json, codex-mcp.json   # Codex 플러그인의 훅과 MCP 서버
 ├── bin/xsm                       # 런처 (PYTHONPATH 설정 후 python3 -m xsm)
 ├── xsm/                          # 구현 전체 (Python, stdlib만)
 │   ├── cli.py                   # 서브커맨드 전부
@@ -70,7 +72,21 @@ macOS와 Linux에서 동작합니다(Unix 소켓, `ps`, `/dev/tty`, tmux에 기�
 훅·스킬·MCP 서버·`bin/`이 함께 들어오고, `plugin.json`의 `version`이 오를 때 갱신됩니다.
 세션 안에서는 `/xsm list`, `/xsm who`처럼 부릅니다(같은 이름의 개인 스킬이 있으면 `/xsm:xsm list`). 플러그인을 끄면 훅도 함께 꺼집니다.
 
-**Codex, 그리고 플러그인을 쓰지 않는 Claude 홈: `xsm install`.**
+**Codex: 플러그인** (권장). 같은 저장소가 Codex 마켓플레이스이기도 합니다.
+
+```bash
+codex plugin marketplace add ysys143/xsm
+codex plugin add xsm@xsm
+```
+
+훅 두 개·스킬·MCP 서버가 함께 들어옵니다. Codex는 플러그인 훅을 신뢰해야 실행하므로, 첫 세션에서 `/hooks`의
+"Trust all and continue"를 고르세요. Codex는 플러그인의 `bin/`을 PATH에 넣지 않으므로, 세션이 시작될 때마다
+`~/.local/bin/xsm`을 플러그인에 링크합니다. 그 자리에 xsm 플러그인 폴더가 아닌 곳을 가리키는 링크나 파일이 있으면 그대로 둡니다.
+갱신은 `codex plugin marketplace upgrade xsm` 후 `codex plugin add xsm@xsm`을 다시 실행합니다. 세션 안에서는 `$xsm list`처럼 부릅니다.
+이 홈에 전에 `xsm install --codex-home`으로 설치한 적이 있다면, 플러그인을 추가한 뒤 `xsm install --refresh`를 한 번 실행하세요.
+그 설치가 남긴 훅 그룹·MCP 항목·스킬 링크를 지웁니다. 남겨 두면 플러그인 것과 나란히 돕니다.
+
+**플러그인 없이: `xsm install`.**
 
 ```bash
 bin/xsm install --claude-home <my-claude-config-dir>          # 플러그인 대신 직접 설치할 때
@@ -85,14 +101,14 @@ bin/xsm doctor                                                # 설치 상태, �
 없으므로 `--refresh`가 아니면 홈을 하나 이상 적어야 합니다. 홈을 여러 개 쓴다면 `--claude-home`을 반복해 한
 명령으로 묶습니다.
 
-한 Claude 홈에 플러그인과 직접 설치가 같이 있으면 훅이 두 번 돌아 위험합니다. `xsm install`은 그런 홈을
+한 홈(Claude든 Codex든)에 플러그인과 직접 설치가 같이 있으면 훅이 두 번 돌아 위험합니다. `xsm install`은 그런 홈을
 거부합니다(`--force`로 넘길 수 있음). 직접 설치한 사본은 저장소가 바뀌어도 자동으로 따라가지 않으므로,
 `xsm doctor`가 낡았다고 알려 주면 `xsm install --refresh`로 갱신합니다.
 
 `install --codex-home`은 `bin/xsm`을 `~/.local/bin/xsm`에 자동으로 링크합니다. `~/.local/bin`이 PATH에 있는지 확인하세요.
 플러그인 없이 `--claude-home`만 지정해 직접 설치하면 `bin/xsm`을 PATH에 수동으로 링크해야 합니다.
 플러그인 갱신 후에는 새 버전의 `bin/xsm`으로 `install --refresh`를 실행하세요.
-Claude 플러그인은 세션 안에서 PATH를 자동으로 설정합니다. 리눅스에서는 X.Org의 세션 관리자도 이름이 `xsm`입니다(x11-session-utils
+Claude 플러그인은 세션 안에서 PATH를 자동으로 설정하고, Codex 플러그인은 위의 링크를 유지합니다. 리눅스에서는 X.Org의 세션 관리자도 이름이 `xsm`입니다(x11-session-utils
 패키지). 깔려 있다면 `command -v xsm`으로 이쪽이 먼저 잡히는지 확인하세요.
 
 ### 세션 등록

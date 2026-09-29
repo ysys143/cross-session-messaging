@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from contextlib import nullcontext
@@ -193,6 +194,24 @@ def handle(data: dict) -> dict | None:
         return _handle(data)
 
 
+def _link_cli() -> None:
+    """Keep ~/.local/bin/xsm on the Codex plugin that runs this hook.
+
+    Codex, unlike Claude, puts no plugin bin/ on PATH, and the skill runs `xsm`
+    by name (measured with Codex 0.158, 2026-09-29). A plugin has no install
+    step of its own, so session start is where the link is made, and where it
+    follows the plugin to a new version. Only from a plugin copy: a checkout's
+    hook leaves PATH to the person, and install_cli() itself moves nothing but
+    a link into another plugin version."""
+    from . import install
+    if not re.search(install.PLUGIN_CACHE, install.REPO + "/"):
+        return
+    try:
+        install.install_cli()
+    except OSError:
+        pass                            # a read-only ~/.local/bin must not stop the session
+
+
 def _handle(data: dict) -> dict | None:
     runtime = detect_runtime(data)
     if data.get("hook_event_name") == "PermissionRequest":
@@ -223,6 +242,8 @@ def _handle(data: dict) -> dict | None:
         me = registry.by_session(runtime, me["session_id"]) or me
     if data.get("hook_event_name") == "SessionStart":
         housekeeping.maybe_prune()
+        if runtime == "codex":
+            _link_cli()
         return None
     if data.get("hook_event_name") != "UserPromptSubmit":
         return None

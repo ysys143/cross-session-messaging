@@ -1,8 +1,8 @@
 """Installing the hooks into a home without disturbing what is already there.
 
-These files are crowded: a Claude settings.json on this machine already holds
-Orca, cctrace and the user's own prompt hooks, and ~/.codex/hooks.json holds
-Orca's. So the installer never rewrites a hook it did not write. It appends
+These files are shared: a Claude settings.json or a Codex hooks.json often
+already holds hooks from other tools and from the person themselves. So the
+installer never rewrites a hook it did not write. It appends
 one group per event, marks the command with a trailing `#xsm-hook`, and
 removes exactly the marked groups on uninstall. Every write is preceded by a
 timestamped backup and followed by a re-parse.
@@ -166,6 +166,13 @@ def install_cli() -> str:
         if not re.search(PLUGIN_CACHE + "bin/xsm$", source) or (
                 os.path.exists(source) and not os.path.isfile(os.path.join(repo, "xsm", "install.py"))):
             return "foreign"
+        # Every Codex home's session start runs this, and so does the Claude
+        # plugin's copy of the code: a home still on an older version must not
+        # take the one link back from a newer one (review, 2026-09-29).
+        mine = re.search(PLUGIN_CACHE, os.path.realpath(REPO) + "/")
+        if os.path.exists(source) and mine and \
+                version_key(os.path.basename(repo)) > version_key(os.path.basename(os.path.realpath(REPO))):
+            return "newer"
         os.unlink(target)
         state = "replaced"
     elif os.path.lexists(target):
@@ -173,6 +180,11 @@ def install_cli() -> str:
     os.makedirs(os.path.dirname(target), exist_ok=True)
     os.symlink(launcher(), target)
     return state
+
+
+def version_key(version: str) -> list:
+    """Sorts "0.4.10" after "0.4.9", which text order does not."""
+    return [(0, int(x)) if x.isdigit() else (1, x) for x in re.split(r"[.-]", version)]
 
 
 def plugin_installed(home: str) -> str | None:
@@ -184,7 +196,61 @@ def plugin_installed(home: str) -> str | None:
     and refuse the message as a duplicate — so each install path checks for
     the other."""
     entry = _plugin_entry(home)
-    return None if entry is None else entry.get("version") or "installed"
+    if entry is not None:
+        return entry.get("version") or "installed"
+    codex = codex_plugin(home)
+    return codex["version"] if codex else None
+
+
+def codex_plugin(home: str) -> dict | None:
+    """{"key", "version", "root"} for the xsm plugin enabled in a Codex home, or None.
+
+    Codex records an installed plugin as [plugins."<name>@<marketplace>"] in
+    config.toml and copies it to plugins/cache/<marketplace>/<name>/<version>
+    (Codex 0.158, `codex plugin add`, measured 2026-09-29)."""
+    home = os.path.expanduser(home)
+    for key, enabled in _codex_plugin_entries(_read_text(os.path.join(home, "config.toml")) or ""):
+        name, _, market = key.partition("@")
+        if name != PLUGIN_NAME or not market or not enabled:
+            continue
+        versions = sorted(glob.glob(os.path.join(home, "plugins", "cache", market,
+                                                 PLUGIN_NAME, "*", ".codex-plugin")),
+                          key=lambda p: version_key(os.path.basename(os.path.dirname(p))))
+        if not versions:
+            continue
+        root = os.path.dirname(versions[-1])
+        return {"key": key, "version": os.path.basename(root), "root": root}
+    return None
+
+
+def _codex_plugin_entries(text: str) -> list:
+    """[(plugin key, enabled)] from a Codex config.toml. tomllib where there is
+    one; without it (3.9) only the form Codex writes is read, and an `enabled`
+    this reader cannot parse counts as off, as in codex_hook_states()."""
+    try:
+        import tomllib
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            plugins = tomllib.loads(text).get("plugins") or {}
+        except tomllib.TOMLDecodeError:
+            return []
+        return [(k, v.get("enabled", True) is not False) for k, v in plugins.items()
+                if isinstance(v, dict)]
+    out = []
+    for match in re.finditer(r'^\[plugins\.(?:"([^"]+)"|\'([^\']+)\')\]\s*(?:#.*)?$', text, re.M):
+        body = text[match.end():].split("\n[", 1)[0]
+        switch = re.findall(r"^\s*[\"']?enabled[\"']?\s*=\s*(\S+)", body, re.M)
+        out.append((match.group(1) or match.group(2), all(v == "true" for v in switch)))
+    return out
+
+
+def codex_direct_mcp(home: str) -> bool:
+    """Whether `xsm install` left its MCP server in this Codex home's config.toml.
+    `codex mcp get xsm` cannot tell: it shows the plugin's server as well."""
+    text = _read_text(os.path.join(os.path.expanduser(home), "config.toml")) or ""
+    return bool(re.search(r'^\[mcp_servers\.(?:%s|"%s")\]' % (MCP_NAME, MCP_NAME), text, re.M))
 
 
 def _plugin_entry(home: str) -> dict | None:
@@ -218,20 +284,53 @@ def plugin_outdated_note(missing: list) -> str:
 
 
 def leftovers(home: str) -> list:
-    """Files an earlier `xsm install` left in a Claude home that has since
-    moved to the plugin. The plugin carries its own skill, so these are dead
-    weight — and a personal skills/xsm takes the bare `/xsm` from the plugin's."""
+    """Files an earlier `xsm install` left in a home that has since moved to
+    the plugin. The plugin carries its own skill, so these are dead weight — and
+    a personal skills/xsm takes the bare `/xsm` from the plugin's. In a Codex
+    home the hook groups and the MCP entry are left over too, and those run a
+    second time beside the plugin's: the second receive gate sees the first
+    one's receipt and refuses the message (review, 2026-09-29)."""
     if not plugin_installed(home):
         return []
     skill = os.path.join(home, "skills", "xsm")
-    return [skill] if os.path.exists(skill) else []
+    out = [skill] if os.path.lexists(skill) else []
+    if codex_plugin(home):
+        hooks = os.path.join(home, "hooks.json")
+        data = paths.read_json(hooks, {}) or {}
+        if any(_is_ours(g) for groups in (data.get("hooks") or {}).values()
+               if isinstance(groups, list) for g in groups):
+            out.append(hooks)
+        if codex_direct_mcp(home):
+            out.append(os.path.join(home, "config.toml") + " [mcp_servers.%s]" % MCP_NAME)
+    return out
+
+
+def clear_codex_leftovers(home: str) -> list:
+    """Remove what leftovers() finds in a Codex home on the plugin; what was removed."""
+    done = []
+    if not codex_plugin(home):
+        return done
+    found = leftovers(home)
+    if os.path.join(home, "hooks.json") in found and remove(home, "codex").get("removed"):
+        done.append("hook groups")
+    if codex_direct_mcp(home) and remove_mcp(home, "codex"):
+        done.append("MCP server")
+    skill = os.path.join(home, "skills", "xsm")
+    state, _ = skill_state(home)
+    if state in ("linked", "link-stale") or (os.path.islink(skill) and re.search(
+            PLUGIN_CACHE, os.path.realpath(skill) + "/")):
+        os.unlink(skill)
+        done.append("skill link")
+    elif remove_skill(home):
+        done.append("skill copy")
+    return done
 
 
 def stale_copies(home: str, runtime: str = "claude") -> list:
     """Files we installed into a home that no longer match the repository.
     A copied skill in a second profile sat eight versions behind for a day
     before anyone noticed (2026-09-23), because nothing compared them."""
-    if runtime == "claude" and plugin_installed(home):
+    if plugin_installed(home):
         return []                       # the plugin keeps itself current
     state, detail = skill_state(home)
     return [detail] if state in ("copy-stale", "link-stale") else []
@@ -337,8 +436,8 @@ def codex_hook_hash(event: str, group: dict, handler: dict) -> str | None:
     additionalContextLimit kept only where the event can emit context and it
     is not the 2500 default. That value goes through TOML to JSON with sorted
     keys and no spaces, then sha256 (codex-rs/config/src/fingerprint.rs,
-    version_for_toml). Checked 2026-09-28 against every trusted_hash in three
-    real Codex homes on this machine: 15 of 15 equal."""
+    version_for_toml). Checked 2026-09-28 against the trusted_hash of 15 hooks
+    Codex had recorded in real homes: all equal."""
     if (not isinstance(handler, dict) or handler.get("type") != "command"
             or event not in CODEX_EVENT_KEYS or not isinstance(handler.get("command"), str)):
         return None
@@ -466,6 +565,23 @@ def codex_trust(home: str, approvals: bool = False) -> dict:
                 ok = (ok and state.get("enabled") is not False and current is not None
                       and state.get("trusted_hash") == current)
             out[event] = out.get(event, True) and ok
+    plugin = codex_plugin(home)
+    if plugin:
+        # With the plugin, its hooks are the ones that count; hook groups an
+        # earlier `xsm install` left are leftovers() and cleared on refresh.
+        out = {}
+        # The plugin's hooks are keyed by plugin and file, not by path, and
+        # hashed the same way (checked against Codex 0.158, 2026-09-29).
+        rel = "hooks/codex-hooks.json"
+        data = paths.read_json(os.path.join(plugin["root"], rel), {}) or {}
+        for event in events:
+            for index, group in enumerate((data.get("hooks") or {}).get(event, [])):
+                for at, handler in enumerate(group.get("hooks", [])):
+                    key = "%s:%s:%s:%d:%d" % (plugin["key"], rel, CODEX_EVENT_KEYS[event], index, at)
+                    state = states.get(key, {})
+                    current = codex_hook_hash(event, group, handler)
+                    out[event] = (out.get(event, True) and state.get("enabled") is not False
+                                  and current is not None and state.get("trusted_hash") == current)
     return out
 
 
@@ -777,14 +893,12 @@ def doctor() -> dict:
         "held": len(os.listdir(paths.path(paths.HELD))) if os.path.isdir(paths.path(paths.HELD)) else 0,
         "version": plugin_version(),
         "tmux": shutil.which("tmux"),
-        "plugins": {h["path"]: plugin_installed(h["path"]) for h in homes
-                    if h.get("runtime") == "claude"},
+        "plugins": {h["path"]: plugin_installed(h["path"]) for h in homes},
         "plugin_missing_hooks": {h["path"]: plugin_missing_hooks(h["path"]) for h in homes
                                  if h.get("runtime") == "claude"},
         "stale": {h["path"]: stale_copies(h["path"], h.get("runtime") or "claude")
                   for h in homes},
-        "leftovers": {h["path"]: leftovers(h["path"]) for h in homes
-                      if h.get("runtime") == "claude"},
+        "leftovers": {h["path"]: leftovers(h["path"]) for h in homes},
         "retired": {h["path"]: retired_commands(h["path"]) for h in homes},
         "xsm_on_path": shutil.which("xsm"),
         "stuck": stuck(),

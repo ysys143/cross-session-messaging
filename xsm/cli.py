@@ -795,8 +795,6 @@ def cmd_install(args) -> int:
               "or refresh the ones already installed: xsm install --refresh", file=sys.stderr)
         return USAGE
     for home, runtime in list(targets):
-        if runtime != "claude":
-            continue
         plugin = install.plugin_installed(home)
         if not plugin or args.force:
             continue
@@ -809,6 +807,11 @@ def cmd_install(args) -> int:
                 _home_tilde(home), plugin, install.plugin_outdated_note(missing) if missing
                 else "keeps it up to date"))
             _print_retired(home, install.remove_retired(home))
+            if runtime == "codex":
+                cleared = install.clear_codex_leftovers(home)
+                if cleared:
+                    print("  removed what an earlier `xsm install` left beside the plugin: %s"
+                          % ", ".join(cleared))
             targets.remove((home, runtime))
             continue
         print("refused: %s has the xsm plugin (%s), which brings its own hooks; installing "
@@ -984,8 +987,13 @@ def cmd_doctor(args) -> int:
         if files:
             print("stale      %s: %d file(s) behind the repo; refresh with `xsm install --refresh`"
                   % (_home_tilde(home), len(files)))
+    runtimes = {h["path"]: h.get("runtime") for h in config.homes()}
     for home, files in (report.get("leftovers") or {}).items():
-        if files:
+        if files and runtimes.get(home) == "codex":
+            print("leftover   %s: %s from an earlier `xsm install` beside the plugin; its hooks run "
+                  "twice and the second refuses every message. Remove with `xsm install --refresh`"
+                  % (_home_tilde(home), ", ".join(_home_tilde(f) for f in files)))
+        elif files:
             print("leftover   %s: a skills/xsm from an earlier `xsm install`; bare /xsm goes to "
                   "it, not to the plugin. Remove with `xsm uninstall --claude-home %s`"
                   % (_home_tilde(home), _home_tilde(home)))
@@ -1044,6 +1052,18 @@ def _doctor_rows(report: dict) -> list:
         if missing:
             rows.append(("plugin", "%s: %s" % (_home_tilde(home),
                                                install.plugin_outdated_note(missing))))
+    for home, files in (report.get("stale") or {}).items():
+        if files:
+            rows.append(("stale", "%s: %d file(s) behind; refresh with `xsm install --refresh`"
+                         % (_home_tilde(home), len(files))))
+    runtimes = {h["path"]: h.get("runtime") for h in config.homes()}
+    for home, files in (report.get("leftovers") or {}).items():
+        if files:
+            rows.append(("leftover", "%s: %s from an earlier `xsm install` beside the plugin; "
+                         "remove with %s" % (
+                             _home_tilde(home), ", ".join(_home_tilde(f) for f in files),
+                             "`xsm install --refresh`" if runtimes.get(home) == "codex"
+                             else "`xsm uninstall --claude-home %s`" % _home_tilde(home))))
     for note in report["limits"]:
         rows.append(("limit", note))
     return rows

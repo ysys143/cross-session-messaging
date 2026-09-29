@@ -25,6 +25,8 @@ xsm lets Claude Code and Codex sessions running in different environments talk t
 ```
 ├── .claude-plugin/               # plugin and marketplace manifests
 ├── hooks/hooks.json, .mcp.json   # hooks and MCP server the plugin provides
+├── .codex-plugin/, .agents/plugins/   # the same for Codex
+├── hooks/codex-hooks.json, codex-mcp.json   # hooks and MCP server of the Codex plugin
 ├── bin/xsm                       # launcher (sets PYTHONPATH, then python3 -m xsm)
 ├── xsm/                          # the whole implementation (Python, stdlib only)
 │   ├── cli.py                   # every subcommand
@@ -74,7 +76,22 @@ This brings in the hooks, the skill, the MCP server and `bin/`, and updates when
 goes up. Inside a session, call it as `/xsm list`, `/xsm who` (if you have a personal skill with the same
 name, use `/xsm:xsm list`). Disabling the plugin disables the hooks too.
 
-**Codex, and Claude homes without the plugin: `xsm install`.**
+**Codex: plugin** (recommended). The same repository is a Codex marketplace too.
+
+```bash
+codex plugin marketplace add ysys143/xsm
+codex plugin add xsm@xsm
+```
+
+This brings in the two hooks, the skill and the MCP server. Codex runs a plugin's hooks only once you trust
+them: in the first session, choose "Trust all and continue" under `/hooks`. Codex does not put a plugin's
+`bin/` on PATH, so each session start links `~/.local/bin/xsm` to the plugin; a link there that points
+anywhere but an xsm plugin folder is left alone. To update, run `codex plugin marketplace upgrade xsm` and
+`codex plugin add xsm@xsm` again. Inside a session, call it as `$xsm list`. If this home had
+`xsm install --codex-home` before, run `xsm install --refresh` once after adding the plugin: it removes the hook
+groups, the MCP entry and the skill link that install left, which would otherwise run beside the plugin's.
+
+**Without a plugin: `xsm install`.**
 
 ```bash
 bin/xsm install --claude-home <my-claude-config-dir>          # install directly instead of the plugin
@@ -89,14 +106,14 @@ bin/xsm doctor                                                # install state, s
 apart from `--refresh` you must name at least one. If you use several homes, repeat `--claude-home` to cover
 them in one command.
 
-If one Claude home has both the plugin and a direct install, the hooks run twice, which is dangerous.
+If one home (Claude or Codex) has both the plugin and a direct install, the hooks run twice, which is dangerous.
 `xsm install` refuses such a home (`--force` overrides this). A direct-install copy does not follow changes
 to the repository by itself, so when `xsm doctor` reports it stale, update it with `xsm install --refresh`.
 
 `install --codex-home` automatically links `bin/xsm` at `~/.local/bin/xsm`; make sure `~/.local/bin` is on
 your PATH. With only `--claude-home` and no plugin, link `bin/xsm` onto PATH yourself.
 After a plugin update, run `install --refresh` using the new version's `bin/xsm`.
-The Claude plugin supplies PATH inside sessions automatically. On Linux, X.Org's session manager is also called
+The Claude plugin supplies PATH inside sessions automatically, and the Codex plugin keeps the link above. On Linux, X.Org's session manager is also called
 `xsm` (package x11-session-utils); if it is installed, check with `command -v xsm` that this one comes first.
 
 ### Session registration

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "xsm": {
+      "command": "./hooks/xsm-mcp",
+      "cwd": "."
+    }
+  }
+}
