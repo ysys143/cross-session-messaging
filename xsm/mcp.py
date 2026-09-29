@@ -12,7 +12,10 @@ a resident process (ADR-0003). It exists for two reasons (ADR-0005):
   here too.
 
 The session is identified by this process's ancestry: the nearest `claude` or
-`codex` ancestor is the session, and its registry record is the author.
+`codex` ancestor is the session, and its registry record is the author. Codex
+threads of one CODEX_HOME share one ancestor (the app-server daemon), so a
+Codex call names its thread in `params._meta.threadId` and that decides; with
+several live threads and no such id, the call is refused (Server.session).
 """
 from __future__ import annotations
 
@@ -220,6 +223,7 @@ class Server:
         self.inp, self.out = inp, out
         self.client_caps = {}
         self.client_name = None         # clientInfo.name from initialize
+        self.call_thread = None         # the thread id the current tools/call names, if it does
         self.next_id = 0
 
     # -- transport ----------------------------------------------------------------
@@ -255,6 +259,32 @@ class Server:
         if not pid:
             return None
         rows = [r for r in registry.records() if r.get("pid") == pid and r.get("state") == "live"]
+        if self.call_thread and any(r.get("runtime") == "codex" for r in rows):
+            # Codex 0.158 names the calling thread in every tools/call
+            # (`params._meta.threadId`; measured 2026-09-29 with two TUIs on one
+            # daemon: one MCP server process per thread, all children of the
+            # daemon, so the pid alone names all of them). Exact or nothing: a
+            # thread with no live record here (a sub-agent's, or one whose hook
+            # has not run) is not signed as its neighbour.
+            for r in rows:
+                if r.get("runtime") == "codex" and r.get("session_id") == self.call_thread:
+                    return r
+            raise channel.ChannelError(
+                "this call comes from Codex thread %s, which xsm has no live record of, so it "
+                "will not act as another thread; it is registered by its hooks at its next "
+                "prompt (trust them in /hooks first)" % self.call_thread)
+        codex = [r for r in rows if r.get("runtime") == "codex"]
+        if len(codex) > 1:
+            # Several threads share this pid (one app-server daemon per
+            # CODEX_HOME) and the client did not say which one is calling: the
+            # newest record was the wrong thread in that case (measured
+            # 2026-09-29: the first TUI's call was signed as the second's).
+            # Scope, reach grants and consent hang on the sender, so refuse.
+            raise channel.ChannelError(
+                "%d live Codex threads share this process and this Codex did not say which one "
+                "is calling, so xsm cannot tell who you are; run the same command with the "
+                "`xsm` shell command, or update Codex (0.158 names the thread in each call)"
+                % len(codex))
         return max(rows, key=lambda r: r.get("updated", 0)) if rows else None
 
     # -- tools --------------------------------------------------------------------
@@ -592,6 +622,9 @@ class Server:
                 self.send({"id": mid, "result": {"tools": TOOLS}})
             elif method == "tools/call":
                 params = msg.get("params") or {}
+                meta = params.get("_meta")
+                thread = meta.get("threadId") if isinstance(meta, dict) else None
+                self.call_thread = thread if isinstance(thread, str) and thread else None
                 try:
                     text, error = self.call(params.get("name"), params.get("arguments") or {}), False
                 except (channel.ChannelError, EOFError) as exc:
