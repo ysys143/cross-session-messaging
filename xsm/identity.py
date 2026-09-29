@@ -129,6 +129,12 @@ def _state_of(record: dict) -> tuple:
         # process that lives on (a Codex daemon). A new hook clears the mark.
         return "ended", "worker_stopped"
     hosted = record.get("runtime") == "codex" and record.get("app_server")
+    if record.get("runtime") == "codex" and "app_server" not in record and pid_alive(pid):
+        # A record written before the flag existed: the mcp beacon rule below
+        # would read every thread but the newest under a daemon pid as ended
+        # (measured 2026-09-29: a thread a TUI held read `thread_replaced`).
+        # New records say so themselves; ask the process table for old ones.
+        hosted = is_app_server(pid)
     if hosted:
         # The pid is the home's app-server daemon, shared by every thread it
         # hosts (issue #5: 14 threads on one pid), and replaced when it updates
@@ -208,16 +214,20 @@ def ancestor_pid(names, max_hops: int = 10) -> int | None:
 
 
 def is_app_server(pid) -> bool:
-    """Whether this pid is a Codex app-server (`codex app-server ...`), the
-    daemon a TUI is a client of since 0.157. A thread it hosts runs its hooks
-    under it, so ancestor_pid finds it instead of the TUI."""
+    """Whether this pid is a home's shared app-server daemon
+    (`codex app-server --listen unix:// --managed-daemon`), which a TUI is a
+    client of since 0.157. A thread it hosts runs its hooks under it, so
+    ancestor_pid finds it instead of the TUI. A per-app stdio server (desktop
+    app, IDE) is also `codex app-server` but is not the daemon whose loaded
+    list we ask, so `--managed-daemon` is required (review, 2026-09-29)."""
     try:
         out = subprocess.run(["ps", "-o", "args=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return False
     argv = out.stdout.split()
-    return len(argv) > 1 and os.path.basename(argv[0]) == "codex" and argv[1] == "app-server"
+    return len(argv) > 1 and os.path.basename(argv[0]) == "codex" and argv[1] == "app-server" \
+        and "--managed-daemon" in argv
 
 
 def pid_from_socket(sock_path: str) -> int | None:

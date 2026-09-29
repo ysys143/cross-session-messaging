@@ -440,6 +440,27 @@ class HostedThreadLivenessTest(Base):
         with mock.patch.object(identity, "lstart", lambda pid: None):
             self.assertEqual(identity.state_of(rec), "live")
 
+    def test_a_legacy_record_under_the_daemon_pid_is_judged_by_the_daemon(self):
+        """Records written before `app_server` existed have no such key. The
+        beacon rule read them ended while a TUI held the thread (2026-09-29)."""
+        from xsm import identity
+        self.loaded(["T1"])
+        rec = self.record("T1", os.getpid(), mcp_pid=self.DEAD_PID)
+        rec.pop("app_server")
+        with mock.patch.object(identity, "is_app_server", lambda pid: True):
+            self.assertEqual(identity.state_reason(rec), ("live", "thread_loaded"))
+        with mock.patch.object(identity, "is_app_server", lambda pid: False), \
+                mock.patch.object(identity, "lstart", lambda pid: None):
+            self.assertEqual(identity.state_reason(rec), ("ended", "thread_replaced"),
+                             "a TUI pid keeps the beacon rule")
+
+    def test_an_explicit_false_flag_never_probes_the_process_table(self):
+        from xsm import identity
+        rec = self.record("T1", os.getpid(), app_server=False)
+        with mock.patch.object(identity, "is_app_server", side_effect=AssertionError("probed")), \
+                mock.patch.object(identity, "lstart", lambda pid: None):
+            self.assertEqual(identity.state_of(rec), "live")
+
     def test_list_shows_the_unloaded_thread_as_ended(self):
         from xsm import registry
         registry._running_codex = lambda: []
@@ -451,6 +472,77 @@ class HostedThreadLivenessTest(Base):
         self.assertEqual(by["T-open"]["state"], "live")
         self.assertEqual(by["T-quit"]["state"], "ended")
         self.assertEqual(by["T-quit"]["end_reason"], "thread_unloaded")
+
+
+class DeadHomesLatencyTest(Base):
+    """Review 2026-09-29: the receive hook asks every home's daemon on each
+    prompt under a 10 s limit. Homes whose daemon accepts and never answers
+    must cost a bounded, mostly one-time amount."""
+
+    HOMES = 5
+
+    def dead_homes(self):
+        homes = []
+        for i in range(self.HOMES):
+            home = os.path.join(self.tmp, "dead%d" % i)
+            os.makedirs(home)
+            d = FakeDaemon(home, "silent")
+            self.daemons.append(d)
+            homes.append(home)
+        return homes
+
+    def test_hook_budget_bounds_the_cost_of_several_hung_homes(self):
+        from xsm import codex_daemon
+        homes = self.dead_homes()
+        codex_daemon.use_hook_budget()
+        began = time.monotonic()
+        for home in homes:
+            self.assertIsNone(codex_daemon.loaded_threads(home))
+        first = time.monotonic() - began
+        began = time.monotonic()
+        for _ in range(20):
+            for home in homes:
+                self.assertIsNone(codex_daemon.loaded_threads(home))
+        again = time.monotonic() - began
+        print("\n[latency] %d hung homes: first pass %.2fs, 100 repeat asks %.4fs"
+              % (self.HOMES, first, again))
+        self.assertLess(first, self.HOMES * 0.2 + 0.6)
+        self.assertLess(again, 0.2, "a failure is remembered, not asked again")
+
+    def test_a_failure_is_remembered_longer_than_an_answer(self):
+        from xsm import codex_daemon
+        self.assertGreater(codex_daemon._LOADED_FAIL_TTL, 10 * codex_daemon._LOADED_TTL)
+        (home,) = self.dead_homes()[:1]
+        self.assertIsNone(codex_daemon.loaded_threads(home, timeout=0.1))
+        key = os.path.realpath(home)
+        stamped, value = codex_daemon._LOADED_CACHE[key]
+        self.assertIsNone(value)
+        self.assertGreaterEqual(stamped, time.monotonic() - 0.5,
+                                "stamped when the query ended, not when it began")
+
+    def test_the_receive_hook_takes_the_short_budget(self):
+        from xsm import codex_daemon, receive
+        self.assertEqual(codex_daemon.DEFAULT_TIMEOUT, 1.0)
+        with mock.patch.object(sys, "stdin", io.StringIO("{}")), \
+                mock.patch.object(receive, "handle", lambda data: None), \
+                mock.patch.object(receive, "_emit", lambda *a: None):
+            receive.main()
+        self.assertEqual(codex_daemon.DEFAULT_TIMEOUT, codex_daemon.HOOK_TIMEOUT)
+
+    def test_records_over_hung_homes_stay_within_the_hook_budget(self):
+        from xsm import codex_daemon, identity, registry
+        registry._running_codex = lambda: []
+        homes = self.dead_homes()
+        with mock.patch.object(identity, "is_app_server", lambda pid: True):
+            for i, home in enumerate(homes):
+                registry.upsert("codex", home, "T%d" % i, os.getpid(), self.tmp, name="t%d" % i)
+            codex_daemon.use_hook_budget()
+            began = time.monotonic()
+            rows = registry.records()
+        took = time.monotonic() - began
+        print("\n[latency] records() over %d hung homes: %.2fs" % (self.HOMES, took))
+        self.assertEqual(len(rows), self.HOMES)
+        self.assertLess(took, self.HOMES * 0.2 + 0.8)
 
 
 if __name__ == "__main__":

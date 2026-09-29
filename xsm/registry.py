@@ -73,10 +73,9 @@ def upsert(runtime: str, home: str, session_id: str, pid: int, cwd: str,
             record.pop("mcp_lstart", None)
         # Whether the pid is the home's app-server daemon rather than a TUI:
         # then the pid is every hosted thread's, and liveness asks the daemon.
-        if identity.is_app_server(pid):
-            record["app_server"] = True
-        else:
-            record.pop("app_server", None)
+        # Written both ways: a record with no key is a legacy one, and only
+        # those cost a process-table probe when liveness is judged.
+        record["app_server"] = identity.is_app_server(pid)
     if inside is not False:
         # The other runtime's id this session was started with (its own hook
         # inherits it): the session runs inside that one's shell. Only the

@@ -80,11 +80,24 @@ def start_queued(codex_home: str, thread_id: str, queued_id: str, timeout: float
     return UNAVAILABLE, "unexpected reply: %s" % json.dumps(reply)[:200]
 
 
-_LOADED_CACHE = {}          # realpath(home) -> (monotonic time, set | None)
+_LOADED_CACHE = {}          # realpath(home) -> (monotonic time answered, set | None)
 _LOADED_TTL = 2.0
+# A daemon that did not answer is asked again only after this long, so a home
+# whose socket hangs costs one timeout per window, not one per record.
+_LOADED_FAIL_TTL = 30.0
+# How long one query may take when the caller names no timeout. The receive
+# hook lowers it (use_hook_budget): it runs on every prompt of every Codex
+# session under a 10 s limit, and several unresponsive homes add up.
+DEFAULT_TIMEOUT = 1.0
+HOOK_TIMEOUT = 0.2
 
 
-def loaded_threads(codex_home: str, timeout: float = 1.0):
+def use_hook_budget() -> None:
+    global DEFAULT_TIMEOUT
+    DEFAULT_TIMEOUT = HOOK_TIMEOUT
+
+
+def loaded_threads(codex_home: str, timeout: float | None = None):
     """The thread ids the home's daemon has loaded, or None if it cannot say.
 
     A thread hosted by the daemon runs its hooks under the daemon, so every
@@ -94,21 +107,25 @@ def loaded_threads(codex_home: str, timeout: float = 1.0):
     lists it again when a TUI reconnects after a daemon restart (measured
     2026-09-29, 0.158/0.159). None — no socket, a sandbox refusal, a timeout,
     an unexpected reply — says nothing about the thread. Cached briefly: a list
-    of sessions asks once per home, not once per record."""
+    of sessions asks once per home, not once per record. The cache is stamped
+    after the query, so a slow answer is not born expired, and a failure is
+    kept longer than an answer (review, 2026-09-29)."""
     key = os.path.realpath(os.path.expanduser(codex_home or ""))
-    now = time.monotonic()
     hit = _LOADED_CACHE.get(key)
-    if hit and now - hit[0] < _LOADED_TTL:
-        return hit[1]
-    result = _ask_loaded(key, timeout)
-    _LOADED_CACHE[key] = (now, result)
+    if hit:
+        ttl = _LOADED_TTL if hit[1] is not None else _LOADED_FAIL_TTL
+        if time.monotonic() - hit[0] < ttl:
+            return hit[1]
+    path = socket_path(key)
+    if not key or not os.path.exists(path):
+        return None                             # nothing to ask, nothing to wait for
+    result = _ask_loaded(key, timeout if timeout is not None else DEFAULT_TIMEOUT)
+    _LOADED_CACHE[key] = (time.monotonic(), result)
     return result
 
 
 def _ask_loaded(codex_home: str, timeout: float):
     path = socket_path(codex_home)
-    if not codex_home or not os.path.exists(path):
-        return None
     deadline = time.monotonic() + timeout
     conn = None
     try:

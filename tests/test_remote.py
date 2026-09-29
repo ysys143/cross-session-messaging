@@ -417,6 +417,43 @@ class LostAnswerTest(unittest.TestCase):
         after = self.reconcile(reply["id"])
         self.assertEqual(after["status"], "error", after)
         self.assertIn("no record", after["error"])
+        # Not "safe to send again": a request delayed by a partition could
+        # still arrive (review, 2026-09-29).
+        self.assertIn("most likely did not arrive", after["error"])
+        self.assertNotIn("is safe", after["error"])
+
+    def test_an_old_peer_that_does_not_know_status_leaves_the_row_unknown(self):
+        from unittest import mock
+        from xsm import remote
+        reply = self.send("dropped")
+        old = {"ok": False, "error": "unknown op 'status'"}      # what its serve() answers
+        with self.on("hostA"), mock.patch.object(remote, "call", lambda *a, **k: old):
+            after = remote.reconcile(reply["id"])
+        self.assertEqual(after["status"], "unknown", after)
+        self.assertIn("too old", after["note"])
+        self.assertIn("update xsm", after["note"])
+
+    def test_a_nonfinite_wait_cannot_hold_the_receiver(self):
+        from xsm import remote
+        for bad in (float("nan"), float("inf"), -5, "x", None):
+            self.assertEqual(remote.clamp_wait(bad, 30), 0.0, bad)
+        self.assertEqual(remote.clamp_wait(1e9, 30), 30.0)
+        self.assertEqual(remote.clamp_wait(2.5, 30), 2.5)
+        sent = self.send("ok")                                    # queued on hostB, no receipt
+        self.assertEqual(sent["status"], "queued", sent)
+        began = time.monotonic()
+        with self.on("hostB"):
+            for bad in (float("nan"), float("inf")):
+                # JSON carries NaN and Infinity, so a peer can send them.
+                request = json.loads(json.dumps({"op": "status", "id": sent["id"], "wait": bad}))
+                self.assertEqual(remote._serve("hostA", request)["status"], "queued")
+                request = json.loads(json.dumps({"op": "send", "id": "w-" + str(bad),
+                                                 "target": "codex:alive", "body": "hi",
+                                                 "kind": "task", "wait": bad, "project": "demo",
+                                                 "sender": {"name": "a", "alias": "claude",
+                                                            "ref": "aaaaaa"}}))
+                self.assertTrue(remote._serve("hostA", request)["ok"])
+        self.assertLess(time.monotonic() - began, 5.0)
 
     def test_resending_the_same_id_does_not_deliver_twice(self):
         first = self.send("lost", then=self.gate_delivers)

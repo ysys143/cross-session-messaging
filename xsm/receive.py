@@ -545,6 +545,8 @@ def _sender_record(parsed) -> tuple:
 def main(argv=None) -> int:
     raw = sys.stdin.read()
     data = {}
+    from . import codex_daemon
+    codex_daemon.use_hook_budget()      # 10 s hook limit: a hung daemon may cost 0.2 s, not 1 s
     try:
         data = json.loads(raw or "{}")
         if os.environ.get("XSM_FORCE_ERROR"):          # `xsm selftest` exercises the fallback

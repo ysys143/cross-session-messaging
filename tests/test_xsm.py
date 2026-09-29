@@ -1351,7 +1351,11 @@ class CodexThreadLivenessTest(TempState):
         daemon = "/h/.codex/packages/app-server-daemon/releases/0.158.0/bin/codex app-server " \
                  "--listen unix:// --managed-daemon\n"
         for args, want in ((daemon, True), ("/usr/bin/codex --no-alt-screen resume T1\n", False),
-                           ("/usr/bin/codex app-server daemon pid-update-loop\n", True),
+                           ("/usr/bin/codex app-server daemon pid-update-loop\n", False),
+                           # A per-app stdio server (desktop app, IDE) is not the
+                           # daemon whose loaded list we ask (review, 2026-09-29).
+                           ("/Applications/Codex.app/bin/codex app-server --listen stdio://\n", False),
+                           ("/usr/bin/codex app-server\n", False),
                            ("python3 app-server\n", False), ("", False)):
             with mock.patch.object(identity.subprocess, "run",
                                    lambda *a, **k: mock.Mock(stdout=args)):
@@ -1366,7 +1370,8 @@ class CodexThreadLivenessTest(TempState):
         self.assertTrue(rec.get("app_server"))
         with mock.patch.object(identity, "is_app_server", lambda pid: False):
             rec = registry.upsert("codex", home, "t1", os.getpid(), self.tmp)
-        self.assertNotIn("app_server", rec, "a TUI pid on the next registration clears it")
+        self.assertIs(rec.get("app_server"), False,
+                      "a TUI pid says so outright, so only legacy records need the probe")
 
     def test_the_hook_records_the_newest_mcp_server_under_its_codex(self):
         from xsm import receive, registry

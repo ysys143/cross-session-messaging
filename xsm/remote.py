@@ -22,6 +22,7 @@ receiver recorded that message id for that peer.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import socket
@@ -438,10 +439,29 @@ def _serve(peer: str, request: dict, span=None) -> dict:
         # Recorded, so a later `status` from the sender reads error, not queued.
         ledger.failed(msg_id, "%s: %s" % (err.reason, err.detail))
         return {"ok": False, "status": "error", "error": "%s: %s" % (err.reason, err.detail)}
-    state = ledger.wait_for(msg_id, float(request.get("wait") or 0)) if request.get("wait") else {}
+    wait = clamp_wait(request.get("wait"), MAX_SEND_WAIT)
+    state = ledger.wait_for(msg_id, wait) if wait else {}
     return {"ok": True, "status": state.get("status") or "queued",
             "target": {"name": target.get("name"), "alias": target.get("alias"),
                        "ref": target.get("ref")}}
+
+
+MAX_STATUS_WAIT = 30.0
+MAX_SEND_WAIT = 300.0
+
+
+def clamp_wait(value, cap: float) -> float:
+    """A wait taken from a peer's JSON (or a --wait flag) into [0, cap]. NaN
+    and inf pass float() and `min(nan, 30)` is nan, which never reaches the
+    deadline in ledger.wait_for: one such request would hold the forced
+    command open forever (review, 2026-09-29)."""
+    try:
+        seconds = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(seconds) or seconds < 0:
+        return 0.0
+    return min(seconds, cap)
 
 
 def recorded_inbound(msg_id: str, peer: str) -> bool:
@@ -460,8 +480,9 @@ def _inbound_status(peer: str, msg_id: str, wait=None) -> dict:
     state = ledger.status(msg_id)
     if state.get("scope") != "remote:%s" % peer:
         return {"ok": True, "status": None}
+    wait = clamp_wait(wait, MAX_STATUS_WAIT)
     if wait and state.get("status") == "queued":
-        state = ledger.wait_for(msg_id, min(float(wait), 30))
+        state = ledger.wait_for(msg_id, wait)
     return {"ok": True, "status": state.get("status"),
             "reason": (state.get("receipt") or {}).get("reason") or state.get("error") or "",
             "target": {k: (state.get("to") or {}).get(k) for k in ("name", "alias", "ref")}}
@@ -502,6 +523,7 @@ def send(sender: dict, spec: str, peer: str, body: str, kind: str, reply_to: str
                 "error": "this session is not in project %s, which is what %s is paired with"
                          % (pairing["local_project"], peer)}
     msg_id = msg_id or envelope.new_id()
+    wait = clamp_wait(wait, MAX_SEND_WAIT)
     request = {"op": "send", "id": msg_id, "target": spec, "body": body, "kind": kind,
                "reply_to": reply_to, "wait": wait, "project": pairing["local_project"],
                "traceparent": traceparent, "outcome": outcome,
@@ -557,21 +579,34 @@ def reconcile(msg_id: str, wait: float = 0.0) -> dict:
         return entry
     peer = scope[len("remote:"):]
     try:
-        reply = call(peer, {"op": "status", "id": msg_id, "wait": min(wait, 30)},
-                     timeout=max(30, min(wait, 30) + 20))
+        wait = clamp_wait(wait, MAX_STATUS_WAIT)
+        reply = call(peer, {"op": "status", "id": msg_id, "wait": wait},
+                     timeout=max(30, wait + 20))
     except RemoteError as exc:
         entry["note"] = "could not ask %s: %s" % (peer, exc)
         return entry
     if not reply.get("ok"):
-        entry["note"] = "%s did not answer for it: %s" % (peer, reply.get("error"))
+        if str(reply.get("error") or "").startswith("unknown op"):
+            # A peer running an xsm from before `status` answers every op it
+            # does not know this way. Not an answer about the message: it stays
+            # as it was, and the person is told what would help.
+            entry["note"] = ("%s runs an xsm too old to answer `status` for this message; "
+                             "update xsm there" % peer)
+        else:
+            entry["note"] = "%s did not answer for it: %s" % (peer, reply.get("error"))
         return entry
     if reply.get("status") is None:
         settle_after = entry.get("settle_after") or (entry.get("unknown_t") or 0) + 300
         if entry.get("status") == "unknown" and time.time() >= settle_after:
-            # Nothing was recorded over there, long after any call that could
-            # still be running there has ended: the lost call never got as far
-            # as queueing it, and sending it again is safe.
-            ledger.failed(msg_id, "%s has no record of it; it did not arrive" % peer)
+            # Nothing was recorded over there after the lost call's time was
+            # up, so it most likely never got as far as queueing it. Not
+            # certain: a request delayed by a long network partition could
+            # still arrive. Resending under the same id is always safe (the
+            # peer refuses a second run of an id it knows); a new id risks a
+            # duplicate (review, 2026-09-29).
+            ledger.failed(msg_id, "%s had no record of it after the call's time was up, so it "
+                                  "most likely did not arrive; resending under the same id is "
+                                  "always safe, a new id risks a duplicate" % peer)
         elif entry.get("status") == "unknown":
             # Too soon to say: the far side may still be working on the call
             # whose answer was lost. Calling it failed now is what makes a
