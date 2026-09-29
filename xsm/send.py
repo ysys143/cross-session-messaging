@@ -126,7 +126,7 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
     content = envelope.build(body, msg_id=msg_id, sender=sender, scope=scope, kind=kind,
                              reply_to=reply_to, outcome=outcome,
                              traceparent=span.traceparent() if span is not None else None)
-    ledger.queued(msg_id, sender, target, scope, kind, body)
+    ledger.queued(msg_id, sender, target, scope, kind, body, forecast=forecast)
 
     queued = None
     try:
@@ -201,11 +201,11 @@ def native_forecast(sender: dict, target: dict) -> tuple:
     """
     if target.get("runtime") != "claude":
         return "n/a", ""
-    setting = registry.inbound_setting(target.get("home", ""))
+    setting = registry.inbound_setting(target.get("home", ""), target.get("cwd"))
     if setting == "accept":
         return "accept", "receiver's user settings say crossSessionInbound=accept"
     if setting in ("hold", "refuse"):
-        return setting, "receiver's user settings say crossSessionInbound=%s" % setting
+        return setting, "receiver's settings say crossSessionInbound=%s" % setting
     mine, theirs = registry.mode_class(sender), registry.mode_class(target)
     if mine is None or theirs is None:
         return "unknown", "one of the two permission modes is not known yet"

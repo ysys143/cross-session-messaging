@@ -173,7 +173,7 @@ def cmd_list(args) -> int:
         return cmd_list_clear(args, me)
     rows = _rows(args, me)
     for row in rows:
-        row["inbound"] = registry.inbound_setting(row.get("home", "")) if \
+        row["inbound"] = registry.inbound_setting(row.get("home", ""), row.get("cwd")) if \
             row.get("runtime") == "claude" else None
         row["native"] = send.native_forecast(me, row)[0] if me and row.get("ref") != me.get("ref") \
             else "n/a"
@@ -646,6 +646,11 @@ def _mark_undelivered(rows: list) -> list:
         if row.get("status") == "queued" and (row.get("to") or {}).get("ref") not in live:
             row["status"] = "undelivered"
             row["note"] = "target stopped before recording it"
+        elif row.get("status") == "queued" and row.get("forecast") == "hold":
+            # Claude holds it inside the receiving session, where xsm cannot
+            # see it; left as `queued` it read as on its way (report, 2026-09-29).
+            row["status"] = "awaiting-approval"
+            row["note"] = "Claude held it for its user; it arrives only if they approve it"
     return rows
 
 

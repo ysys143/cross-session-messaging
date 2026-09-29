@@ -543,6 +543,41 @@ class ForecastTest(TempState):
         from xsm import send
         self.assertEqual(send.native_forecast({"runtime": "claude"}, {"runtime": "codex"})[0], "n/a")
 
+    def test_a_project_setting_only_tightens_the_users(self):
+        """Claude 2.1.284 held a message from a repository set to "hold" while
+        the user's settings said "accept" (measured 2026-09-29)."""
+        from xsm import paths, send
+        a = {"runtime": "claude", "permission_mode": "auto"}
+        for user, project, name, want in (("accept", "hold", "settings.local.json", "hold"),
+                                          ("accept", "refuse", "settings.json", "refuse"),
+                                          ("hold", "accept", "settings.json", "hold"),
+                                          (None, None, None, "accept")):
+            cwd = os.path.join(self.tmp, "repo-%s-%s" % (user, project))
+            if project:
+                os.makedirs(os.path.join(cwd, ".claude"), exist_ok=True)
+                paths.write_json(os.path.join(cwd, ".claude", name), {"crossSessionInbound": project})
+            b = {"runtime": "claude", "permission_mode": "auto", "home": self._home_with(user),
+                 "cwd": cwd}
+            self.assertEqual(send.native_forecast(a, b)[0], want, (user, project))
+
+    def test_a_message_forecast_as_held_reads_as_awaiting_approval(self):
+        from xsm import cli, ledger
+        sender = {"name": "a", "ref": "aaaaaa", "runtime": "codex"}
+        target = {"name": "b", "ref": "bbbbbb", "runtime": "claude"}
+        ledger.queued("m-held", sender, target, "project:x", "note", "hi", forecast="hold")
+        ledger.queued("m-plain", sender, target, "project:x", "note", "hi", forecast="accept")
+        from unittest import mock
+        with mock.patch.object(cli.registry, "records",
+                               return_value=[{"ref": "bbbbbb", "state": "live"}]):
+            rows = {r["id"]: r for r in cli._mark_undelivered(ledger.recent())}
+        self.assertEqual(rows["m-held"]["status"], "awaiting-approval")
+        self.assertEqual(rows["m-plain"]["status"], "queued")
+        ledger.receipt("m-held", "delivered", target)        # the person pressed Deliver
+        with mock.patch.object(cli.registry, "records",
+                               return_value=[{"ref": "bbbbbb", "state": "live"}]):
+            rows = {r["id"]: r for r in cli._mark_undelivered(ledger.recent())}
+        self.assertEqual(rows["m-held"]["status"], "delivered")
+
 
 
 class UnknownSelfTest(TempState):

@@ -161,6 +161,13 @@ interrupted mid-turn. A session stopped with Esc (`interrupted (Esc)` in
 `xsm list`) is started through Codex's daemon when it can be; the result then
 says "started now". Never report `sent-unconfirmed` as delivered.
 
+When the result says **Claude will hold it for its user** (or `xsm list` marks
+the target `would-be-held`), the message waits in the receiving session until
+its person presses Deliver; the reason names what differs (permission modes,
+or a `crossSessionInbound` setting). Tell your user exactly that, with the
+reason, rather than "sent". `xsm ledger` shows such a message as
+`awaiting-approval` until it arrives.
+
 From a sandboxed shell (a background worker, a Codex workspace-write
 session) `xsm send` to a Codex peer refuses at once and says to use the
 `xsm_send` MCP tool: `codex queue` cannot run inside the sandbox. Use the tool.

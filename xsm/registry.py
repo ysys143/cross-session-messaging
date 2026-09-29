@@ -764,18 +764,32 @@ def unregistered_reason() -> str:
             "send any message in the session first; otherwise run `xsm doctor`")
 
 
-def inbound_setting(home: str) -> str | None:
-    """The receiver's own crossSessionInbound, read from its user settings.
+INBOUND_LADDER = ("accept", "hold", "refuse")
+
+
+def inbound_setting(home: str, cwd: str | None = None) -> str | None:
+    """The receiver's crossSessionInbound: its user settings, tightened by the
+    project's.
 
     Claude decides an explicit setting before it compares permission modes, so
-    "accept" is what makes a cross-mode message arrive at all (S1). We can only
-    see the user-level file here: a session launched with --settings or with
-    project settings may differ, which is why callers treat this as a
+    "accept" is what makes a cross-mode message arrive at all (S1). A project's
+    .claude/settings.json or settings.local.json may only tighten it along
+    accept < hold < refuse; Claude 2.1.284 held a message from a repository set
+    to "hold" while the user settings said "accept", and xsm had forecast it as
+    accepted (2026-09-29). A session launched with --settings or
+    --setting-sources may still differ, which is why callers treat this as a
     prediction, not a verdict.
     """
-    data = paths.read_json(os.path.join(home, "settings.json"), {}) or {}
-    value = data.get("crossSessionInbound")
-    return value if isinstance(value, str) else None
+    def read(path):
+        value = (paths.read_json(path, {}) or {}).get("crossSessionInbound")
+        return value if value in INBOUND_LADDER else None
+    value = read(os.path.join(home, "settings.json"))
+    for name in ("settings.json", "settings.local.json"):
+        stricter = read(os.path.join(cwd, ".claude", name)) if cwd else None
+        if stricter and (value is None or
+                         INBOUND_LADDER.index(stricter) > INBOUND_LADDER.index(value)):
+            value = stricter
+    return value
 
 
 def mode_class(record: dict) -> str | None:

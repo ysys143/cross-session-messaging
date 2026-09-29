@@ -22,11 +22,16 @@ def _receipt_path(msg_id: str) -> str:
     return paths.path(paths.LEDGER, "%s.recv.json" % msg_id)
 
 
-def queued(msg_id: str, sender: dict, target: dict, scope: str, kind: str, body: str) -> dict:
+def queued(msg_id: str, sender: dict, target: dict, scope: str, kind: str, body: str,
+           forecast: str | None = None) -> dict:
+    """`forecast` is what Claude's own gate was expected to do (send.native_forecast);
+    "hold" is kept so a message that never arrives reads as waiting for a person."""
     entry = {"id": msg_id, "status": "queued", "t": time.time(), "kind": kind, "scope": scope,
              "from": {k: sender.get(k) for k in ("name", "alias", "ref", "runtime")},
              "to": {k: target.get(k) for k in ("name", "alias", "ref", "runtime")},
              "preview": body[:200]}
+    if forecast == "hold":
+        entry["forecast"] = forecast
     paths.write_json(_entry_path(msg_id), entry)
     return entry
 
