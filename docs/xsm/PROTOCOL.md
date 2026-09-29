@@ -200,7 +200,7 @@ refused: only stopped sessions match 'life-b'
   life-b@claude-4 [ac63ed] exited cleanly (prompt_input_exit); resume it with: CLAUDE_CONFIG_DIR=… claude --resume <id>
 ```
 
-**원장.** `queued`로 남은 메시지의 대상이 더 이상 `live`가 아니면 `undelivered`로 표시한다. 원장 파일은 고치지 않고 표시할 때 판단한다.
+**원장.** `queued`로 남은 메시지의 대상이 더 이상 `live`가 아니면 `undelivered`로 표시한다. 원장 파일은 고치지 않고 표시할 때 판단한다. 원격 대상(`to.runtime: remote`)은 이 기계 레지스트리에 없으므로 이 판단에서 빼고 `queued`로 두며, 영수증은 상대에게 있으니 `xsm status <id>`로 묻는다는 메모를 붙인다(issue #4).
 
 **보관 기간.** 상주 프로세스가 없으므로, 세션이 시작할 때(`SessionStart` 훅)와 CLI를 실행할 때 기회가 되면 정리한다. 최대 한 시간에 한 번이다(`<XSM_HOME>/last-prune`의 수정 시각).
 
@@ -396,7 +396,10 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 
 - **짝.** `config.json`의 `remotes`에 `{peer, host, local_project, remote_project}`를 둔다. `peer`는 상대가 스스로 알린 호스트 이름(`XSM_HOSTNAME`, 기본 `hostname`의 첫 부분)이다. `host`는 SSH로 닿는 이름이다.
 - **키.** 각 기계는 `remote/id_ed25519`를 가진다. 상대의 공개키는 `authorized_keys`에 `command="<고정 인터프리터> <repo>/hooks/xsm-remote.py <peer>",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding <키> xsm-remote:<peer>`로 들어간다. `remote remove`는 `xsm-remote:<peer>`로 끝나는 줄만 지운다.
-- **요청.** 표준 입력의 JSON 한 줄이다. `op`는 `ping`, `ping-back`, `sessions`, `send`, `unpair` 중 하나다. `send`는 `{id, target, body, kind, reply_to, wait, project, sender}`를 싣는다. 받는 쪽은 다섯 가지를 확인한 뒤 로컬 경로로 전달한다. `project == 짝의 remote_project`인지, 대상이 해석되는지, 대상이 `ended`/`stale`이 아닌지(로컬 보내기의 6번과 같은 판정, 거부 문구 "… is not running (<state>)", 2026-09-28 추가: 전에는 멈춘 세션의 대기열에 넣고 상대에게 `queued`라 답했다), 대상이 짝의 `local_project`에 속하는지, 차단되지 않았는지다. 봉투는 `origin=<peer>`, `scope="remote:<peer>"`, 회신 주소 없음으로 다시 만든다. 이때 `remote/inbound-<id>.json`에 `{id, peer}`를 남기고, `wait`가 있으면 영수증을 기다려 상태를 돌려준다.
+- **요청.** 표준 입력의 JSON 한 줄이다. `op`는 `ping`, `ping-back`, `sessions`, `send`, `status`, `unpair` 중 하나다. `send`는 `{id, target, body, kind, reply_to, wait, project, sender}`를 싣는다. 받는 쪽은 다섯 가지를 확인한 뒤 로컬 경로로 전달한다. `project == 짝의 remote_project`인지, 대상이 해석되는지, 대상이 `ended`/`stale`이 아닌지(로컬 보내기의 6번과 같은 판정, 거부 문구 "… is not running (<state>)", 2026-09-28 추가: 전에는 멈춘 세션의 대기열에 넣고 상대에게 `queued`라 답했다), 대상이 짝의 `local_project`에 속하는지, 차단되지 않았는지다. 봉투는 `origin=<peer>`, `scope="remote:<peer>"`, 회신 주소 없음으로 다시 만든다. 이때 `remote/inbound-<id>.json`에 `{id, peer}`를 남기고, `wait`가 있으면 영수증을 기다려 상태를 돌려준다. 이 기계 원장에 이미 있는데 그 peer의 inbound로 기록되지 않은 id는 `refused`("message id … is already in use here")다. 같은 peer가 같은 id를 다시 보냈고 영수증이 이미 있으면 다시 전달하지 않고 그 판정을 `duplicate: true`와 함께 돌려준다. 전달 경로가 실패하면 원장에 `error`를 쓴다(2026-09-29, issue #4).
+- **발신 쪽 실패 분류(2026-09-29, issue #4).** 답이 오지 않은 호출은 요청이 상대에 닿았는지로 나눈다. 짝이 없음, ssh 실행 불가, ssh가 종료 코드 255로 표준 출력 없이 로그인 전 오류(`Could not resolve hostname`, `connect to host`, `Connection refused`, `No route to host`, `Network is unreachable`, `Permission denied (`, `Host key verification failed`, `kex_exchange_identification`, `during banner exchange`)를 낸 경우는 강제 명령이 돌지 않았으므로 원장에 `error`다. 시간 초과, 로그인 뒤 끊긴 연결(255라도 위 문구가 없으면), 읽을 수 없는 응답은 상대가 이미 큐에 넣었을 수 있으므로 원장에 `unknown`이다. 상대가 답했지만 받지 않았으면(`ok: false`) `refused` 또는 `error`로 적는다.
+- **상태 조회.** `status`는 `{id, wait?}`를 싣는다. 받는 쪽은 그 id가 **그 peer의 inbound로 기록됐고** 원장 scope가 `remote:<peer>`일 때만 `{ok: true, status, reason, target}`을 답한다. 그 밖의 id(다른 peer의 메시지, 이 기계의 로컬 메시지, 경로 문자가 든 id)는 모두 `{ok: true, status: null}`이다. 본문과 미리보기는 싣지 않는다. `wait`는 30초까지 영수증을 기다린다. 발신 쪽 `xsm status <id>`는 scope가 `remote:`이고 상태가 `queued`/`unknown`이면 이 op로 묻고 결과를 원장에 쓴다: `delivered`/`held`/`blocked`는 영수증, 상대의 `error`는 `error`, 상대의 `queued`는 `unknown`을 `queued`로 되돌림, `null`은 로컬이 `unknown`일 때만 `error`("has no record of it; it did not arrive")다.
+- **다시 보내기.** 같은 id로 다시 보내는 것은 안전하다. 받는 쪽이 영수증 있는 id를 다시 전달하지 않고, 영수증 전이라 대기열에 둘이 들어가도 수신 게이트가 `ledger.received(id)`로 두 번째를 버린다. 새 id로 다시 보내면 별개 메시지라 과제가 두 번 돌 수 있다. `unknown`이면 먼저 `xsm status <id>`로 확인한다.
 - **게이트.** 헤더에 `origin`이 있으면 5.1의 4~8번 대신 다음을 본다. 짝이 있는지, 이 기계의 수신기가 그 id를 그 peer로 기록했는지, scope가 `remote:<peer>`인지, 수신 세션이 짝의 `local_project`에 속하는지, 차단되지 않았는지다.
 - **주소.** `…@<peer>`의 마지막 `@` 뒤가 짝지은 peer면 원격으로 보낸다. 답장 명령은 `ref:<ref>@<origin>`이다.
 
@@ -406,6 +409,7 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 |---|---|---|
 | `delivered` | 수신 훅이 기록했다 | 0 |
 | `sent-unconfirmed` | 큐에 들어갔고 확인이 없다 | 3 |
+| `unknown` | 원격 호출의 답을 잃었다. 상대에 닿았는지 모른다(`xsm status <id>`로 묻는다) | 3 |
 | `held` / `blocked` | 수신 게이트가 막았다 | 2 |
 | `refused` | 발신 단계에서 거부했다 | 2 |
 | `error` | 전달 경로가 실패했다 | 4 |

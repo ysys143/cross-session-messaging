@@ -598,8 +598,8 @@ def cmd_send(args) -> int:
             print("registered sessions right now:" if "no session" in (result.reason or "")
                   else "candidates:")
             print(resolve.describe(result.candidates))
-    return {"delivered": OK, "sent-unconfirmed": UNCONFIRMED, "held": REFUSED,
-            "blocked": REFUSED, "refused": REFUSED}.get(result.status, USAGE)
+    return {"delivered": OK, "sent-unconfirmed": UNCONFIRMED, "unknown": UNCONFIRMED,
+            "held": REFUSED, "blocked": REFUSED, "refused": REFUSED}.get(result.status, USAGE)
 
 
 def cmd_inbox(args) -> int:
@@ -624,13 +624,20 @@ def cmd_inbox(args) -> int:
 
 
 def cmd_status(args) -> int:
-    state = ledger.wait_for(args.msg_id, args.wait) if args.wait else ledger.status(args.msg_id)
+    if (ledger.status(args.msg_id).get("scope") or "").startswith("remote:"):
+        # Its receipt is on the other machine; only the peer can say (issue #4).
+        from . import remote
+        state = remote.reconcile(args.msg_id, args.wait)
+    else:
+        state = ledger.wait_for(args.msg_id, args.wait) if args.wait else ledger.status(args.msg_id)
     if not state:
         print("no such message", file=sys.stderr)
         return REFUSED
     # The outcome is the task's, not the delivery's: a task can be delivered and
     # then fail, so it goes after the status rather than in place of it.
     ending = "  (task %s)" % state["outcome"] if state.get("outcome") else ""
+    if state.get("note") or state.get("status") in ("unknown", "error", "refused"):
+        ending += "  - %s" % (state.get("note") or state.get("error") or "")
     print(json.dumps(state, ensure_ascii=False, indent=1) if args.json
           else "%s  %s -> %s  %s%s" % (state.get("status"), (state.get("from") or {}).get("name"),
                                        (state.get("to") or {}).get("name"), state.get("id"),
@@ -643,7 +650,12 @@ def _mark_undelivered(rows: list) -> list:
     recorded as delivered. Say so instead of leaving it looking pending."""
     live = {r.get("ref") for r in registry.records() if r.get("state") == "live"}
     for row in rows:
-        if row.get("status") == "queued" and (row.get("to") or {}).get("ref") not in live:
+        if row.get("status") == "queued" and (row.get("to") or {}).get("runtime") == "remote":
+            # The target lives on the peer, not in this registry; its receipt
+            # is there too (issue #4).
+            row["note"] = "on %s; `xsm status %s` asks it" % (
+                (row.get("scope") or "")[len("remote:"):], row.get("id"))
+        elif row.get("status") == "queued" and (row.get("to") or {}).get("ref") not in live:
             row["status"] = "undelivered"
             row["note"] = "target stopped before recording it"
         elif row.get("status") == "queued" and row.get("forecast") == "hold":
@@ -1026,6 +1038,10 @@ def _stuck_lines(stuck: dict) -> list:
     for row in stuck.get("undelivered") or []:
         lines.append("%s -> %s is still queued: %s" % (
             (row.get("from") or {}).get("name"), (row.get("to") or {}).get("name"), row.get("id")))
+    for row in stuck.get("uncertain") or []:
+        lines.append("%s -> %s may or may not have arrived: %s (xsm status %s)" % (
+            (row.get("from") or {}).get("name"), (row.get("to") or {}).get("name"), row.get("id"),
+            row.get("id")))
     for reason, count in sorted((stuck.get("send_failures") or {}).items()):
         lines.append("%d send(s) failed with %s" % (count, reason))
     for rec in stuck.get("threads_replaced") or []:

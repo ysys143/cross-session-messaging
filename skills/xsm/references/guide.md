@@ -154,6 +154,11 @@ Read the result as it is written:
 | `refused` | rejected here, before sending: out of scope, ambiguous, stopped, unregistered |
 | `held` / `blocked` | the receiver's gate stopped it; the body is kept in `xsm held list` |
 | `error` | the delivery path failed; the message says why |
+| `unknown` | a remote send lost its answer: it may or may not have arrived on the other machine |
+
+After `unknown`, run `xsm status <id>` before anything else: it asks the other
+machine and settles the status. Do not send the same text again as a new
+message; that is a second message, and a task may run twice.
 
 A Codex session picks up a queued message within about ten seconds when its
 thread is loaded and idle, otherwise at its user's next input. It cannot be
