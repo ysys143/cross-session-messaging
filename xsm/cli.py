@@ -980,8 +980,7 @@ def cmd_doctor(args) -> int:
     print("held       %d message(s)" % report["held"])
     print("native     %s" % _native_note(report))
     for pid, folder in report.get("orphaned_servers") or []:
-        print("orphaned   xsm MCP server pid %d runs from %s, which was removed; restart that "
-              "session for working xsm tools" % (pid, _home_tilde(folder)))
+        print("orphaned   %s" % _orphan_note(pid, folder))
     for plan in report["installs"]:
         if plan.get("error"):
             print("install    %s: %s" % (plan["file"], plan["error"]))
@@ -1054,6 +1053,22 @@ def _stuck_lines(stuck: dict) -> list:
     return lines
 
 
+# From this version on the MCP server loads every module at start (mcp.preload),
+# so one running from a removed folder keeps working on its old version.
+PRELOADS_FROM = "0.4.9"
+
+
+def _orphan_note(pid: int, folder: str) -> str:
+    """A server whose folder a plugin update removed: broken before 0.4.9, only
+    old after it (issue #6)."""
+    version = os.path.basename(folder)
+    if version[:1].isdigit() and install.version_key(version) >= install.version_key(PRELOADS_FROM):
+        return ("xsm MCP server pid %d still runs %s (its folder was removed; it keeps working); "
+                "restart that session to use the installed version" % (pid, version))
+    return ("xsm MCP server pid %d runs from %s, which was removed; its xsm tools fail until "
+            "that session restarts" % (pid, _home_tilde(folder)))
+
+
 def _native_note(report: dict) -> str:
     """How the gate treats Claude's own messages (no xsm header), ADR-0013."""
     return ("Claude messages without an xsm header are all held (strict_peers)"
@@ -1073,8 +1088,7 @@ def _doctor_rows(report: dict) -> list:
             ("held", "%d message(s)" % report["held"]),
             ("native", _native_note(report))]
     for pid, folder in report.get("orphaned_servers") or []:
-        rows.append(("orphaned", "xsm MCP server pid %d runs from %s, which was removed; restart "
-                     "that session" % (pid, _home_tilde(folder))))
+        rows.append(("orphaned", _orphan_note(pid, folder)))
     for plan in report["installs"]:
         rows.append(("install", "%s: %s" % (_home_tilde(plan["file"]), plan["error"])
                      if plan.get("error") else "%s: %s" % (

@@ -89,5 +89,16 @@ class RemovedVersionTest(unittest.TestCase):
                                  [(202, os.path.join(tmp, "0.4.7"))])
 
 
+class OrphanNoteTest(unittest.TestCase):
+    def test_a_preloading_server_is_only_old_an_earlier_one_is_broken(self):
+        sys.path.insert(0, str(REPO))
+        from xsm import cli
+        old = cli._orphan_note(1, "/h/.codex/plugins/cache/xsm/xsm/0.4.7")
+        self.assertIn("fail until that session restarts", old)
+        kept = cli._orphan_note(2, "/h/.codex/plugins/cache/xsm/xsm/0.4.9")
+        self.assertIn("keeps working", kept)
+        self.assertIn("keeps working", cli._orphan_note(3, "/h/x/xsm/xsm/0.4.10"))
+
+
 if __name__ == "__main__":
     unittest.main()
