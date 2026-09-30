@@ -61,8 +61,8 @@ session alone, until it ends).
 For these four: call the tool once and reply with its result, copied exactly,
 inside one code block: it says who answered, and a terminal command when a form
 did not reach them. Say your user refused only if it says they chose `deny`.
-If the tool is missing or answers `xsm failed:`, run the same `xsm <command>` in
-the shell once (the typed consent holds); if refused, ask your user to type it.
+If an xsm MCP tool is missing or answers `xsm failed:`, run the same `xsm <command>`
+in the shell once (guide: "When an xsm MCP tool fails"); if refused, ask your user.
 
 **Words that are not a command** (`/xsm tell plugin-worker what I did`): a
 request in words, see "Called without one". **Nothing, or nonsense** — reply with exactly:

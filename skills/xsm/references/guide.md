@@ -348,6 +348,29 @@ not carry the xsm envelope cannot be told apart from the user's own typing
 inside a hook, and the gate records consent and scope rather than enforcing
 security against an agent that can edit these files directly.
 
+### When an xsm MCP tool fails, use the shell
+
+An `xsm_*` MCP tool can be missing, or answer `xsm failed: …`: its server broke
+(for example a plugin update removed the version a still-open session started
+on; `xsm doctor` lists such servers as `orphaned`). That is not a decision by
+anyone. Do the same thing once with the shell command, then report its result:
+
+| MCP tool | Shell command |
+|---|---|
+| `xsm_send` | `xsm send <target> --text "…"` (same kind, reply-to, resend) |
+| `xsm_inbox` | `xsm inbox` |
+| `xsm_post` / `xsm_channel` | `xsm post "…"` / `xsm channel show` |
+| `xsm_link` / `xsm_join` / `xsm_reach` | `xsm link <folder>` / `xsm join <project>` (`xsm leave`) / `xsm reach <folder>` |
+
+For link, join and reach the shell uses the same typed consent; if it refuses
+the step as your user's decision, ask them to type the command in a terminal.
+`xsm_approve`, `xsm_grant`, `xsm_decide` and `xsm_doc_endorse` exist to put a
+choice in front of your user: never stand in for them. Tell your user what you
+needed and that they can run it in a terminal (`xsm approve <id>`) or in a new
+session. The reverse also holds: when the shell is sandboxed and refuses, use
+the MCP tool (see Sending). Tell your user a session showing `orphaned` in
+`xsm doctor` needs restarting.
+
 ## What this does not do
 
 No remote machines, no MCP server, no background process, no channel history.
