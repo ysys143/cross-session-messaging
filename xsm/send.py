@@ -153,8 +153,10 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
             # Codex takes its queue only between turns; the copy is what a
             # session in the middle of one reads with `xsm inbox`.
             inbox.keep(str(target.get("session_id")), msg_id, content)
-            queued = adapters.to_codex(target.get("home", os.path.expanduser("~/.codex")),
-                                       str(target.get("session_id")), content)
+            home = target.get("home", os.path.expanduser("~/.codex"))
+            queued = adapters.to_codex(home, str(target.get("session_id")), content)
+            inbox.note_queued(str(target.get("session_id")), msg_id, home,
+                              adapters.queued_id(queued))
     except adapters.DeliveryError as err:
         inbox.drop(str(target.get("session_id")), msg_id)
         ledger.failed(msg_id, "%s: %s" % (err.reason, err.detail))

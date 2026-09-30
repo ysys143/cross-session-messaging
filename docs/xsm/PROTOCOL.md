@@ -92,9 +92,13 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 - **기다렸다 받기.** `xsm inbox --wait <초>`는 사본이 하나라도 생길 때까지 막았다가 **생기는 즉시** 돌려준다. 상한 600초(사람을 기다리는 승인 한도와 같은 값)이고 넘기면 조이며 그 사실을 stderr로 알린다. 이 상한이 "대기는 데몬이 아니다"를 코드로 못 박는 지점이다. 15초마다 stderr로 살아 있음을 알리고(조용한 프로세스는 에이전트가 죽인다), 만료돼도 종료 코드는 **0**에 출력은 `(no messages waiting)`이다 — §6의 코드는 메시지 하나의 전달 결과이지 "아무것도 오지 않았다"가 아니다. 대기 루프는 세기만 하고 절대 꺼내지 않는다(꺼내기는 rename 선점이라 기다리던 메시지를 삼킨다). MCP `xsm_inbox`의 `wait`는 상한 60초다. MCP 서버가 요청을 한 번에 하나씩 읽으므로 더 길게 막으면 클라이언트에는 서버가 죽은 것으로 보인다.
 - **턴 중 수신(`xsm inbox`).** 발신 측은 대기열에 넣기 전에 봉투 사본을 `inbox/<thread-uuid>/<id>.json`에
   둔다(대기열 전송이 실패하면 지운다). Codex 세션은 턴 도중 `xsm inbox`나 MCP `xsm_inbox`로 사본을 꺼낸다.
-  꺼내는 순간 훅과 같은 검사(`receive.check`)를 거치고 같은 영수증을 쓴다. 나중에 대기열 사본이 훅에
-  도착하면 영수증이 이미 있으므로 보관하지 않고 거부한다. Codex에서 훅 거부는 그 대기열 항목을 흔적 없이
-  소비한다(S6). 반대로 훅이 먼저 받으면 사본을 지운다. 사본을 꺼낼 때는 rename으로 선점하므로 두 경로가
+  꺼내는 순간 훅과 같은 검사(`receive.check`)를 거치고 같은 영수증을 쓴다. 발신 측은 `codex queue`가
+  출력한 대기열 항목 id와 홈을 사본에 적어 두고(`queued_id`, `codex_home`), 사본을 꺼낸 쪽이 데몬 제어
+  소켓의 `thread/queue/delete {threadId, queuedSubmissionId}`로 대기열 사본을 거둔다. 거두지 못하면(데몬 없음,
+  샌드박스 셸, 이미 시작됨) 나중에 대기열 사본이 훅에 도착하고, 영수증이 이미 있으므로 보관하지 않고
+  거부한다. Codex에서 훅 거부는 그 대기열 항목을 소비하지만(S6) 화면에 "Blocked by hook" 카드와 짧은 턴
+  항목을 메시지마다 남긴다. 그래서 거두기가 기본이고 거부는 그 뒤의 안전망이다(이슈 #7, Codex 0.159.2에서
+  삭제 응답 `{"deleted": true|false}`와 삭제 뒤 턴 종료 시 전달되지 않음을 실측, 2026-09-30). 반대로 훅이 먼저 받으면 사본을 지운다. 사본을 꺼낼 때는 rename으로 선점하므로 두 경로가
   동시에 읽어도 한 번만 넘긴다. Codex 세션이 부르는 xsm 명령과 MCP 도구는 대기 중인 사본 수를 알린다
   (명령은 stderr). 근거: S10 collab4에서 Codex 워커가 `sleep` 폴링으로 턴을 끝내지 않아 15분 동안 받은
   메시지 6건을 하나도 읽지 못했다.
@@ -107,7 +111,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 | 경로 | 스키마 |
 |---|---|
 | `mcp/<pid>.json` | `{"pid", "ppid", "lstart", "started", "cwd"}`: 실행 중인 xsm MCP 서버의 비콘(§4.3). 서버가 끝나면 지우고, 죽은 pid의 비콘은 읽을 때 정리한다 |
-| `inbox/<thread-uuid>/<id>.json` | `{"id", "t", "content"}`: Codex 대상 메시지의 봉투 사본(§2.2). 어느 경로로든 넘겨지면 지우고, 읽히지 않은 사본은 세션 포인터 보존 기간이 지나면 정리한다 |
+| `inbox/<thread-uuid>/<id>.json` | `{"id", "t", "content", "queued_id"?, "codex_home"?}`: Codex 대상 메시지의 봉투 사본(§2.2). 어느 경로로든 넘겨지면 지우고, 읽히지 않은 사본은 세션 포인터 보존 기간이 지나면 정리한다 |
 | `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "telemetry_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}], "reaches": [{"ref": str, "root": path, "t": number, "by": str, "runtime": str, "home": path, "session_id": str, "pid": number, "lstart": str?}], "links": [{"a": path, "b": path, "t": number, "by": str}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다. `links`는 `xsm link`가 쓴다(§5.3.1) |
 | `asked/<ref>.json` | `{"verb": "link"\|"join"\|"leave"\|"reach", "args": str, "cwd", "t", "session_id", "runtime"}`, 모드 0600. 사람이 세션에 직접 입력한 xsm 명령으로, 그 세션의 동의다(§5.3.3). 한 번 쓰면 지운다 |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |

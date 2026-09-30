@@ -490,6 +490,14 @@ def take_inbox(me: dict) -> list:
     worker = bool(os.environ.get("XSM_WORKER") and workers.load(os.environ["XSM_WORKER"]))
     out = []
     for item in inbox.take(str(me.get("session_id"))):
+        if item.get("queued_id"):
+            # Handed over here, so its queue copy must not arrive after the
+            # turn as a duplicate the gate refuses — Codex shows each refusal
+            # as a "Blocked by hook" card (issue #7). If this cannot reach the
+            # daemon (a sandboxed shell), the gate still drops the copy.
+            from . import codex_daemon
+            codex_daemon.delete_queued(item.get("codex_home") or me.get("home") or "",
+                                       str(me.get("session_id")), item["queued_id"])
         parsed = envelope.parse(item["content"])
         msg_id = parsed.header.get("id") or item.get("id")
         if msg_id and ledger.received(msg_id):

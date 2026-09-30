@@ -40,6 +40,9 @@ class _Fail(Exception):
     pass
 
 
+DELETED, ABSENT = "deleted", "absent"
+
+
 def socket_path(codex_home: str) -> str:
     return os.path.join(os.path.expanduser(codex_home), CONTROL_SOCKET)
 
@@ -78,6 +81,40 @@ def start_queued(codex_home: str, thread_id: str, queued_id: str, timeout: float
     if isinstance(turn, dict):
         return STARTED, str(turn.get("id") or turn.get("status") or "")
     return UNAVAILABLE, "unexpected reply: %s" % json.dumps(reply)[:200]
+
+
+def delete_queued(codex_home: str, thread_id: str, queued_id: str, timeout: float = 1.0) -> str:
+    """Take a queued item back out of a thread's queue: deleted, absent (it
+    already started, or was never there) or unavailable. `xsm inbox` hands a
+    message over mid-turn; the queue's own copy then arrived after the turn,
+    the gate refused it as a duplicate, and Codex showed a "Blocked by hook"
+    card for every message (issue #7). thread/queue/delete takes the id
+    `codex queue` printed and answers {"deleted": bool} (measured with Codex
+    0.159.2, 2026-09-30)."""
+    path = socket_path(codex_home)
+    if not (thread_id and queued_id) or not os.path.exists(path):
+        return UNAVAILABLE
+    deadline = time.monotonic() + timeout
+    conn = None
+    try:
+        conn = _Conn(os.path.realpath(path), deadline)
+        init = conn.call("initialize", "initialize", {
+            "clientInfo": {"name": "xsm", "version": _version()},
+            "capabilities": {"experimentalApi": True}})
+        if "error" in init:
+            return UNAVAILABLE
+        conn.send({"method": "initialized"})
+        reply = conn.call(2, "thread/queue/delete", {"threadId": thread_id,
+                                                      "queuedSubmissionId": queued_id})
+    except (OSError, _Fail, ValueError):
+        return UNAVAILABLE
+    finally:
+        if conn is not None:
+            conn.close()
+    result = reply.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("deleted"), bool):
+        return UNAVAILABLE
+    return DELETED if result["deleted"] else ABSENT
 
 
 _LOADED_CACHE = {}          # realpath(home) -> (monotonic time answered, set | None)

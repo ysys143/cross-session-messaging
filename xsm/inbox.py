@@ -34,6 +34,19 @@ def keep(session_id: str, msg_id: str, content: str) -> None:
                      {"id": msg_id, "t": time.time(), "content": content})
 
 
+def note_queued(session_id: str, msg_id: str, codex_home: str, queued_id: str | None) -> None:
+    """Record where the queue's own copy of a kept message is, so the reader
+    that takes the message first can take that copy back out (issue #7). A
+    copy already taken is left alone."""
+    if not (session_id and msg_id and queued_id):
+        return
+    p = os.path.join(_dir(session_id), "%s.json" % msg_id)
+    item = paths.read_json(p)
+    if isinstance(item, dict):
+        item.update({"queued_id": queued_id, "codex_home": codex_home})
+        paths.write_json(p, item)
+
+
 def drop(session_id: str | None, msg_id: str | None) -> None:
     if not (session_id and msg_id):
         return

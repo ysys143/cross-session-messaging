@@ -1694,6 +1694,39 @@ class CodexInboxTest(TempState):
         self.assertIn("already received", out["reason"])
         self.assertEqual(os.listdir(paths.path(paths.HELD)), [], "the session has it; not held")
 
+    def test_reading_it_mid_turn_takes_the_queue_copy_back_out(self):
+        """Issue #7: the queue copy arriving after the turn was refused as a
+        duplicate, and Codex showed a "Blocked by hook" card per message."""
+        from xsm import adapters, codex_daemon, inbox, ledger, receive
+        adapters.to_codex = lambda home, thread, content: (
+            self.queued.append(content) or
+            "Queued message 01a0-q%d for thread %s." % (len(self.queued), thread))
+        deleted = []
+        codex_daemon.delete_queued = lambda home, thread, qid, timeout=1.0: (
+            deleted.append((home, thread, qid)) or codex_daemon.DELETED)
+        first, second = self._send("one"), self._send("two")
+        texts = receive.take_inbox(self.b)
+        self.assertEqual(len(texts), 2)
+        self.assertEqual(sorted(q for _, _, q in deleted), ["01a0-q1", "01a0-q2"])
+        self.assertTrue(all(t == "t-b" and h == self.b["home"] for h, t, _ in deleted))
+        for r in (first, second):
+            self.assertEqual(ledger.status(r.msg_id or "")["status"], "delivered")
+        self.assertEqual(receive.take_inbox(self.b), [], "and read once")
+        self.assertEqual(inbox.count("t-b"), 0)
+
+    def test_if_the_queue_copy_cannot_be_deleted_the_gate_still_drops_it(self):
+        from xsm import adapters, codex_daemon, receive
+        adapters.to_codex = lambda home, thread, content: (
+            self.queued.append(content) or "Queued message 01a0-q9 for thread %s." % thread)
+        codex_daemon.delete_queued = lambda *a, **k: codex_daemon.UNAVAILABLE   # sandboxed shell
+        self._send()
+        self.assertEqual(len(receive.take_inbox(self.b)), 1)
+        receive.register = lambda data, runtime: self.b
+        out = receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "t-b",
+                              "turn_id": "x", "cwd": self.tmp, "prompt": self.queued[0]})
+        assert out is not None
+        self.assertEqual(out["decision"], "block", "delivered once all the same")
+
     def test_a_message_the_hook_delivered_is_gone_from_the_inbox(self):
         from xsm import inbox, receive
         self._send()
