@@ -816,6 +816,26 @@ def diff(home: str, runtime: str) -> str:
     return "\n".join(lines)
 
 
+def orphaned_servers() -> list:
+    """[(pid, folder)] for xsm MCP servers running from a folder that no longer
+    exists: a plugin update removed the version a still-open session started
+    on (issue #6). Their sessions need restarting to get working xsm tools."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        script = next((a for a in parts[1].split() if a.endswith("/hooks/xsm-mcp.py")), None)
+        if script and not os.path.exists(script):
+            found.append((int(parts[0]), os.path.dirname(os.path.dirname(script))))
+    return found
+
+
 def codex_versions() -> list:
     """[(path, version or the first line of its failure)] for every codex on
     this machine, best first. One that cannot run is worth naming: an npm
@@ -903,6 +923,7 @@ def doctor() -> dict:
         "leftovers": {h["path"]: leftovers(h["path"]) for h in homes},
         "retired": {h["path"]: retired_commands(h["path"]) for h in homes},
         "xsm_on_path": shutil.which("xsm"),
+        "orphaned_servers": orphaned_servers(),
         "strict_peers": bool(config.load().get("strict_peers")),
         "stuck": stuck(),
         "limits": [

@@ -979,6 +979,9 @@ def cmd_doctor(args) -> int:
           % (report["decisions_seen"], report["hook_errors_recent"]))
     print("held       %d message(s)" % report["held"])
     print("native     %s" % _native_note(report))
+    for pid, folder in report.get("orphaned_servers") or []:
+        print("orphaned   xsm MCP server pid %d runs from %s, which was removed; restart that "
+              "session for working xsm tools" % (pid, _home_tilde(folder)))
     for plan in report["installs"]:
         if plan.get("error"):
             print("install    %s: %s" % (plan["file"], plan["error"]))
@@ -1069,6 +1072,9 @@ def _doctor_rows(report: dict) -> list:
              % (report["decisions_seen"], report["hook_errors_recent"])),
             ("held", "%d message(s)" % report["held"]),
             ("native", _native_note(report))]
+    for pid, folder in report.get("orphaned_servers") or []:
+        rows.append(("orphaned", "xsm MCP server pid %d runs from %s, which was removed; restart "
+                     "that session" % (pid, _home_tilde(folder))))
     for plan in report["installs"]:
         rows.append(("install", "%s: %s" % (_home_tilde(plan["file"]), plan["error"])
                      if plan.get("error") else "%s: %s" % (

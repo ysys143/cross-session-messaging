@@ -56,5 +56,38 @@ class PreloadTest(unittest.TestCase):
         self.assertLess(main.index("preload()"), main.index("Server().serve()"))
 
 
+class RemovedVersionTest(unittest.TestCase):
+    """Issue #6: servers already running from a removed folder cannot be saved
+    by preload; they must say what happened and what to do instead."""
+
+    def test_an_import_error_from_a_removed_folder_says_what_to_do(self):
+        from unittest import mock
+        sys.path.insert(0, str(REPO))
+        from xsm import mcp
+        err = ImportError("cannot import name 'workers' from 'xsm'")
+        with mock.patch.object(mcp.os.path, "isdir", return_value=False):
+            note = mcp.removed_version_note(err, "xsm_join")
+        self.assertIn("plugin update removed", note)
+        self.assertIn("xsm join <project>", note)
+        self.assertIn("new session", note)
+        self.assertIsNone(mcp.removed_version_note(err, "xsm_join"), "folder present: no note")
+        self.assertIsNone(mcp.removed_version_note(ValueError("x"), "xsm_join"))
+
+    def test_doctor_finds_servers_running_from_a_removed_folder(self):
+        from unittest import mock
+        sys.path.insert(0, str(REPO))
+        from xsm import install
+        with tempfile.TemporaryDirectory() as tmp:
+            live = os.path.join(tmp, "0.4.9", "hooks", "xsm-mcp.py")
+            os.makedirs(os.path.dirname(live))
+            Path(live).touch()
+            gone = os.path.join(tmp, "0.4.7", "hooks", "xsm-mcp.py")
+            ps = "  101 /usr/bin/python3 %s\n  202 /usr/bin/python3 %s\n  303 bash\n" % (live, gone)
+            with mock.patch.object(install.subprocess, "run",
+                                   return_value=mock.Mock(stdout=ps)):
+                self.assertEqual(install.orphaned_servers(),
+                                 [(202, os.path.join(tmp, "0.4.7"))])
+
+
 if __name__ == "__main__":
     unittest.main()

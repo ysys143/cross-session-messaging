@@ -656,12 +656,40 @@ class Server:
                     # this loop and the server exited with no reply (second
                     # review, 2026-09-28).
                     text, error = "xsm failed: %s: %s" % (type(exc).__name__, exc), True
+                    gone = removed_version_note(exc, params.get("name"))
+                    if gone:
+                        text += "\n" + gone
                 self.send({"id": mid, "result": {"content": [{"type": "text", "text": text}],
                                                  "isError": error}})
             elif method == "ping" and mid is not None:
                 self.send({"id": mid, "result": {}})
             elif mid is not None and method:
                 self.send({"id": mid, "error": {"code": -32601, "message": "not supported"}})
+
+
+# The shell command each consent-bearing tool stands for, for the note below.
+SHELL_FORMS = {"xsm_join": "xsm join <project> (xsm leave <project>)",
+               "xsm_link": "xsm link <folder>", "xsm_reach": "xsm reach <folder>",
+               "xsm_send": "xsm send <target> --text \"...\""}
+
+
+def removed_version_note(exc: BaseException, tool: str | None) -> str | None:
+    """What to do when this server's own files are gone, or None.
+
+    A plugin update deletes the old version folder while a session started on
+    it is still open; a server that had not loaded a module yet then fails with
+    ImportError and nothing said why (issue #6: `$xsm join` failed with
+    "cannot import name 'workers'" from a deleted 0.4.7 folder). preload()
+    prevents this for servers started on 0.4.9 or later; this tells the agent
+    and its user the way out on the ones already running."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if not isinstance(exc, ImportError) or os.path.isdir(os.path.join(here, "xsm")):
+        return None
+    shell = SHELL_FORMS.get(tool or "", "xsm <command>")
+    return ("This session's xsm MCP server runs from %s, which a plugin update removed. Start a "
+            "new session to load the installed xsm. Until then run the same thing in the shell: "
+            "`%s`. If that is refused as your user's decision, ask them to type it in a terminal."
+            % (here, shell))
 
 
 def beacon_path() -> str:

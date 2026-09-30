@@ -50,9 +50,7 @@ inside one code block. If it fails with `sandbox-blocked`, call the MCP tool
 `xsm_send` instead (same target and text) and reply with its result the same way.
 
 **`link <folder>`** — call the MCP tool `xsm_link` with `dir` set to the folder
-(both ways, until unlinked; what your user typed is the consent). If there is no
-`xsm_link` tool, run `xsm link <folder>` in the shell (it uses the same consent);
-if that is refused, tell your user to start a new session and type it there.
+(both ways, until unlinked; what your user typed is the consent).
 
 **`join <project>`** / **`leave <project>`** — call `xsm_join` with `project`
 set to the word after it (and `leave` true for `leave`).
@@ -63,6 +61,8 @@ session alone, until it ends).
 For these four: call the tool once and reply with its result, copied exactly,
 inside one code block: it says who answered, and a terminal command when a form
 did not reach them. Say your user refused only if it says they chose `deny`.
+If the tool is missing or answers `xsm failed:`, run the same `xsm <command>` in
+the shell once (the typed consent holds); if refused, ask your user to type it.
 
 **Words that are not a command** (`/xsm tell plugin-worker what I did`): a
 request in words, see "Called without one". **Nothing, or nonsense** — reply with exactly:
