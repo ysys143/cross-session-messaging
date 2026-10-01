@@ -2060,7 +2060,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     stest = sub.add_parser("selftest", help="check the hook fails closed for peer messages")
     stest.set_defaults(func=cmd_selftest)
+    for name in ASKING:
+        sub.choices[name].add_argument(
+            "--reply", metavar="TEXT",
+            help="your user's answer, in their own words, when xsm's hook did not record it "
+                 "(it is shown to you first, as a recorded one is)")
     return p
+
+
+# The commands that ask your user, and so take their words with --reply when the
+# hook that keeps replies did not (consent.supplied).
+ASKING = ("join", "leave", "spawn", "post", "doc", "remote", "approve", "link", "reach", "unblock",
+          "attempts", "frameworks", "send", "held")
 
 
 def main(argv=None) -> int:
@@ -2069,6 +2080,13 @@ def main(argv=None) -> int:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
     paths.ensure_home()
+    consent.supplied = None
+    if getattr(args, "reply", None):
+        if config.policy("reply_flag"):
+            consent.supplied = args.reply
+        else:
+            print("xsm: --reply is switched off here (reply_flag), so it is ignored",
+                  file=sys.stderr)
     if args.command not in ("hook", "statusline", "prune", "reap", "mcp", "worker-finish"):
         housekeeping.maybe_prune()
     try:

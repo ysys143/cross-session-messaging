@@ -27,7 +27,7 @@ TTL seconds and for one use by the same verb on the same target.
 The agent can also ask (user decision, 2026-10-01: "the user is asked, the
 agent does the typing"; and "store the user's approval message as the
 verdict"). When the agent runs `xsm link|join|leave|reach` with no consent,
-the CLI records the request (~/.xsm/asked/<ref>.pending.json) and tells the
+the CLI records the request (~/.xsm/asked/<ref>.<key>.pending.json) and tells the
 agent to ask its user in plain words. The person's latest message in that
 session is kept on the request, verbatim, as the verdict. The agent reads it
 in two steps: the first run after a reply refuses and shows it, the next run
@@ -56,6 +56,31 @@ An ask leaves files behind: the pending file holds up to VERDICT_MAX characters 
 the person's words, and flock's file stays. Both go when the ask is used or has
 expired (while the lock is held, so a waiter on the old lock starts over on the
 new one), and `prune` sweeps the ones nobody came back to.
+
+What the person's own request is worth (user decision, 2026-10-01: "if I told you to
+connect, follow it"; the ping-pong that asked them to say yes to what they had just
+asked for was the first problem). The hook keeps their last RECENT_KEEP prompts of a
+session (asked/<ref>.recent.json, never a command or text the harness wrote). When the
+agent runs a command with no reply on record, and the person's latest prompt, young
+enough and short enough, names the target (the folder by path or last name, the
+project, a session in it by name or ref) and says what they want (INTENT_RE: connect,
+send, 연결, 보내, ...), that prompt is the reply, already shown: the next run goes ahead.
+It is used once. xsm still does not judge the words: the agent reads them in the show
+step, and "don't connect repo-b" names the target and is a no it will see. Without a
+name or an intent the person is asked as before. Policy `reply_from_request` = false
+turns it off.
+
+Each thing asked about has its own request file (asked/<ref>.<digest of verb and
+target>.pending.json), so asking about a reach does not erase the reply to a link; a
+reply is written to every request the session has open, and the show step guards which
+one it answers. The single slot older versions wrote is still read. An ask lives
+ASK_MAX; a reply is good for TTL.
+
+When the hook did not record the reply (a session started before an update; a state
+folder it could not write) the agent gives it itself, `--reply "<their words>"` on the
+asking command (`supplied`): the same show step runs on those words, and the use is
+logged (event consent-flag). Policy `reply_flag` = false refuses the flag. Both are
+inside the uid boundary (ADR-0009): the agent could write the file itself.
 """
 from __future__ import annotations
 
@@ -84,13 +109,29 @@ QUESTION_MAX = 200
 # and used it in the same breath, before the agent could read it (2026-10-01).
 SHOW_DELAY = 1.0
 # How long a run waits for another that holds the lock of an ask; then it goes
-# on unlocked, as it does where the folder cannot be written (2026-10-01).
+# on unlocked, as it does where the folder cannot be written (2026-10-01). A
+# hook runs on every prompt of every session under a 10 s limit, so it waits
+# a fifth of that.
 LOCK_WAIT = 5.0
+HOOK_LOCK_WAIT = 1.0
 # A lock file with no ask is an orphan only after this long: a run makes the
 # lock a moment before it writes the ask, and a sweep in between would take it
 # from under the run (2026-10-01).
 LOCK_GRACE = 5.0
+# The person's last prompts of a session, kept so the request that made the
+# agent run a command can stand as the reply to its ask (2026-10-01).
+RECENT_KEEP = 3
+# A request is a sentence or two; a long paste that happens to mention a
+# folder and "send" is not one.
+REQUEST_MAX = 500
 VERBS = ("link", "join", "leave", "reach")
+# What a person says when they want the thing done: to connect, send, let in.
+# English words as words (so "unlink" is not "link"), Korean as stems.
+INTENT_RE = re.compile(
+    r"\b(?:connect|link|join|reach|send|unblock|approve|allow|grant|deliver|release|forward|"
+    r"relay|message|tell|talk|ask|notify|leave|remove)\w*|"
+    r"연결|가입|합류|참여|보내|보낼|전달|전송|알려|말해|물어|풀어|해제|허용|허락|승인|연락|대화|소통",
+    re.I)
 # A Codex prompt as typed: `$xsm link <folder>`.
 CODEX_RE = re.compile(r"\A\s*\$xsm[ \t]+(%s)(?![^ \t\n])[ \t]*([^\n]*)" % "|".join(VERBS))
 # The arguments of a Claude slash command: `link <folder>`.
@@ -117,8 +158,28 @@ def _path(ref: str) -> str:
     return paths.path(ASKED, "%s.json" % ref)
 
 
-def _pending_path(ref: str) -> str:
-    return paths.path(ASKED, "%s.pending.json" % ref)
+def _pending_path(ref: str, key: str | None = None) -> str:
+    """One file per thing asked about: `<ref>.<digest of verb and target>`. Asking
+    about a reach used to erase the reply to a link, because a session had a
+    single slot (2026-10-01). With no key it is that single slot, which older
+    versions wrote and which is still read."""
+    return paths.path(ASKED, "%s.pending.json" % ref if key is None
+                      else "%s.%s.pending.json" % (ref, key))
+
+
+def pending_files(ref: str) -> list:
+    """Every ask file of this session: the keyed ones, and an older version's
+    single slot."""
+    try:
+        names = os.listdir(paths.path(ASKED))
+    except OSError:
+        return []
+    return [paths.path(ASKED, n) for n in sorted(names)
+            if n.startswith(ref + ".") and n.endswith(".pending.json")]
+
+
+def _recent_path(ref: str) -> str:
+    return paths.path(ASKED, "%s.recent.json" % ref)
 
 
 def _lock(lock: str, wait: float | None = None):
@@ -155,13 +216,13 @@ def _lock(lock: str, wait: float | None = None):
 
 
 @contextlib.contextmanager
-def _locked(p: str):
+def _locked(p: str, wait: float | None = None):
     """One reader-writer at a time for a pending file (flock on a sibling
     .lock). A reply written between another run's read and its write was lost,
     and two reruns could each see the other's state as theirs (measured 323 of
     400, 2026-10-01). Without a lock to be had the run goes on unlocked: a hook
     must not fail, or wait for good, on it."""
-    fd = _lock(p + ".lock")
+    fd = _lock(p + ".lock", wait)
     try:
         yield
     finally:
@@ -179,11 +240,14 @@ def _drop(p: str) -> None:
 
 
 def _expired(entry: dict, now: float) -> bool:
-    """A request without a reply expires TTL after it was made; once the person
-    has replied, TTL after their latest reply, but never later than ASK_MAX
-    after the request."""
+    """A request lives ASK_MAX from the moment it was made. A person may be
+    away for a quarter of an hour before answering, and an ask that was gone
+    after TTL had them answer into nothing and be asked again (2026-10-01).
+    Once they have replied, the reply is good for TTL, and no longer than
+    ASK_MAX after the request."""
     asked = float(entry.get("t") or 0)
-    return now - max(asked, float(entry.get("verdict_t") or 0)) > TTL or now - asked > ASK_MAX
+    replied = entry.get("verdict_t")
+    return now - asked > ASK_MAX or (bool(replied) and now - float(replied) > TTL)
 
 
 def _target(args: str) -> str | None:
@@ -296,18 +360,18 @@ def record(me: dict | None, data: dict) -> dict | None:
         m = CODEX_RE.match(text) if (me or {}).get("runtime") == "codex" else None
         if not m and not not_a_reply(text):
             note_verdict(me, text)
+            remember(me, text)
     else:
         return None
     return _write(me, m.group(1), m.group(2)) if m else None
 
 
-def _fresh_pending(me: dict | None) -> tuple:
-    """(path, entry) of this session's unexpired request, or (None, None). An
-    expired one is removed here: it holds up to VERDICT_MAX characters of the
-    person's words. Called with the lock held."""
+def _fresh_pending(me: dict | None, p: str) -> tuple:
+    """(path, entry) of this session's unexpired request at `p`, or (None,
+    None). An expired one is removed here: it holds up to VERDICT_MAX characters
+    of the person's words. Called with the lock held."""
     if not me or not me.get("ref"):
         return None, None
-    p = _pending_path(me["ref"])
     entry = paths.read_json(p)
     if not isinstance(entry, dict):
         return None, None
@@ -320,26 +384,54 @@ def _fresh_pending(me: dict | None) -> tuple:
     return p, entry
 
 
-def note_verdict(me: dict | None, text: str) -> bool:
+def note_verdict(me: dict | None, text: str, wait: float | None = None) -> bool:
     """Keep the person's latest message after a request as its verdict. It
     replaces an earlier one (user decision, 2026-10-01): the first message is
     often a question ("does that delete the other records too?") and the yes
-    or no comes after it. A new reply has not been shown to the agent yet."""
-    if not me or not me.get("ref") or not text.strip() or \
-            not os.path.exists(_pending_path(me["ref"])):       # every prompt comes by here
+    or no comes after it. A new reply has not been shown to the agent yet.
+
+    It goes to every request the session has open: the person may be answering
+    any of them, and what each shows the agent is the words, for the agent to
+    judge against what it asked. Called from the hook, so the lock is waited
+    for HOOK_LOCK_WAIT, not as long as a command would."""
+    if not me or not me.get("ref") or not text.strip():
         return False
-    try:
-        with _locked(_pending_path(me["ref"])):
-            p, entry = _fresh_pending(me)
-            if not p:
-                return False
-            entry.update({"verdict": text.strip()[:VERDICT_MAX], "verdict_t": time.time(),
-                          "shown": False})
-            entry.pop("old_hook", None)         # this reply came by a hook that marks it
-            paths.write_json(p, entry, mode=0o600)
-    except OSError:
-        return False                    # a folder that cannot be written keeps no reply
-    return True
+    wait = HOOK_LOCK_WAIT if wait is None else wait
+    noted = False
+    for p in pending_files(me["ref"]):  # every prompt comes by here: one listdir
+        try:
+            with _locked(p, wait):
+                _, entry = _fresh_pending(me, p)
+                if not entry:
+                    continue
+                entry.update({"verdict": text.strip()[:VERDICT_MAX], "verdict_t": time.time(),
+                              "shown": False})
+                entry.pop("old_hook", None)     # this reply came by a hook that marks it
+                paths.write_json(p, entry, mode=0o600)
+                noted = True
+        except OSError:
+            continue                    # a folder that cannot be written keeps no reply
+    return noted
+
+
+def remember(me: dict | None, text: str) -> None:
+    """Keep the person's last RECENT_KEEP prompts of this session, for
+    `_from_request`. Not a command, not text the harness wrote (record only
+    passes what could be a reply), and a prompt a second hook registration saw
+    a moment ago is the same one."""
+    if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not text.strip():
+        return
+    now, p = time.time(), _recent_path(me["ref"])
+    entry = paths.read_json(p)
+    kept = [x for x in (entry or {}).get("prompts", []) if isinstance(x, dict)] \
+        if isinstance(entry, dict) and entry.get("session_id") == str(me.get("session_id") or "") \
+        else []
+    text = text.strip()[:VERDICT_MAX]
+    if kept and kept[-1].get("text") == text and now - float(kept[-1].get("t") or 0) < 5:
+        return
+    kept.append({"text": text, "t": now})
+    paths.write_json(p, {"session_id": str(me.get("session_id") or ""), "t": now,
+                         "prompts": kept[-RECENT_KEEP:]}, mode=0o600)
 
 
 def _wanted(me: dict, verb: str, target: str, here: str | None) -> tuple:
@@ -378,11 +470,11 @@ OLD_HOOK = ("Note: this session's xsm hooks are older than this xsm command, so 
             "update, or use the MCP form tool if there is one.")
 
 
-def _take(me: dict, verb: str, want: str, want_here: str | None) -> tuple:
-    """take_or_request's step, with the lock held: (reply, go, how it was
-    kept). An OSError from it means the reply could not be marked or used: the
-    folder cannot be written."""
-    p, entry = _fresh_pending(me)
+def _take(me: dict, p: str, verb: str, want: str, want_here: str | None) -> tuple:
+    """take_or_request's step on the ask at `p`, with its lock held: (reply, go,
+    how it was kept). An OSError from it means the reply could not be marked or
+    used: the folder cannot be written."""
+    p, entry = _fresh_pending(me, p)
     if not p or entry.get("verdict") is None or not _matches(entry, verb, want, want_here):
         return None, False, True
     now = time.time()
@@ -403,17 +495,135 @@ def _take(me: dict, verb: str, want: str, want_here: str | None) -> tuple:
     return entry["verdict"], True, kept
 
 
-def _record(me: dict, verb: str, want: str, want_here: str | None) -> None:
-    """Record the ask, with the lock held. One already on record for exactly
-    this stays as it is, with the time it was made: a run before the person
-    was asked pushed ASK_MAX out each time (2026-10-01)."""
-    _, entry = _fresh_pending(me)
+def _record(me: dict, p: str, verb: str, want: str, want_here: str | None) -> None:
+    """Record the ask at `p`, with the lock held. One already on record for
+    exactly this stays as it is, with the time it was made: a run before the
+    person was asked pushed ASK_MAX out each time (2026-10-01)."""
+    _, entry = _fresh_pending(me, p)
     if entry and _matches(entry, verb, want, want_here):
         return
-    paths.write_json(_pending_path(me["ref"]), {
+    paths.write_json(p, {
         "verb": verb, "target": want, "here": want_here, "cwd": me.get("cwd") or "",
         "t": time.time(), "session_id": str(me.get("session_id") or ""),
         "verdict": None}, mode=0o600)
+
+
+# A reply the person gave on the command line, as `--reply "<their words>"`
+# (set by the CLI for one run). The way to be heard when the hook that keeps
+# replies did not run or could not write (a session started before an update, a
+# state folder the hook could not reach). Inside the uid boundary like the rest:
+# the agent can write these files itself, so this opens nothing it did not have
+# (ADR-0009); it makes the step explicit, and the show step still guards it.
+supplied: str | None = None
+
+
+def _supply(me: dict, p: str, verb: str, want: str, want_here: str | None, text: str) -> None:
+    """Keep `text`, with the lock held, as the reply to the ask at `p` (the ask
+    is made if there is none): what the hook would have done. The same words
+    given again change nothing, so a run that passes `--reply` twice shows the
+    reply once and then goes ahead."""
+    text = text.strip()[:VERDICT_MAX]
+    _record(me, p, verb, want, want_here)
+    _, entry = _fresh_pending(me, p)
+    if not text or not entry or not _matches(entry, verb, want, want_here) or \
+            entry.get("verdict") == text:
+        return
+    entry.update({"verdict": text, "verdict_t": time.time(), "shown": False, "via": "flag"})
+    entry.pop("old_hook", None)
+    paths.write_json(p, entry, mode=0o600)
+    paths.append_jsonl("decisions.jsonl", {"event": "consent-flag", "verb": verb, "target": want,
+                                           "verdict": text[:200]})
+
+
+def _mentions(text: str, name: str) -> bool:
+    """Whether `text` names `name` as a word or path of its own: not inside a
+    longer one ("repo-b" is in "repo-b?" and "../repo-b", not in "repo-b2"), and
+    followed by Korean particles as they are written ("repo-b에")."""
+    return len(name) >= 3 and re.search(
+        r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_-])" % re.escape(name), text, re.I) is not None
+
+
+def _names_for(verb: str, target: str, want: str) -> set:
+    """What a person may call what is being decided: the target as typed and as
+    resolved, and for a folder its last name and its `~` form."""
+    names = {target, want}
+    if verb in ("link", "reach"):
+        names |= {os.path.basename(want.rstrip("/")), os.path.basename(target.rstrip("/"))}
+        home = os.path.expanduser("~")
+        if want.startswith(home + "/"):
+            names.add("~" + want[len(home):])
+    return {n for n in names if n}
+
+
+def _session_names(verb: str, want: str) -> set:
+    """The names of the sessions a decision is about: the running sessions in a
+    folder, the session to unblock, the sender of a held message. For when
+    `_names_for` finds nothing. Lazy: it reads the registry."""
+    from . import config, registry
+    names = set()
+    if verb in ("link", "reach"):
+        root = os.path.realpath(want)
+        for rec in registry.records():
+            if rec.get("state") in ("live", "unknown") and \
+                    config.project_root(rec.get("cwd") or "/") == root:
+                names |= {rec.get("name"), rec.get("ref")}
+    elif verb == "unblock":
+        for rec in registry.records():
+            if rec.get("ref") == want:
+                names |= {rec.get("name")}
+    elif verb == "held-deliver":
+        held = paths.read_json(paths.path(paths.HELD, "%s.json" % want))
+        if isinstance(held, dict):
+            names |= {str(held.get("from") or "").split("@")[0], (held.get("header") or {}).get("ref")}
+    return {n for n in names if n}
+
+
+def _latest_request(me: dict) -> dict | None:
+    """The person's latest prompt of this session, if it is young enough (ASK_MAX)
+    and short enough (REQUEST_MAX) to be a request, and was not already taken for
+    one."""
+    entry = paths.read_json(_recent_path(me["ref"]))
+    if not isinstance(entry, dict) or entry.get("session_id") != str(me.get("session_id") or ""):
+        return None
+    last = (entry.get("prompts") or [None])[-1]
+    if not isinstance(last, dict) or last.get("used") or not isinstance(last.get("text"), str) \
+            or len(last["text"]) > REQUEST_MAX or time.time() - float(last.get("t") or 0) > ASK_MAX:
+        return None
+    return last
+
+
+def _from_request(me: dict, p: str, verb: str, target: str, want: str,
+                  want_here: str | None) -> str | None:
+    """When there is no reply, the person's own request may be one (A4, user
+    decision 2026-10-01: they asked for it; do not ask them to say it again).
+    Their latest prompt counts when it names what is being decided (the folder
+    by path or last name, the project, a session in it by name or ref) and says
+    what they want done (INTENT_RE). That prompt becomes the reply, already
+    shown, so the next run goes ahead: the agent still reads the words first, and
+    "don't connect repo-b" is a no it will see. It is used once. Conservative on
+    purpose: no name or no intent, and the person is asked as before. Switched off
+    by the policy reply_from_request. Called with the lock held."""
+    from . import config
+    if not config.policy("reply_from_request"):
+        return None
+    last = _latest_request(me)
+    if not last or not INTENT_RE.search(last["text"]):
+        return None
+    names = _names_for(verb, target, want)
+    if not any(_mentions(last["text"], n) for n in names) and \
+            not any(_mentions(last["text"], n) for n in _session_names(verb, want)):
+        return None
+    now = time.time()
+    paths.write_json(p, {
+        "verb": verb, "target": want, "here": want_here, "cwd": me.get("cwd") or "", "t": now,
+        "session_id": str(me.get("session_id") or ""), "verdict": last["text"], "verdict_t": now,
+        "shown": True, "shown_t": now, "via": "request"}, mode=0o600)
+    entry = paths.read_json(_recent_path(me["ref"])) or {}
+    entry["prompts"][-1]["used"] = True
+    paths.write_json(_recent_path(me["ref"]), entry, mode=0o600)
+    paths.append_jsonl("decisions.jsonl", {"event": "consent-request", "verb": verb,
+                                           "target": want, "verdict": last["text"][:200]})
+    return last["text"]
 
 
 def take_or_request(me: dict | None, verb: str, target: str, here: str | None = None) -> tuple:
@@ -430,7 +640,9 @@ def take_or_request(me: dict | None, verb: str, target: str, here: str | None = 
       does not promise it.
     - (reply, False, kept): a reply the agent has not seen, marked as shown now,
       which the caller refuses with. `kept` is OLD_HOOK, a string to show with
-      it, for a reply an older hook stored (on every show of it).
+      it, for a reply an older hook stored (on every show of it). The reply is
+      the person's request itself when it named this and said what to do
+      (`_from_request`), or the words given with `--reply` (`supplied`).
     - (reply, True, kept): the reply that was shown, is still the latest and was
       shown at least SHOW_DELAY ago, which is used up: the caller goes ahead,
       once, and says so with approved_line. A rerun sooner than that gets the
@@ -439,15 +651,24 @@ def take_or_request(me: dict | None, verb: str, target: str, here: str | None = 
 
     One locked step, the read and the write together (_locked): a reply landing
     between a take and a separate request was overwritten unseen (adversarial
-    check, 2026-10-01)."""
+    check, 2026-10-01). Each thing asked about has its own request file, so one
+    ask does not erase the reply to another."""
     if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not target:
         return None, False, False
     want, want_here = _wanted(me, verb, target, here)
+    p = _pending_path(me["ref"], digest(verb, want))
     try:
-        with _locked(_pending_path(me["ref"])):
-            reply, go, kept = _take(me, verb, want, want_here)
+        with _locked(p):
+            if supplied:
+                _supply(me, p, verb, want, want_here, supplied)
+            reply, go, kept = _take(me, p, verb, want, want_here)
+            if reply is None and os.path.exists(_pending_path(me["ref"])):
+                # The single slot an older version wrote: its reply is still read.
+                with _locked(_pending_path(me["ref"])):
+                    reply, go, kept = _take(me, _pending_path(me["ref"]), verb, want, want_here)
             if reply is None:
-                _record(me, verb, want, want_here)
+                _record(me, p, verb, want, want_here)
+                reply = _from_request(me, p, verb, target, want, want_here)
             return reply, go, kept
     except OSError:
         return None, False, False
@@ -463,9 +684,10 @@ def ask(me: dict | None, verb: str, target: str, here: str | None = None) -> boo
     if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not target:
         return False
     want, want_here = _wanted(me, verb, target, here)
+    p = _pending_path(me["ref"], digest(verb, want))
     try:
-        with _locked(_pending_path(me["ref"])):
-            _record(me, verb, want, want_here)
+        with _locked(p):
+            _record(me, p, verb, want, want_here)
     except OSError:
         return False
     return True
@@ -533,6 +755,22 @@ def prune(now: float | None = None, dry_run: bool = False) -> list:
         elif name.endswith(".pending.json"):
             lock, pending = p + ".lock", p
             stale = _stale(p, now, typed=False)
+        elif name.endswith(".recent.json"):
+            # The person's last prompts: of use to an ask for ASK_MAX, then not.
+            entry = paths.read_json(p)
+            try:
+                old = now - float(entry.get("t") or 0) > ASK_MAX if isinstance(entry, dict) \
+                    else now - os.path.getmtime(p) > ASK_MAX
+            except (TypeError, ValueError, OSError):
+                continue
+            if old:
+                if not dry_run:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        continue
+                removed.append(name)
+            continue
         elif name.endswith(".json"):
             if _stale(p, now, typed=True) and (dry_run or _drop_typed(p, now)):
                 removed.append(name)
@@ -571,7 +809,9 @@ def asks(what: str, tail: str = "", runtime: str | None = None) -> str:
             "wait for their answer. After they answer, run this same command again: xsm keeps "
             "their latest answer in this session as the verdict, and this run shows you that "
             "reply without acting on it. If it is a yes, run the command once more to go ahead; "
-            "if it is a no or a question, leave it and answer them.%s"
+            "if it is a no or a question, leave it and answer them. If it shows no reply even "
+            "though they answered, xsm's hook did not record it: run it again with --reply "
+            "\"<their words, exactly as they wrote them>\".%s"
             % (what, how(runtime), tail))
 
 

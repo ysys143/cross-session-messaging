@@ -46,6 +46,49 @@ def load() -> dict:
     return cfg
 
 
+# What a hold that was opened (user decision, 2026-10-01: a conversation the
+# person wants between their own sessions is never blocked by a rule or a
+# failure they cannot see) does by default, and how to close it again. Each
+# is a key of config.json, and XSM_<NAME in capitals> overrides it, so a
+# machine can be put back the way it was without editing a file.
+POLICY_DEFAULTS = {
+    "fail_open": True,             # false: a peer message is blocked when the hook breaks (S8-g2)
+    "remote_native": "pass",       # "hold": Claude messages from off this machine are held
+    "stale_sender": "pass",        # "hold": a message whose sender has exited is held
+    "reply_from_request": True,    # false: the person's own request is not read as their yes
+    "reply_flag": True,            # false: `--reply "<their words>"` is not accepted
+}
+_FALSE = ("0", "false", "no", "off")
+_TRUE = ("1", "true", "yes", "on")
+
+
+def policy(name: str, default=None, cfg: dict | None = None):
+    """The value of one policy switch: the environment (XSM_<NAME>), then
+    config.json, then `default` (POLICY_DEFAULTS' when none is given). A value
+    of the wrong kind is ignored. Never raises: a hook asks."""
+    if default is None:
+        default = POLICY_DEFAULTS.get(name)
+    raw = os.environ.get("XSM_" + name.upper())
+    if raw is None or not raw.strip():
+        try:
+            raw = (cfg if cfg is not None else load()).get(name)
+        except Exception:                          # noqa: BLE001 - a broken file is no policy
+            raw = None
+    if isinstance(default, bool):
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower() if raw is not None else ""
+        return True if text in _TRUE else False if text in _FALSE else default
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().lower()
+    return default
+
+
+def policy_report() -> dict:
+    """Every switch as it stands now, for `xsm doctor`."""
+    return {name: policy(name) for name in POLICY_DEFAULTS}
+
+
 def config_hash() -> str:
     raw = json.dumps(load(), sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode()).hexdigest()[:12]

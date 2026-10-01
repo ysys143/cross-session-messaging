@@ -257,7 +257,7 @@ class LinkCliTest(_Session, TempState):
         self.assertEqual(code, 2, "the first run after a reply shows it and does not go ahead")
         self.assertIn('your user replied: "응, 연결해 줘"', text)
         self.assertEqual(config.links(), [])
-        pending = consent._pending_path(me["ref"])           # the agent read it
+        pending = consent.pending_files(me["ref"])[0]           # the agent read it
         entry = paths.read_json(pending)
         entry["shown_t"] -= consent.SHOW_DELAY + 1
         paths.write_json(pending, entry)

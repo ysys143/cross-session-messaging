@@ -64,14 +64,15 @@ class _Sessions(TempState):
     def _waited(self):
         """The agent read what it was shown: the next run may pass (consent.SHOW_DELAY)."""
         from xsm import consent, paths
-        p = consent._pending_path(self.me["ref"])
+        p = consent.pending_files(self.me["ref"])[0]
         entry = paths.read_json(p)
         entry["shown_t"] -= consent.SHOW_DELAY + 1
         paths.write_json(p, entry)
 
     def _pending(self):
         from xsm import consent, paths
-        return paths.read_json(consent._pending_path(self.me["ref"]))
+        files = consent.pending_files(self.me["ref"])
+        return paths.read_json(files[0]) if files else None
 
     def _held_id(self, text):
         found = re.search(r"held as ([0-9a-f]{16})", text)
@@ -327,7 +328,7 @@ class PlanTest(_Sessions):
         consent.record(sender, {"hook_event_name": "UserPromptSubmit", "prompt": "응"})
         shown = send.send(self.target, text, sender=sender)
         self.assertIn('your user replied: "응"', shown.reason)
-        p = consent._pending_path(sender["ref"])
+        p = consent.pending_files(sender["ref"])[0]
         entry = paths.read_json(p)
         entry["shown_t"] -= consent.SHOW_DELAY + 1
         paths.write_json(p, entry)
