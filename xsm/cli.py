@@ -341,11 +341,7 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
         return consent.cannot_keep(what, mcp_tool)
     tool = " (The %s MCP tool asks with a form instead.)" % mcp_tool \
         if mcp_tool and mcp_tool != "no" else ""
-    return ("%s needs your user's yes. Ask them now, in plain words, whether to go ahead with "
-            "it. Their latest reply in this session is kept as the verdict: run this same "
-            "command again and it shows you that reply without acting on it; if it is a yes, "
-            "run it once more to go ahead, and if it is a no or a question, leave it and "
-            "answer them.%s" % (what, tool))
+    return consent.asks(what, tool)
 
 
 def cmd_join(args) -> int:
@@ -372,8 +368,8 @@ def cmd_join(args) -> int:
     _print_members(scope, root)
     others = [m for m in scope["members"] if os.path.realpath(m["root"]) != root]
     if not others:
-        print("no other project has joined %s yet. In a session there, run: /xsm join %s"
-              % (args.project, args.project))
+        print("no other project has joined %s yet. A session there asks its user and runs: "
+              "xsm join %s" % (args.project, args.project))
         return OK
     reachable = [r for r in registry.records()
                  if r.get("state") == "live" and config.project_root(r.get("cwd") or "/") != root
@@ -478,8 +474,7 @@ def cmd_link(args) -> int:
     if not args.folder:
         rows = config.links()
         if not rows:
-            print("no links. Link another folder with: /xsm link <folder>  (Codex: $xsm link "
-                  "<folder>)")
+            print("no links. To link another folder, ask your user and run: xsm link <folder>")
         for ln in rows:
             ends = (os.path.realpath(ln.get("a") or ""), os.path.realpath(ln.get("b") or ""))
             via = any(root.startswith(e.rstrip("/") + "/") for e in ends)
@@ -526,16 +521,19 @@ def cmd_link(args) -> int:
 
 
 def cmd_block(args) -> int:
+    ref = args.ref.strip()
+    if ref.startswith("ref:"):          # the deny list holds bare refs, as `list` shows them
+        ref = ref[len("ref:"):]
     if args.command == "unblock":
-        why = _person_or_refuse("lifting the block on session %s" % args.ref, "no",
-                                ask=("unblock", args.ref))
+        why = _person_or_refuse("lifting the block on session %s" % ref, "no",
+                                ask=("unblock", ref))
         if why:
             print("refused: %s" % why, file=sys.stderr)
             return REFUSED
-        changed = config.unblock(args.ref)
+        changed = config.unblock(ref)
     else:
-        changed = config.block(args.ref)
-    print("%s %s" % (args.command + "ed" if changed else "no change for", args.ref))
+        changed = config.block(ref)
+    print("%s %s" % (args.command + "ed" if changed else "no change for", ref))
     return OK
 
 
@@ -591,16 +589,16 @@ def cmd_projects(args) -> int:
             table.append(("linked", other, ""))
         print("\n".join(_md_table(["project", "folder", "member of"], table)))
         if not config.projects() and not _links_here(root):
-            print("\nNo links or named projects yet. Connect another folder with `/xsm link <folder>` "
-                  "(Codex: `$xsm link <folder>`).")
+            print("\nNo links or named projects yet. To connect another folder, ask your user "
+                  "and run `xsm link <folder>`.")
         return OK
     print("this folder (%s) is in: %s" % (_home_tilde(root), ", ".join(_memberships(here))))
     for other in _links_here(root):
         print("linked with: %s" % other)
     rows = config.projects()
     if not rows:
-        print("no named projects. Connect another folder with: /xsm link <folder>  (or xsm link "
-              "<folder>); a group of several folders: /xsm join <name>")
+        print("no named projects. To connect another folder, ask your user and run: xsm link "
+              "<folder>; for a group of several folders: xsm join <name>")
         return OK
     print("named projects:")
     for scope in rows:
@@ -1094,9 +1092,16 @@ def _stuck_lines(stuck: dict) -> list:
     """What is waiting on someone. Each of these cost an investigation once."""
     lines = []
     for req in stuck.get("approvals") or []:
-        lines.append("%s has waited %ds for a yes or no from you: %s (the session that "
-                     "started it asks you and runs `xsm approve %s`)" % (
-                         req.get("worker"), req.get("waiting_s"), req.get("tool"), req.get("id")))
+        if req.get("parent"):
+            lines.append("%s has waited %ds for a yes or no from you: %s (the session that "
+                         "started it asks you and runs `xsm approve %s`)" % (
+                             req.get("worker"), req.get("waiting_s"), req.get("tool"),
+                             req.get("id")))
+        else:        # no session started it, and only a session's parent asks about a worker
+            lines.append("%s has waited %ds for approval from whoever started it: %s [%s] (no "
+                         "session did, so only a person at a terminal can answer)" % (
+                             req.get("worker"), req.get("waiting_s"), req.get("tool"),
+                             req.get("id")))
     for row in stuck.get("undelivered") or []:
         lines.append("%s -> %s is still queued: %s" % (
             (row.get("from") or {}).get("name"), (row.get("to") or {}).get("name"), row.get("id")))
@@ -1131,11 +1136,14 @@ def _orphan_note(pid: int, folder: str) -> str:
 def _allow_note(home: str, missing: list) -> str:
     """A Claude home whose settings lack the rules that let the agent ask
     (issue #9): auto mode can refuse the skill or the command before xsm asks.
-    Only `xsm install --refresh` writes them (never a hook), and the agent runs it."""
+    Only `xsm install --refresh` writes them (never a hook), and the agent runs it.
+    Whether this home runs in auto mode is not knowable from here (a flag, a
+    project setting or Shift+Tab turns it on per session), so it says it only
+    matters there (2026-10-01)."""
     return ("%s: %d xsm allow rule(s) missing from settings.json (the skill, the approval "
-            "forms, the commands that ask you), so Claude's auto mode can stop the agent before "
-            "xsm asks you. Your agent can add them by running `xsm install --refresh`"
-            % (_home_tilde(home), len(missing)))
+            "forms, the commands that ask you). Only Claude's auto mode cares: it can stop the "
+            "agent before xsm asks you. If you use auto mode in this home, your agent can add "
+            "them by running `xsm install --refresh`" % (_home_tilde(home), len(missing)))
 
 
 def _native_note(report: dict) -> str:

@@ -682,6 +682,10 @@ FORM_TOOL_PREFIXES = ("mcp__xsm__", "mcp__plugin_xsm_xsm__")
 ASKING_COMMANDS = ("link", "reach", "join", "leave", "unblock", "approve", "attempts clear",
                    "frameworks ignore", "remote add")
 ALLOWED = "allowed"           # one note per settings file: what xsm added to its allow list
+NOTE_VERSION = 2              # a note without it predates counting the rules already there
+# Rules the eb600e8 build wrote and the list no longer holds. Only xsm ever
+# wrote these exact strings, so a home whose note is missing or old loses them.
+STALE_RULES = ("Bash(xsm spawn:*)", "Bash(xsm post:*)", "Bash(xsm doc add:*)")
 
 
 def form_tool_names() -> list:
@@ -701,34 +705,65 @@ def missing_form_tools(home: str) -> list:
     return [n for n in form_tool_names() if n not in allow]
 
 
+def _xsm_rules(note, allow: list) -> list:
+    """What xsm put in this allow list. A current note says so itself. With no
+    note, or one from before NOTE_VERSION (it holds only what its refresh newly
+    added), the known names already in the list are xsm's: an earlier version
+    put them there, and they look exactly like a person's (2026-10-01: a
+    refresh over such a home left about 24 rules behind after uninstall)."""
+    held = list(note["added"]) if isinstance(note, dict) and isinstance(note.get("added"), list) \
+        else []
+    if isinstance(note, dict) and note.get("v") == NOTE_VERSION:
+        return held
+    return held + [n for n in form_tool_names() if n in allow and n not in held]
+
+
 def allow_form_tools(home: str) -> str:
     """Add the form tools to this Claude home's permissions.allow: added | already.
 
-    What is added is noted (ALLOWED), because a rule the user already had looks
-    exactly like one xsm put there and `remove_form_tools` must not take theirs.
-    The note is made on the first call even when nothing needed adding."""
+    What xsm put there is noted (ALLOWED), because a rule the person already
+    had looks exactly like one xsm added and `remove_form_tools` must not take
+    theirs. The note is made on the first call even when nothing needed adding,
+    and a home with no note or an old one is read as described at `_xsm_rules`.
+    `created` is what the note says xsm made from nothing (permissions, allow),
+    so uninstall can leave the file as it found it."""
     target = _settings_file(home, "claude")
     data = paths.read_json(target, {}) or {}
     perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
     allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
+    note_path = _state_file(ALLOWED, target)
+    note = paths.read_json(note_path)
+    current = isinstance(note, dict) and note.get("v") == NOTE_VERSION
+    added = _xsm_rules(note, allow)
+    stale = [] if current else [n for n in STALE_RULES if n in allow]
     missing = [n for n in form_tool_names() if n not in allow]
-    note = paths.read_json(_state_file(ALLOWED, target))
-    added = list(note.get("added") or []) if isinstance(note, dict) else []
-    if missing:
+    created = note.get("created") if isinstance(note, dict) and \
+        isinstance(note.get("created"), list) else None
+    made = [k for k, there in (("permissions", isinstance(data.get("permissions"), dict)),
+                               ("allow", isinstance(perms.get("allow"), list))) if not there]
+    if created is None and not added:       # nothing of xsm's here yet: what this call makes
+        created = made
+    elif created is not None:
+        created = created + [k for k in made if k not in created]
+    if missing or stale:
         if os.path.exists(target):
             _backup(target)
-        perms["allow"] = allow + missing
+        perms["allow"] = [n for n in allow if n not in stale] + missing
         data["permissions"] = perms
         paths.write_json(target, data, mode=0o644)
         added += [n for n in missing if n not in added]
-    if missing or not isinstance(note, dict):
-        paths.write_json(_state_file(ALLOWED, target), {"file": target, "added": added})
+    if missing or stale or not current:
+        record = {"file": target, "added": added, "v": NOTE_VERSION}
+        if created is not None:
+            record["created"] = created
+        paths.write_json(note_path, record)
     return "added" if missing else "already"
 
 
 def remove_form_tools(home: str) -> bool:
-    """Take out the entries allow_form_tools put in, and only those. A home
-    from before the note existed has none, so the known names go, as they did."""
+    """Take out the entries allow_form_tools put in, and only those (and the
+    allow list or permissions it made, if that leaves them empty). A home with
+    no note, or an old one, loses the known names as well, and the stale ones."""
     target = _settings_file(home, "claude")
     data = paths.read_json(target)
     if not isinstance(data, dict):
@@ -736,17 +771,27 @@ def remove_form_tools(home: str) -> bool:
     allow = _allow_list(data)
     note_path = _state_file(ALLOWED, target)
     note = paths.read_json(note_path)
-    names = set(note["added"]) if isinstance(note, dict) and isinstance(note.get("added"), list) \
-        else set(form_tool_names())
+    names = set(_xsm_rules(note, allow))
+    if not (isinstance(note, dict) and note.get("v") == NOTE_VERSION):
+        names |= set(STALE_RULES)
     kept = [n for n in allow if n not in names]
     if len(kept) != len(allow):
         _backup(target)
-        data["permissions"]["allow"] = kept
+        perms = data["permissions"]
+        perms["allow"] = kept
+        # `created` unknown (a home from before the note says): an allow list
+        # that holds nothing after xsm's rules went was xsm's to begin with.
+        created = note.get("created") if isinstance(note, dict) and \
+            isinstance(note.get("created"), list) else None
+        if not kept and (created is None or "allow" in created):
+            del perms["allow"]
+        if not perms and (created is None or "permissions" in created):
+            del data["permissions"]
         paths.write_json(target, data, mode=0o644)
     if isinstance(note, dict):
         # Emptied, not deleted: with no note a second uninstall would fall back
         # to the known names and take the rules the user had.
-        paths.write_json(note_path, {"file": target, "added": []})
+        paths.write_json(note_path, {"file": target, "added": [], "v": NOTE_VERSION})
     return len(kept) != len(allow)
 
 
@@ -958,14 +1003,18 @@ def stuck(now: float | None = None) -> dict:
     minutes on a permission nobody saw, messages queued to a Codex thread its
     TUI had left, sends that failed inside a sandbox. `xsm doctor` said
     nothing about any of them (2026-09-23)."""
-    from . import ledger, registry
+    from . import ledger, registry, workers
     now = time.time() if now is None else now
     waiting = []
     for p in glob.glob(paths.path("approvals", "*.json")):
         req = paths.read_json(p, {}) or {}
         if req.get("status") in (None, "pending"):
+            # `parent`: a session started the worker, so that session asks its
+            # user; a worker a person started from a terminal has none.
             waiting.append({"id": req.get("id"), "worker": req.get("worker"),
-                            "tool": req.get("tool"), "waiting_s": int(now - (req.get("t") or now))})
+                            "tool": req.get("tool"), "waiting_s": int(now - (req.get("t") or now)),
+                            "parent": bool((workers.load(req.get("worker") or "") or {})
+                                           .get("parent_ref"))})
     rows = ledger.recent(200)
     undelivered = [r for r in rows if r.get("status") == "queued" and now - (r.get("t") or now) > 120]
     uncertain = [r for r in rows if r.get("status") == "unknown"]

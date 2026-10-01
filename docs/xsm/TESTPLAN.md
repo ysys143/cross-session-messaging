@@ -349,7 +349,7 @@ xsm held show <목록에 나온 id>      # 전체 기록. show다, how가 아니
 
 0. **기본 프로젝트를 확인한다.** A 세션에 `/xsm projects`. 기대: `this folder (/private/tmp/xsm-trial) is in: repo:xsm-trial (default)`와 "no named projects".
 1. **A에서만 가입한다.** A 세션에 `/xsm join trial`. 기대: `joined project trial: /private/tmp/xsm-trial`, `this folder is in: repo:xsm-trial (default), trial`, "no other project has joined trial yet".
-2. **한쪽만 가입한 상태로 보낸다.** A에서 `/xsm send <C의 이름> 한쪽만 가입`. 기대: `refused: out of scope: …; /private/tmp/xsm-outside has not joined project trial (run /xsm join trial there)`. 한 저장소가 다른 저장소를 끌어들일 수 없다는 확인이다.
+2. **한쪽만 가입한 상태로 보낸다.** A에서 `/xsm send <C의 이름> 한쪽만 가입`. 기대: ``refused: out of scope: …; /private/tmp/xsm-outside has not joined project trial (a session there asks its user and runs `xsm join trial`)``. 한 저장소가 다른 저장소를 끌어들일 수 없다는 확인이다.
 3. **C도 가입한다.** C 세션에 `/xsm join trial`. 기대: `this folder is in: dir:xsm-outside (default), trial`, 그리고 "sessions in the other projects you can now reach"에 A와 B가 보인다.
 4. **저장소를 넘어 보낸다.** A에게: `<C의 이름>에게 xsm send --kind task로 "네 작업 폴더 경로를 알려줘"를 보내고 결과를 알려줘`. 기대: A는 `delivered`, C 화면의 헤더에 `scope="trial"`, C가 따로 지시하지 않아도 답장한다. B에서 C로 보내도 `trial`로 전달된다.
 5. **같은 저장소는 기본 프로젝트 그대로다.** A에서 `/xsm send reviewer 가입 후 같은 저장소`. 기대: `delivered`이고 헤더와 원장의 scope가 `trial`이 아니라 `repo:xsm-trial`이다. 관찰 터미널에서 `xsm ledger --json`으로 확인할 수 있다.
@@ -403,7 +403,7 @@ xsm projects --dir /tmp/xsm-link-a        # A와 B가 함께 든 이름 붙은 �
 
 A에서 세션 하나(A1), B에서 세션 하나(B1)를 띄운다. Claude Code든 Codex든 상관없다.
 
-1. **잇기 전에는 막힌다.** A1에 `/xsm send <B1의 이름> link 전`을 친다. 기대: `refused: out of scope: …; to connect the two folders, your user types /xsm link /private/tmp/xsm-link-b …`.
+1. **잇기 전에는 막힌다.** A1에 `/xsm send <B1의 이름> link 전`을 친다. 기대: ``refused: out of scope: …; to connect the two folders, the session at /private/tmp/xsm-link-a asks its user and runs `xsm link /private/tmp/xsm-link-b` (or the xsm_link MCP tool)``.
 2. **A에서만 잇는다.** A1에 아래 중 하나를 친다.
    - Claude Code: `/xsm link /tmp/xsm-link-b` (플러그인이면 `/xsm:xsm link /tmp/xsm-link-b`도 된다)
    - Codex: `$xsm link /tmp/xsm-link-b`

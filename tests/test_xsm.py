@@ -961,34 +961,179 @@ class FormToolPermissionTest(TempState):
         self.assertIn("Skill(xsm)", names)
         self.assertIn("Skill(xsm:xsm)", names)
 
-    def test_a_rule_the_user_already_had_is_not_removed(self):
-        """A rule the user wrote looks exactly like one xsm added: only what
-        xsm added is taken back (review, 2026-10-01)."""
+    def test_a_rule_the_user_adds_later_is_not_removed(self):
+        """Once xsm has its note, a rule it did not add is the user's and stays
+        (review, 2026-10-01). A name a later version brings is such a rule when
+        the user already had it."""
         from xsm import install, paths
         home = os.path.join(self.tmp, "had-some")
         os.makedirs(home)
         target = os.path.join(home, "settings.json")
-        mine = ["Bash(xsm unblock:*)", "Skill(xsm)", "Bash(ls:*)"]
-        paths.write_json(target, {"permissions": {"allow": list(mine)}})
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"]}})
         self.assertEqual(install.allow_form_tools(home), "added")
         allow = paths.read_json(target)["permissions"]["allow"]
-        self.assertEqual(allow[:3], mine, "theirs stay where they were")
-        self.assertIn("Skill(xsm:xsm)", allow)
-        self.assertEqual(install.missing_form_tools(home), [])
-        self.assertTrue(install.remove_form_tools(home))
-        self.assertEqual(paths.read_json(target)["permissions"]["allow"], mine)
+        theirs = "Bash(xsm newcommand:*)"
+        paths.write_json(target, {"permissions": {"allow": allow + [theirs]}})
+        with mock.patch.object(install, "ASKING_COMMANDS",
+                               install.ASKING_COMMANDS + ("newcommand",)):
+            self.assertEqual(install.missing_form_tools(home), [])
+            self.assertEqual(install.allow_form_tools(home), "already")
+            self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"],
+                         ["Bash(ls:*)", theirs])
         self.assertFalse(install.remove_form_tools(home))
 
-    def test_when_everything_was_already_there_nothing_is_removed(self):
+    def test_a_home_with_every_rule_and_no_note_is_read_as_xsms(self):
+        """An earlier version put the rules there and a person's look the same,
+        so the known names are xsm's and uninstall takes them (2026-10-01)."""
         from xsm import install, paths
         home = os.path.join(self.tmp, "had-all")
         os.makedirs(home)
         target = os.path.join(home, "settings.json")
-        paths.write_json(target, {"permissions": {"allow": install.form_tool_names()}})
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] +
+                                                  install.form_tool_names()}})
         self.assertEqual(install.allow_form_tools(home), "already")
+        note = paths.read_json(install._state_file(install.ALLOWED, target))
+        self.assertEqual(sorted(note["added"]), sorted(install.form_tool_names()))
+        self.assertEqual(note["v"], install.NOTE_VERSION)
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
+
+    def test_refresh_over_a_home_an_earlier_version_filled_leaves_nothing_after_uninstall(self):
+        """The note held only what the refresh newly added, so about two dozen
+        rules stayed behind after uninstall (adversarial check, 2026-10-01)."""
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "legacy")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        names = install.form_tool_names()
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] + names[:-1],
+                                                  "deny": ["X"]}})
+        self.assertEqual(install.allow_form_tools(home), "added")     # one was missing
+        note = paths.read_json(install._state_file(install.ALLOWED, target))
+        self.assertEqual(sorted(note["added"]), sorted(names), "what was there is noted too")
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"],
+                         {"allow": ["Bash(ls:*)"], "deny": ["X"]})
         self.assertFalse(install.remove_form_tools(home))
+
+    def test_a_note_from_before_the_version_marker_is_completed_once(self):
+        """c4852bc wrote only what its own refresh added; rules an earlier
+        version had put there stayed unnoted."""
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "c4852bc")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": install.form_tool_names() +
+                                                  ["Bash(ls:*)"]}})
+        note_path = install._state_file(install.ALLOWED, target)
+        paths.write_json(note_path, {"file": target, "added": ["Skill(xsm:xsm)"]})
+        self.assertEqual(install.allow_form_tools(home), "already")
+        note = paths.read_json(note_path)
+        self.assertEqual(sorted(note["added"]), sorted(install.form_tool_names()))
+        self.assertEqual(note["v"], install.NOTE_VERSION)
+        # Once: what the user writes after that is theirs, a stale-looking name too.
+        user = paths.read_json(target)
+        user["permissions"]["allow"].append("Bash(xsm spawn:*)")
+        paths.write_json(target, user)
+        self.assertEqual(install.allow_form_tools(home), "already")
+        self.assertIn("Bash(xsm spawn:*)", paths.read_json(target)["permissions"]["allow"])
+        self.assertTrue(install.remove_form_tools(home))
         self.assertEqual(paths.read_json(target)["permissions"]["allow"],
-                         install.form_tool_names())
+                         ["Bash(ls:*)", "Bash(xsm spawn:*)"])
+
+    def test_an_old_note_is_completed_by_uninstall_too(self):
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "c4852bc-bye")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] +
+                                                  install.form_tool_names()}})
+        paths.write_json(install._state_file(install.ALLOWED, target),
+                         {"file": target, "added": ["Skill(xsm:xsm)"]})
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
+
+    def test_the_commands_an_earlier_build_added_and_dropped_are_removed(self):
+        """eb600e8 allowed spawn, post and doc add; only xsm wrote those strings.
+        A home with no note or an old one loses them; one with a current note
+        keeps a rule the user wrote the same way."""
+        from xsm import install, paths
+        stale = list(install.STALE_RULES)
+        self.assertEqual(stale, ["Bash(xsm spawn:*)", "Bash(xsm post:*)", "Bash(xsm doc add:*)"])
+        for label, note in (("no-note", None), ("old-note", {"added": ["Skill(xsm:xsm)"]})):
+            with self.subTest(label):
+                home = os.path.join(self.tmp, "stale-" + label)
+                os.makedirs(home)
+                target = os.path.join(home, "settings.json")
+                paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] + stale}})
+                if note:
+                    paths.write_json(install._state_file(install.ALLOWED, target),
+                                     dict(note, file=target))
+                self.assertEqual(install.allow_form_tools(home), "added")
+                allow = paths.read_json(target)["permissions"]["allow"]
+                for rule in stale:
+                    self.assertNotIn(rule, allow)
+                self.assertIn("Bash(ls:*)", allow)
+                self.assertEqual(install.missing_form_tools(home), [])
+        home = os.path.join(self.tmp, "stale-theirs")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": []}})
+        install.allow_form_tools(home)                      # a current note now
+        data = paths.read_json(target)
+        data["permissions"]["allow"].append("Bash(xsm spawn:*)")
+        paths.write_json(target, data)
+        install.allow_form_tools(home)
+        self.assertIn("Bash(xsm spawn:*)", paths.read_json(target)["permissions"]["allow"])
+        install.remove_form_tools(home)
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(xsm spawn:*)"])
+        # Uninstall of a home that never refreshed takes them too.
+        home = os.path.join(self.tmp, "stale-bye")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] + stale}})
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
+
+    def test_uninstall_leaves_no_empty_allow_xsm_made(self):
+        from xsm import install, paths
+
+        def settings(name, data):
+            home = os.path.join(self.tmp, name)
+            os.makedirs(home)
+            target = os.path.join(home, "settings.json")
+            paths.write_json(target, data)
+            return home, target
+
+        home, target = settings("made-both", {"model": "opus"})     # no permissions at all
+        install.allow_form_tools(home)
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"model": "opus"})
+        home, target = settings("made-allow", {"permissions": {"deny": ["X"]}})
+        install.allow_form_tools(home)
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"permissions": {"deny": ["X"]}})
+        home, target = settings("had-empty", {"permissions": {"allow": []}})    # theirs
+        install.allow_form_tools(home)
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"permissions": {"allow": []}})
+        home, target = settings("made-and-added", {})              # a rule of theirs beside
+        install.allow_form_tools(home)
+        data = paths.read_json(target)
+        data["permissions"]["allow"].append("Bash(ls:*)")
+        paths.write_json(target, data)
+        install.remove_form_tools(home)
+        self.assertEqual(paths.read_json(target), {"permissions": {"allow": ["Bash(ls:*)"]}})
+        # A home from before the note: an allow list that xsm's removal emptied was xsm's.
+        home, target = settings("old-empty", {"model": "opus", "permissions": {
+            "allow": install.form_tool_names()}})
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"model": "opus"})
+        # Installing again after that records what it made anew.
+        install.allow_form_tools(home)
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"model": "opus"})
 
     def test_a_home_from_before_the_note_loses_the_known_names_as_it_did(self):
         from xsm import install, paths
@@ -1014,7 +1159,8 @@ class FormToolPermissionTest(TempState):
         with contextlib.redirect_stdout(out):
             cli.main(["doctor"])
         line = next(l for l in out.getvalue().splitlines() if l.startswith("allow "))
-        self.assertIn("Your agent can add them by running `xsm install --refresh`", line)
+        self.assertIn("your agent can add them by running `xsm install --refresh`", line)
+        self.assertIn("auto mode", line, "only auto mode cares, so it says so")
         self.assertNotIn("type", line)
         install.allow_form_tools(home)
         out = io.StringIO()
@@ -1427,6 +1573,29 @@ class StuckReportTest(TempState):
         self.assertIn("has waited", lines)
         self.assertIn("still queued", lines)
         self.assertIn("sandbox-blocked", lines)
+
+    def test_a_worker_nobody_in_a_session_started_does_not_wait_on_a_session(self):
+        """A worker a person started from a terminal has no parent session, so
+        "the session that started it asks you" is wrong for it (2026-10-01)."""
+        from xsm import install, paths, workers
+        workers.save({"name": "by-session", "runtime": "claude", "mode": "background",
+                      "pane": "%1", "cwd": self.tmp, "created": 0, "parent_ref": "abc123"})
+        workers.save({"name": "by-person", "runtime": "claude", "mode": "background",
+                      "pane": "%2", "cwd": self.tmp, "created": 0})
+        for name, req_id in (("by-session", "a1"), ("by-person", "a2")):
+            paths.write_json(paths.path("approvals", req_id + ".json"),
+                             {"id": req_id, "worker": name, "tool": "Bash", "status": "pending",
+                              "t": time.time() - 30})
+        stuck = install.stuck()
+        lines = {r["worker"]: l for r, l in zip(
+            sorted(stuck["approvals"], key=lambda r: r["worker"]),
+            cli_stuck_lines({"approvals": sorted(stuck["approvals"],
+                                                 key=lambda r: r["worker"])}))}
+        self.assertIn("the session that started it asks you and runs `xsm approve a1`",
+                      lines["by-session"])
+        self.assertIn("from whoever started it", lines["by-person"])
+        self.assertNotIn("the session that started it", lines["by-person"])
+        self.assertNotIn("type", lines["by-person"])
 
 
 def cli_stuck_lines(stuck):

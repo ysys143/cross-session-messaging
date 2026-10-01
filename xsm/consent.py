@@ -31,13 +31,17 @@ the CLI records the request (~/.xsm/asked/<ref>.pending.json) and tells the
 agent to ask its user in plain words. The person's latest message in that
 session is kept on the request, verbatim, as the verdict. The agent reads it
 in two steps: the first run after a reply refuses and shows it, the next run
-goes ahead and uses the request up, keeping the verdict with what it changed.
+goes ahead and uses the request up, keeping the verdict with what it changed. The
+second run must come a moment after the first (SHOW_DELAY), and an ask older
+than ASK_MAX is gone however much the person has said since.
 xsm does not judge the words; it keeps them as the record of who decided what.
 Like typed consent this is inside the uid boundary (ADR-0009): a peer message
 without an envelope looks like typing.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import shlex
@@ -47,6 +51,14 @@ from . import envelope, paths
 
 ASKED = "asked"
 TTL = 600
+# The window slides with every reply, so a person who keeps chatting kept an
+# ask alive for hours and an unrelated later message became its verdict. This
+# counts from the ask itself (2026-10-01).
+ASK_MAX = 1800
+# A reply shown to the agent passes no sooner than this after it was shown, on
+# a later run: `xsm unblock X || xsm unblock X` on one line showed the reply
+# and used it in the same breath, before the agent could read it (2026-10-01).
+SHOW_DELAY = 1.0
 VERBS = ("link", "join", "leave", "reach")
 # A Codex prompt as typed: `$xsm link <folder>`.
 CODEX_RE = re.compile(r"\A\s*\$xsm[ \t]+(%s)(?![^ \t\n])[ \t]*([^\n]*)" % "|".join(VERBS))
@@ -72,6 +84,27 @@ def _path(ref: str) -> str:
 
 def _pending_path(ref: str) -> str:
     return paths.path(ASKED, "%s.pending.json" % ref)
+
+
+@contextlib.contextmanager
+def _locked(p: str):
+    """One reader-writer at a time for a pending file (flock on a sibling
+    .lock, kept: removing it would let two holders each have a lock). A reply
+    written between another run's read and its write was lost, and two reruns
+    could each see the other's state as theirs (measured 323 of 400, 2026-10-01).
+    A folder that cannot be written runs unlocked: a hook must not fail on it."""
+    fd = None
+    try:
+        os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+        fd = os.open(p + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)                # closing releases the lock
 
 
 def _target(args: str) -> str | None:
@@ -142,11 +175,13 @@ def request(me: dict | None, verb: str, target: str, here: str | None = None) ->
     if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not target:
         return False
     cwd = me.get("cwd") or ""
+    p = _pending_path(me["ref"])
     try:
-        paths.write_json(_pending_path(me["ref"]), {
-            "verb": verb, "target": resolve(verb, target, cwd),
-            "here": resolve(verb, here, cwd) if here else None, "cwd": cwd, "t": time.time(),
-            "session_id": str(me.get("session_id") or ""), "verdict": None}, mode=0o600)
+        with _locked(p):                # a reply landing now must not be overwritten unseen
+            paths.write_json(p, {
+                "verb": verb, "target": resolve(verb, target, cwd),
+                "here": resolve(verb, here, cwd) if here else None, "cwd": cwd, "t": time.time(),
+                "session_id": str(me.get("session_id") or ""), "verdict": None}, mode=0o600)
     except OSError:
         return False
     return True
@@ -155,13 +190,16 @@ def request(me: dict | None, verb: str, target: str, here: str | None = None) ->
 def _fresh_pending(me: dict | None) -> tuple:
     """(path, entry) of this session's unexpired request, or (None, None). A
     request without a reply expires TTL after it was made; once the person has
-    replied, TTL after their latest reply."""
+    replied, TTL after their latest reply, but never later than ASK_MAX after
+    the request."""
     if not me or not me.get("ref"):
         return None, None
     p = _pending_path(me["ref"])
     entry = paths.read_json(p)
-    if not isinstance(entry, dict) or \
-            time.time() - max(float(entry.get("t") or 0), float(entry.get("verdict_t") or 0)) > TTL:
+    if not isinstance(entry, dict):
+        return None, None
+    now, asked = time.time(), float(entry.get("t") or 0)
+    if now - max(asked, float(entry.get("verdict_t") or 0)) > TTL or now - asked > ASK_MAX:
         return None, None
     if entry.get("session_id") and me.get("session_id") and \
             entry["session_id"] != str(me["session_id"]):
@@ -174,11 +212,15 @@ def note_verdict(me: dict | None, text: str) -> bool:
     replaces an earlier one (user decision, 2026-10-01): the first message is
     often a question ("does that delete the other records too?") and the yes
     or no comes after it. A new reply has not been shown to the agent yet."""
-    p, entry = _fresh_pending(me)
-    if not p or not text.strip():
+    if not me or not me.get("ref") or not text.strip() or \
+            not os.path.exists(_pending_path(me["ref"])):       # every prompt comes by here
         return False
-    entry.update({"verdict": text.strip()[:1000], "verdict_t": time.time(), "shown": False})
-    paths.write_json(p, entry, mode=0o600)
+    with _locked(_pending_path(me["ref"])):
+        p, entry = _fresh_pending(me)
+        if not p:
+            return False
+        entry.update({"verdict": text.strip()[:1000], "verdict_t": time.time(), "shown": False})
+        paths.write_json(p, entry, mode=0o600)
     return True
 
 
@@ -189,24 +231,44 @@ def take_verdict(me: dict | None, verb: str, target: str, here: str | None = Non
     (None, False) when there is no such request or no reply yet; (reply, False)
     for a reply the agent has not seen, which is marked as shown now and which
     the caller refuses with; (reply, True) for the reply that was shown and is
-    still the latest, which is used up: the caller goes ahead, once."""
-    p, entry = _fresh_pending(me)
-    if not p or entry.get("verdict") is None or entry.get("verb") != verb:
+    still the latest and was shown at least SHOW_DELAY ago, which is used up:
+    the caller goes ahead, once. A rerun sooner than that gets the reply shown
+    again, so a line that runs the command twice does not pass on its own
+    showing. The read and the write are one step (_locked)."""
+    if not me or not me.get("ref") or not os.path.exists(_pending_path(me["ref"])):
         return None, False
-    cwd = entry.get("cwd") or (me or {}).get("cwd") or ""
-    if resolve(verb, target, (me or {}).get("cwd") or cwd) != entry.get("target"):
-        return None, False
-    if here and entry.get("here") and resolve(verb, here, cwd) != entry["here"]:
-        return None, False
-    if not entry.get("shown"):
-        entry["shown"] = True
-        paths.write_json(p, entry, mode=0o600)
-        return entry["verdict"], False
-    try:
-        os.unlink(p)
-    except OSError:
-        return None, False              # used by another reader first
-    return entry["verdict"], True
+    with _locked(_pending_path(me["ref"])):
+        p, entry = _fresh_pending(me)
+        if not p or entry.get("verdict") is None or entry.get("verb") != verb:
+            return None, False
+        cwd = entry.get("cwd") or (me or {}).get("cwd") or ""
+        if resolve(verb, target, (me or {}).get("cwd") or cwd) != entry.get("target"):
+            return None, False
+        if here and entry.get("here") and resolve(verb, here, cwd) != entry["here"]:
+            return None, False
+        now = time.time()
+        if not entry.get("shown"):
+            entry.update({"shown": True, "shown_t": now})
+            paths.write_json(p, entry, mode=0o600)
+            return entry["verdict"], False
+        if now - float(entry.get("shown_t") or 0) < SHOW_DELAY:
+            return entry["verdict"], False
+        try:
+            os.unlink(p)
+        except OSError:
+            return None, False          # used by another reader first
+        return entry["verdict"], True
+
+
+def asks(what: str, tail: str = "") -> str:
+    """What the agent is told when nobody has been asked yet: ask first, then
+    run the command again to be shown the reply, then once more on a yes. The
+    order was left implicit and agents reran before asking (2026-10-01)."""
+    return ("%s needs your user's yes. First ask them, in plain words, whether to go ahead, and "
+            "wait for their answer. After they answer, run this same command again: xsm keeps "
+            "their latest message in this session as the verdict, and this run shows you that "
+            "reply without acting on it. If it is a yes, run the command once more to go ahead; "
+            "if it is a no or a question, leave it and answer them.%s" % (what, tail))
 
 
 def shown_refusal(reply: str, what: str) -> str:
@@ -220,12 +282,14 @@ def shown_refusal(reply: str, what: str) -> str:
 def cannot_keep(what: str, form_tool: str | None) -> str:
     """The refusal when no reply can be kept here: say so, and never promise
     what xsm cannot do (issue #9)."""
-    way = ("If the %s MCP tool is available, use it: it asks them with a form." % form_tool
+    way = ("If the %s MCP tool is available, use it: it asks them with a form. If it is "
+           "not, tell them plainly that this cannot be decided from here." % form_tool
            if form_tool and form_tool != "no" else
-           "There is no form tool for this decision.")
+           "There is no form tool for this decision, so tell them plainly that it cannot be "
+           "decided from here.")
     return ("%s needs your user's yes, but xsm cannot keep their reply in this session (it is "
-            "not a registered session of theirs, or its state cannot be written). %s Otherwise "
-            "tell them plainly that this cannot be decided from here." % (what, way))
+            "not a registered session of theirs, or its state cannot be written). %s"
+            % (what, way))
 
 
 def take(me: dict | None, verb: str, target: str, here: str | None = None) -> bool:

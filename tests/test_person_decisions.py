@@ -41,11 +41,21 @@ class PersonDecisionTest(TempState):
         self.assertNotIn("in a terminal", text)
         return text
 
+    def _waited(self):
+        """The agent reads what it was shown before it runs the command again:
+        the second run passes no sooner than consent.SHOW_DELAY after the first."""
+        from xsm import consent, paths
+        p = consent._pending_path(self.me["ref"])
+        entry = paths.read_json(p)
+        entry["shown_t"] = entry["shown_t"] - consent.SHOW_DELAY - 1
+        paths.write_json(p, entry)
+
     def _shows(self, argv, reply):
         """The first run after a reply shows it and does not go ahead (2026-10-01)."""
         code, text = self._cli(argv)
         self.assertEqual(code, 2, text)
         self.assertIn('your user replied: "%s"' % reply, text)
+        self._waited()
         return text
 
     def test_approving_a_workers_request(self):
@@ -85,6 +95,7 @@ class PersonDecisionTest(TempState):
             workers.use_grant(None, self.me, "codex", self.tmp, ["full_access"])
         self.assertIn('your user replied: "yes, full access is fine this once"',
                       str(cm.exception), "shown first, not acted on")
+        self._waited()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             grant = workers.use_grant(None, self.me, "codex", self.tmp, ["full_access"])
@@ -175,11 +186,16 @@ class PersonDecisionTest(TempState):
             os.path.join("skills", "xsm", "SKILL.md"),
             os.path.join("skills", "xsm", "references", "guide.md"), "README.md", "README_ko.md"]
         phrases = ("in a terminal", "needs a terminal", "only a person can", "a person clears",
-                   "(a person only)", "a person only", "needs a person", "a person can lift")
+                   "(a person only)", "a person only", "needs a person", "a person can lift",
+                   "they can type", "you can type", "ask them to type", "run /xsm",
+                   "run: /xsm", "with: /xsm", "with `/xsm", "type /xsm", "types /xsm",
+                   "run $xsm", "type $xsm")
         # (file, text around the phrase): a person typing at a terminal is the point.
         genuine = (("xsm/otlp_export.py", "A person runs this in a terminal"),
                    ("README.md", "The same commands work in a terminal as"),
-                   ("README.md", "# or in a terminal"))
+                   ("README.md", "# or in a terminal"),
+                   ("xsm/install.py", "told the person to type /xsm link instead"),   # history
+                   ("skills/xsm/references/guide.md", "Never ask them to type shell commands"))
         for name in files:
             with open(os.path.join(repo, name), encoding="utf-8") as fh:
                 text = fh.read()
@@ -287,6 +303,172 @@ class PersonDecisionTest(TempState):
         entry["verdict_t"] = time.time() - consent.TTL - 5     # a reply this old is stale too
         paths.write_json(pending, entry)
         self._asks(["unblock", "abcabc"])
+
+    def test_an_ask_is_gone_thirty_minutes_after_it_was_made_however_much_was_said(self):
+        """The window slid with every message, so an ask stayed alive for hours
+        while the person kept chatting and an unrelated message became its
+        verdict (adversarial check, 2026-10-01)."""
+        import time
+        from xsm import config, consent, paths
+        config.block("abc999")
+        self._asks(["unblock", "abc999"])
+        self._reply("응")
+        pending = consent._pending_path(self.me["ref"])
+        entry = paths.read_json(pending)
+        entry["t"] = time.time() - consent.ASK_MAX + 60           # nearly half an hour old
+        entry["verdict_t"] = time.time() - 5
+        paths.write_json(pending, entry)
+        self._reply("응 풀어")
+        self.assertEqual(paths.read_json(pending)["verdict"], "응 풀어", "still inside the cap")
+        entry = paths.read_json(pending)
+        entry["t"] = time.time() - consent.ASK_MAX - 60           # past it
+        entry["verdict_t"] = time.time() - 5                      # the last reply is fresh
+        paths.write_json(pending, entry)
+        self._reply("그건 그렇고 다른 얘긴데")
+        self.assertEqual(paths.read_json(pending)["verdict"], "응 풀어", "nothing new is kept")
+        self._asks(["unblock", "abc999"])                         # a new ask, not the old yes
+        self.assertIn("abc999", config.blocked())
+        self.assertIsNone(paths.read_json(pending)["verdict"])
+
+    def test_the_rerun_that_passes_comes_after_the_one_that_shows(self):
+        """`xsm unblock X || xsm unblock X` showed the reply and used it in the
+        same breath, before the agent could read it (2026-10-01)."""
+        from xsm import config, consent, paths
+        config.block("abc888")
+        self._asks(["unblock", "abc888"])
+        self._reply("응")
+        self.assertEqual(consent.SHOW_DELAY, 1.0)
+        code, text = self._cli(["unblock", "abc888"])
+        self.assertEqual(code, 2, text)
+        code, text = self._cli(["unblock", "abc888"])            # the same line, a moment later
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "응"', text, "shown again, not passed")
+        self.assertIn("abc888", config.blocked())
+        self._waited()
+        self.assertEqual(self._cli(["unblock", "abc888"])[0], 0)
+        self.assertNotIn("abc888", config.blocked())
+
+    def test_a_pending_file_from_before_the_delay_still_passes(self):
+        """A reply c4852bc already showed has no shown_t."""
+        from xsm import config, consent, paths
+        config.block("abc777")
+        self._asks(["unblock", "abc777"])
+        self._reply("응")
+        pending = consent._pending_path(self.me["ref"])
+        entry = paths.read_json(pending)
+        entry.update({"shown": True})
+        entry.pop("shown_t", None)
+        paths.write_json(pending, entry)
+        self.assertEqual(self._cli(["unblock", "abc777"])[0], 0)
+
+    def test_a_reply_written_during_a_show_is_not_lost(self):
+        """take_verdict read the old reply, the hook wrote the new one, and the
+        show wrote the old one back over it: the old yes would then pass
+        (measured 323 of 400, 2026-10-01). The read and the write are one step."""
+        import threading
+        from xsm import consent, paths
+        self._asks(["unblock", "abc666"])
+        self._reply("응")
+        pending = consent._pending_path(self.me["ref"])
+        late = threading.Thread(target=self._reply, args=("아니 잠깐",))
+        real, state = paths.write_json, {"first": True}
+
+        def write(p, data, *args, **kwargs):
+            if state["first"] and p == pending:
+                state["first"] = False
+                late.start()
+                late.join(0.5)          # unlocked, it is done by now; locked, it waits
+            return real(p, data, *args, **kwargs)
+
+        with mock.patch.object(paths, "write_json", write):
+            self.assertEqual(consent.take_verdict(self.me, "unblock", "abc666"), ("응", False))
+        late.join(10)
+        entry = paths.read_json(pending)
+        self.assertEqual(entry["verdict"], "아니 잠깐")
+        self.assertFalse(entry["shown"], "the new reply has not been shown yet")
+
+    def test_runs_at_the_same_moment_do_not_pass_on_each_others_showing(self):
+        import threading
+        from xsm import consent, paths
+        self._asks(["unblock", "abc555"])
+        self._reply("응")
+        results, gate = [], threading.Barrier(8)
+
+        def rerun():
+            gate.wait()
+            results.append(consent.take_verdict(self.me, "unblock", "abc555"))
+
+        threads = [threading.Thread(target=rerun) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(results, [("응", False)] * 8, "shown by all, passed by none")
+        self.assertTrue(os.path.exists(consent._pending_path(self.me["ref"])))
+        entry = paths.read_json(consent._pending_path(self.me["ref"]))
+        entry["shown_t"] -= consent.SHOW_DELAY + 1               # read, a moment later
+        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        results.clear()
+        gate = threading.Barrier(8)
+        threads = [threading.Thread(target=rerun) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(results.count(("응", True)), 1, "one passes, once")
+        self.assertEqual(results.count((None, False)), 7, "the rest find it used up")
+
+    def test_a_prompt_with_no_ask_leaves_nothing_behind(self):
+        """Every prompt of every session comes through note_verdict; only an ask
+        is worth a lock file."""
+        from xsm import consent
+        self._reply("hello")
+        self.assertEqual(consent.take_verdict(self.me, "unblock", "abc333"), (None, False))
+        asked = os.path.join(self.tmp, consent.ASKED)
+        self.assertEqual(os.listdir(asked) if os.path.isdir(asked) else [], [])
+
+    def test_a_ref_prefix_names_the_same_session(self):
+        """`xsm block ref:abcdef` stored "ref:abcdef" and the gate compares bare
+        refs, so nothing was blocked; `unblock` asked about the prefixed text."""
+        from xsm import config
+        code, text = self._cli(["block", "ref:abcdef"])
+        self.assertEqual(code, 0, text)
+        self.assertEqual(config.blocked(), {"abcdef"})
+        self.assertIn("blocked abcdef", text)
+        asked = self._asks(["unblock", "ref:abcdef"])
+        self.assertIn("session abcdef", asked)
+        self._reply("응")
+        self._shows(["unblock", "abcdef"], "응")                  # the bare ref is the same ask
+        code, text = self._cli(["unblock", "ref:abcdef"])
+        self.assertEqual(code, 0, text)
+        self.assertEqual(config.blocked(), set())
+
+    def test_the_agent_is_told_to_ask_before_it_reruns(self):
+        """The refusal left the order implicit and agents reran before asking
+        (2026-10-01): ask, wait, rerun to see the reply, rerun once more on a yes."""
+        from xsm import workers
+        text = self._asks(["unblock", "abc444"])
+        with self.assertRaises(workers.WorkerError) as cm:
+            workers.use_grant(None, self.me, "codex", self.tmp, ["full_access"])
+        for said in (text, str(cm.exception)):
+            order = [said.index(w) for w in ("First ask them", "wait for their answer",
+                                             "After they answer, run this same command again",
+                                             "shows you that reply", "once more to go ahead")]
+            self.assertEqual(order, sorted(order), said)
+        self.assertIn("xsm_grant MCP tool", str(cm.exception))
+
+    def test_when_a_reply_cannot_be_kept_the_wording_follows_the_case(self):
+        from xsm import consent
+        with_tool = consent.cannot_keep("Joining a project", "xsm_join")
+        self.assertIn("If the xsm_join MCP tool is available, use it: it asks them with a form. "
+                      "If it is not, tell them plainly that this cannot be decided from here.",
+                      with_tool)
+        without = consent.cannot_keep("Lifting a block", "no")
+        self.assertIn("There is no form tool for this decision, so tell them plainly that it "
+                      "cannot be decided from here.", without)
+        for text in (with_tool, without):
+            self.assertNotIn("Otherwise", text)
+            self.assertNotIn("type", text)
 
     def test_only_the_session_that_started_the_worker_approves_on_a_reply(self):
         from xsm import paths, workers
