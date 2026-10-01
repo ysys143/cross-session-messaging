@@ -1034,6 +1034,11 @@ def cmd_doctor(args) -> int:
         print("\n".join(_md_table(["check", "result"], _doctor_rows(report))))
         return OK
     print("xsm        %s" % (report.get("version") or "?"))
+    cli = report.get("cli")
+    if cli:
+        print("cli        %s" % install.cli_text(cli))
+        for other in cli.get("on_path") or []:
+            print("cli        also on PATH as %s: %s" % (other["via"], install.cli_text(other)))
     print("state      %s" % report["xsm_home"])
     print("python     %s%s" % (report["interpreter"], "" if report["interpreter_ok"] else "  TOO OLD"))
     versions = report.get("codex_binaries") or []
@@ -1072,8 +1077,12 @@ def cmd_doctor(args) -> int:
     for home, plugin in (report.get("plugins") or {}).items():
         if plugin:
             missing = (report.get("plugin_missing_hooks") or {}).get(home)
-            print("plugin     %-45s xsm %s%s" % (_home_tilde(home), plugin, (
-                "  " + install.plugin_outdated_note(missing)) if missing else ""))
+            root = (report.get("plugin_roots") or {}).get(home)
+            older = (report.get("plugin_older") or {}).get(home)
+            print("plugin     %-45s xsm %s%s%s%s" % (
+                _home_tilde(home), plugin, " at %s" % root if root else "",
+                "  " + older if older else "",
+                ("  " + install.plugin_outdated_note(missing)) if missing else ""))
     for home, missing in (report.get("allow_missing") or {}).items():
         if missing:
             print("allow      %s" % _allow_note(home, missing))
@@ -1183,6 +1192,8 @@ def _doctor_rows(report: dict) -> list:
              % (report["decisions_seen"], report["hook_errors_recent"])),
             ("held", "%d message(s)" % report["held"]),
             ("native", _native_note(report))]
+    if report.get("cli"):
+        rows.insert(0, ("cli", install.cli_text(report["cli"])))
     for pid, folder in report.get("orphaned_servers") or []:
         rows.append(("orphaned", _orphan_note(pid, folder)))
     for plan in report["installs"]:
@@ -1200,6 +1211,10 @@ def _doctor_rows(report: dict) -> list:
         if missing:
             rows.append(("plugin", "%s: %s" % (_home_tilde(home),
                                                install.plugin_outdated_note(missing))))
+    for home, older in (report.get("plugin_older") or {}).items():
+        if older:
+            rows.append(("plugin", "%s: xsm %s at %s, %s" % (
+                _home_tilde(home), report["plugins"][home], report["plugin_roots"][home], older)))
     for home, missing in (report.get("allow_missing") or {}).items():
         if missing:
             rows.append(("allow", _allow_note(home, missing)))
@@ -1746,8 +1761,22 @@ def cmd_prune(args) -> int:
     return OK
 
 
+class _Version(argparse.Action):
+    """`xsm --version`: which xsm this is and where it runs from. Git is asked
+    here, not on every command."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS,
+                         help="the version, the git describe of a checkout, and this CLI's path")
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(install.cli_text(install.cli_info()))
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="xsm", description="cross-session messaging")
+    p.add_argument("--version", action=_Version)
     p.add_argument("--xsm-home", help="state directory (default ~/.xsm or $XSM_HOME)")
     sub = p.add_subparsers(dest="command", required=True)
 

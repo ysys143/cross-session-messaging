@@ -205,6 +205,80 @@ def plugin_installed(home: str) -> str | None:
     return codex["version"] if codex else None
 
 
+def plugin_root(home: str) -> str | None:
+    """The folder of the xsm plugin in this home (`<root>/bin/xsm` runs that
+    version by its absolute path), or None."""
+    entry = _plugin_entry(home)
+    if entry is not None:
+        return entry.get("installPath") or None
+    codex = codex_plugin(home)
+    return codex["root"] if codex else None
+
+
+def git_describe() -> str | None:
+    """`git describe --tags --always --dirty` when this package sits in a git
+    checkout of its own; None for a plugin copy, without git, or when git takes
+    more than two seconds."""
+    if not os.path.exists(os.path.join(REPO, ".git")):
+        return None
+    try:
+        out = subprocess.run(["git", "-C", REPO, "describe", "--tags", "--always", "--dirty"],
+                             capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
+
+
+def cli_info() -> dict:
+    """This CLI: {"version", "describe", "path"}. Which version is running is
+    not knowable from the name `xsm` on PATH (2026-10-01: a plugin, a checkout
+    and sessions started before an update at once); this says."""
+    return {"version": plugin_version(), "describe": git_describe(),
+            "path": os.path.realpath(launcher())}
+
+
+def cli_text(info: dict) -> str:
+    """`xsm 0.4.14 (git v0.4.14-5-gabc1234) at /abs/bin/xsm`, for `xsm
+    --version` and doctor's `cli` line."""
+    return "xsm %s%s at %s" % (info.get("version") or "?",
+                               " (git %s)" % info["describe"] if info.get("describe") else "",
+                               info["path"])
+
+
+def xsm_on_path() -> list:
+    """Each `xsm` on PATH other than this CLI, first one first: {"version",
+    "describe", "path", "via"}, with the version its folder's plugin manifest
+    says and `via` the name as PATH has it."""
+    seen, found = {os.path.realpath(launcher())}, []
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        via = shutil.which("xsm", path=folder) if folder else None
+        real = os.path.realpath(via) if via else None
+        if not real or real in seen:
+            continue
+        seen.add(real)
+        manifest = paths.read_json(os.path.join(os.path.dirname(os.path.dirname(real)),
+                                                ".claude-plugin", "plugin.json"), {})
+        found.append({"version": manifest.get("version") if isinstance(manifest, dict) else None,
+                      "describe": None, "path": real, "via": via})
+    return found
+
+
+def plugin_older(version: str | None, root: str | None, describe: str | None) -> str | None:
+    """Why the plugin copy `version` at `root` is older than this CLI, or None:
+    a lower version, or the same one when this CLI is a checkout past that
+    version's tag (`describe`; a copy has no history to say which commit it
+    is). For the line that names the plugin."""
+    mine = plugin_version()
+    if not (version and mine and version[:1].isdigit() and mine[:1].isdigit()):
+        return None
+    if version_key(version) < version_key(mine):
+        return "older than this CLI (%s)" % mine
+    if version == mine and re.search(r"-\d+-g[0-9a-f]+", describe or "") and root and \
+            os.path.realpath(root) != os.path.realpath(REPO):
+        return "may be older than this CLI (%s, which is past its tag: %s)" % (mine, describe)
+    return None
+
+
 def codex_plugin(home: str) -> dict | None:
     """{"key", "version", "root"} for the xsm plugin enabled in a Codex home, or None.
 
@@ -1089,6 +1163,10 @@ def doctor() -> dict:
     # would need installed invites bringing it back.
     homes = [h for h in config.homes() if os.path.isdir(h["path"])]
     gone = [h["path"] for h in config.homes() if not os.path.isdir(h["path"])]
+    cli = cli_info()
+    cli["on_path"] = xsm_on_path()
+    plugins = {h["path"]: plugin_installed(h["path"]) for h in homes}
+    roots = {h["path"]: plugin_root(h["path"]) for h in homes if plugins[h["path"]]}
     report = {
         "xsm_home": paths.HOME,
         "interpreter": pinned_python(),
@@ -1109,7 +1187,11 @@ def doctor() -> dict:
         "held": len(os.listdir(paths.path(paths.HELD))) if os.path.isdir(paths.path(paths.HELD)) else 0,
         "version": plugin_version(),
         "tmux": shutil.which("tmux"),
-        "plugins": {h["path"]: plugin_installed(h["path"]) for h in homes},
+        "cli": cli,
+        "plugins": plugins,
+        "plugin_roots": roots,
+        "plugin_older": {home: plugin_older(plugins[home], root, cli["describe"])
+                         for home, root in roots.items()},
         "plugin_missing_hooks": {h["path"]: plugin_missing_hooks(h["path"]) for h in homes
                                  if h.get("runtime") == "claude"},
         "allow_missing": {h["path"]: missing_form_tools(h["path"]) for h in homes
