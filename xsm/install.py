@@ -865,7 +865,7 @@ FORM_TOOL_PREFIXES = ("mcp__xsm__", "mcp__plugin_xsm_xsm__")
 # skill is named `xsm:xsm` when Claude calls it (the skills documentation:
 # plugin skills are namespaced), the directly installed one `xsm`.
 ASKING_COMMANDS = ("link", "reach", "join", "leave", "unblock", "approve", "attempts clear",
-                   "frameworks ignore", "remote add")
+                   "frameworks ignore", "remote add", "held deliver")
 ALLOWED = "allowed"           # one note per settings file: what xsm added to its allow list
 NOTE_VERSION = 2              # a note without it predates counting the rules already there
 # Rules the eb600e8 build wrote and the list no longer holds. Only xsm ever

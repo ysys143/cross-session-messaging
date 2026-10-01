@@ -806,8 +806,59 @@ def cmd_otlp_export(args) -> int:
     return OK
 
 
+def _held_deliver(args) -> int:
+    """Hand the session a message its gate kept, on its user's yes (user decision,
+    2026-10-01: a hold is a stop for the person to decide, never a wall). The
+    agent asks, runs this to be shown the reply, and once more on a yes; the
+    message then comes as this command's output, with the sender's context, and
+    leaves the held list. Only the session it was held for takes it, unless the
+    person runs the command themselves."""
+    name = os.path.basename(args.id or "")
+    p = paths.path(paths.HELD, "%s.json" % name)
+    entry = paths.read_json(p) if name else None
+    if not isinstance(entry, dict):
+        print("no such held message", file=sys.stderr)
+        return REFUSED
+    me = registry.me()
+    if entry.get("receiver_ref") and me and me.get("ref") != entry["receiver_ref"] and \
+            not workers.human_terminal():
+        print("refused: it was held for another session (ref:%s); that session delivers it"
+              % entry["receiver_ref"], file=sys.stderr)
+        return REFUSED
+    # The sender's own words, once and short: they go into the agent's context.
+    who = " ".join(str(entry.get("from") or "an unknown sender").split())[:60]
+    why = _person_or_refuse("delivering the held message %s from %s to this session (it was "
+                            "held: %s)" % (name, who, " ".join(str(entry.get("reason")).split())[:120]),
+                            "no", ask=("held-deliver", name))
+    if why:
+        print("refused: %s" % why, file=sys.stderr)
+        return REFUSED
+    header = entry.get("header") or {k: entry[k] for k in ("id", "from", "scope") if entry.get(k)}
+    parsed = envelope.Parsed(True, header, entry.get("body") or "", entry.get("attrs") or {})
+    runtime = (me or {}).get("runtime") or entry.get("runtime") or "claude"
+    if entry.get("id"):
+        receive._safely(ledger.receipt, entry["id"], "delivered", me,
+                        "released from the held list on your user's reply")
+    paths.append_jsonl("decisions.jsonl", {
+        "event": "held-deliver", "decision": "pass", "id": entry.get("id"), "held": name,
+        "reason": "released on the person's reply: %s" % (_verdict or "")[:200],
+        "receiver": (me or {}).get("name")})
+    try:
+        os.unlink(p)
+    except OSError:
+        pass                                    # gone already: the message still comes
+    print(envelope.sender_context(parsed, runtime, cwd=(me or {}).get("cwd")))
+    print()
+    print(parsed.body)
+    if entry.get("truncated"):
+        print("\n[xsm] The held copy was cut at 4000 characters.")
+    return OK
+
+
 def cmd_held(args) -> int:
     entries = sorted(glob.glob(paths.path(paths.HELD, "*.json")))
+    if args.action == "deliver":
+        return _held_deliver(args)
     if args.action == "show":
         entry = paths.read_json(paths.path(paths.HELD, "%s.json" % args.id))
         if not entry:
@@ -1034,6 +1085,7 @@ def cmd_uninstall(args) -> int:
 
 def cmd_doctor(args) -> int:
     report = install.doctor()
+    report["policy"] = config.policy_report()
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=1))
         return OK
@@ -1061,6 +1113,7 @@ def cmd_doctor(args) -> int:
           % (report["decisions_seen"], report["hook_errors_recent"]))
     print("held       %d message(s)" % report["held"])
     print("native     %s" % _native_note(report))
+    print("policy     %s" % _policy_note(report))
     for pid, folder in report.get("orphaned_servers") or []:
         print("orphaned   %s" % _orphan_note(pid, folder))
     for plan in report["installs"]:
@@ -1183,10 +1236,23 @@ def _allow_note(home: str, missing: list) -> str:
 
 def _native_note(report: dict) -> str:
     """How the gate treats Claude's own messages (no xsm header), ADR-0013."""
-    return ("Claude messages without an xsm header are all held (strict_peers)"
-            if report.get("strict_peers") else
-            "Claude messages without an xsm header pass from this machine, whatever the scope; "
-            "from off it they are held")
+    if report.get("strict_peers"):
+        return "Claude messages without an xsm header are all held (strict_peers)"
+    off_machine = ("from off it they are held (remote_native)"
+                   if (report.get("policy") or {}).get("remote_native") == "hold" else
+                   "from off it they pass, with a note naming where they came from")
+    return ("Claude messages without an xsm header pass from this machine, whatever the scope; "
+            + off_machine)
+
+
+def _policy_note(report: dict) -> str:
+    """Each switch that opened a hold and what it is set to (config.POLICY_DEFAULTS,
+    in config.json or XSM_<NAME>); the ones that are not the default are named,
+    so a machine put back on the old rules says so."""
+    policy = report.get("policy") or config.policy_report()
+    shown = " ".join("%s=%s" % (k, str(v).lower()) for k, v in policy.items())
+    changed = [k for k, v in policy.items() if v != config.POLICY_DEFAULTS.get(k)]
+    return shown + ("  (not the default: %s)" % ", ".join(changed) if changed else "")
 
 
 def _doctor_rows(report: dict) -> list:
@@ -1198,7 +1264,8 @@ def _doctor_rows(report: dict) -> list:
             ("hooks", "%d decision(s) recorded, %d internal error(s)"
              % (report["decisions_seen"], report["hook_errors_recent"])),
             ("held", "%d message(s)" % report["held"]),
-            ("native", _native_note(report))]
+            ("native", _native_note(report)),
+            ("policy", _policy_note(report))]
     if report.get("cli"):
         rows.insert(0, ("cli", install.cli_text(report["cli"])))
     for pid, folder in report.get("orphaned_servers") or []:
@@ -1245,7 +1312,10 @@ def _doctor_rows(report: dict) -> list:
 
 
 def cmd_selftest(args) -> int:
-    """Prove the hook still refuses a peer message when its own code breaks."""
+    """Prove what the hook does with a peer message when its own code breaks: it
+    lets it through with a note that it was not checked (policy fail_open, the
+    default, user decision 2026-10-01), or refuses it when fail_open is off. A
+    person's own prompt is never touched, and no status of 2 comes back."""
     import subprocess
     entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "hooks", "xsm-hook.py")
@@ -1255,11 +1325,17 @@ def cmd_selftest(args) -> int:
     env = dict(os.environ, XSM_FORCE_ERROR="1")
     out = subprocess.run([sys.executable, entry], input=probe, capture_output=True, text=True, env=env)
     blocked = '"decision": "block"' in out.stdout
+    noted = not blocked and "could not check" in out.stdout
+    closed = not config.policy("fail_open")
     human = subprocess.run([sys.executable, entry], input=json.dumps(
         {"hook_event_name": "UserPromptSubmit", "session_id": "selftest", "cwd": os.getcwd(),
          "prompt": "just me typing"}), capture_output=True, text=True, env=env)
-    passed = blocked and not human.stdout.strip()
-    print("peer message on a broken hook: %s" % ("blocked (good)" if blocked else "PASSED THROUGH"))
+    passed = (blocked if closed else noted) and not human.stdout.strip() \
+        and out.returncode != 2 and human.returncode != 2
+    print("peer message on a broken hook: %s" % (
+        ("blocked (fail_open is off, as set)" if blocked else "PASSED THROUGH") if closed else
+        "passed through with a note that it was not checked (good)" if noted else
+        "BLOCKED, or passed with no note"))
     print("human prompt on a broken hook: %s" % ("passed (good)" if not human.stdout.strip()
                                                  else "BLOCKED"))
     return OK if passed else USAGE
@@ -2022,7 +2098,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     hd = sub.add_parser("held", help="messages this machine refused and kept")
     hd.add_argument("--table", action="store_true", help="a Markdown table (for a session's TUI)")
-    hd.add_argument("action", nargs="?", default="list", choices=["list", "show", "drop"])
+    hd.add_argument("action", nargs="?", default="list",
+                    choices=["list", "show", "drop", "deliver"],
+                    help="deliver: hand one to this session, on your user's yes")
     hd.add_argument("id", nargs="?")
     hd.set_defaults(func=cmd_held)
 
@@ -2058,7 +2136,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                             # statusLine runs first
     sl.set_defaults(func=cmd_statusline)
 
-    stest = sub.add_parser("selftest", help="check the hook fails closed for peer messages")
+    stest = sub.add_parser("selftest", help="check what the hook does with a peer message when it "
+                                           "breaks")
     stest.set_defaults(func=cmd_selftest)
     for name in ASKING:
         sub.choices[name].add_argument(

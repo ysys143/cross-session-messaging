@@ -1413,18 +1413,24 @@ class PersonDecisionTest(AskHelpers, TempState):
 
     # -- the log of a broken tool-result hook ----------------------------------------------------
 
-    def test_a_broken_hook_logs_a_block_only_for_what_it_could_hold_back(self):
+    def test_a_broken_hook_logs_a_pass_and_blocks_only_when_fail_open_is_off(self):
         import json
         from xsm import paths, receive
         peer = "<cross-session-message>[xsm v1 id=x]</cross-session-message>"
-        for event, extra, want in (
-                ("PostToolUse", {"tool_name": "AskUserQuestion",
-                                 "tool_response": {"answers": {"q": peer}}}, "pass"),
-                ("UserPromptSubmit", {"prompt": peer}, "block")):
-            with self.subTest(event):
+        for fail_open, event, extra, want in (
+                (None, "PostToolUse", {"tool_name": "AskUserQuestion",
+                                       "tool_response": {"answers": {"q": peer}}}, "pass"),
+                (None, "UserPromptSubmit", {"prompt": peer}, "pass"),
+                ("false", "PostToolUse", {"tool_name": "AskUserQuestion",
+                                          "tool_response": {"answers": {"q": peer}}}, "pass"),
+                ("false", "UserPromptSubmit", {"prompt": peer}, "block")):
+            with self.subTest(event, fail_open=fail_open):
                 raw = json.dumps(dict({"hook_event_name": event}, **extra))
+                env = {"XSM_FORCE_ERROR": "1"}
+                if fail_open:
+                    env["XSM_FAIL_OPEN"] = fail_open
                 with mock.patch.object(sys, "stdin", io.StringIO(raw)), \
-                        mock.patch.dict(os.environ, {"XSM_FORCE_ERROR": "1"}), \
+                        mock.patch.dict(os.environ, env), \
                         contextlib.redirect_stdout(io.StringIO()):
                     receive.main()
                 logged = paths.read_jsonl("decisions.jsonl")[-1]

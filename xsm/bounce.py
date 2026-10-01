@@ -52,6 +52,23 @@ def record(sender: dict, receiver: dict | None, reason: str, held: str | None,
         "connect_dir": connect_dir, "preview": (body or "")[:200], "offer": offer})
 
 
+def record_held_here(receiver: dict | None, who: str, reason: str, held: str) -> None:
+    """Leave the receiving agent a note that its own gate kept a message for
+    its user to decide on. Refusing the prompt shows the person a line, but
+    the agent sees nothing of a prompt that was refused, so it would not know
+    to offer `xsm held deliver` (2026-10-01). Shown once, with the next prompt
+    that goes through, like a sender's note. It carries none of the message:
+    what the gate held is for the person to see first."""
+    sid = str((receiver or {}).get("session_id") or "")
+    if not sid:
+        return
+    # The sender's own words (a header's from) end up in the agent's context:
+    # one short line, never a paragraph of someone else's.
+    paths.write_json(os.path.join(_dir(sid), "%d.json" % int(time.time() * 1000)), {
+        "t": time.time(), "here": True, "from": " ".join(str(who).split())[:60],
+        "reason": " ".join(str(reason).split())[:200], "held": held})
+
+
 def take(session_id: str | None) -> list:
     """Claim this session's notes, oldest first; each is shown once."""
     if not session_id:
@@ -87,6 +104,16 @@ def text(notes: list) -> str:
     runs `xsm send --held <id>` to be shown the reply, and once more on a yes."""
     lines = []
     for note in notes:
+        if note.get("here"):
+            lines.append(
+                "[xsm] A message from %s was held by this session's gate (%s) and is kept as %s. "
+                "It is not delivered. If your user wants it, ask them, in plain words, whether "
+                "to deliver it, and after they answer run `xsm held deliver %s`: that run shows "
+                "you their reply without acting, and on a yes, run it once more to receive the "
+                "message." % (note.get("from") or "an unknown sender",
+                              (note.get("reason") or "").split(";")[0], note.get("held"),
+                              note.get("held")))
+            continue
         to = note.get("to") or {}
         who = "%s@%s" % (to.get("name") or "?", to.get("alias") or "?")
         if to.get("ref"):

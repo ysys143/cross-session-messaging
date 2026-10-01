@@ -107,6 +107,22 @@ def received(msg_id: str) -> bool:
     return os.path.exists(_receipt_path(msg_id))
 
 
+def receipt_of(msg_id: str) -> dict | None:
+    """The receiver's own record of what it did with this message, if any."""
+    rec = paths.read_json(_receipt_path(msg_id))
+    return rec if isinstance(rec, dict) else None
+
+
+def sent_by(msg_id: str | None, ref: str | None) -> bool:
+    """Whether this machine's own `xsm send` queued this id from this session.
+    Only the sending side writes the entry, after it checked scope, so it proves
+    where a header came from when the sender itself has since exited."""
+    if not (msg_id and ref):
+        return False
+    entry = paths.read_json(_entry_path(msg_id))
+    return isinstance(entry, dict) and (entry.get("from") or {}).get("ref") == ref
+
+
 def status(msg_id: str) -> dict:
     entry = paths.read_json(_entry_path(msg_id), {}) or {}
     rec = paths.read_json(_receipt_path(msg_id))

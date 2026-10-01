@@ -463,20 +463,44 @@ class StoppedTargetSendTest(TempState):
 
 
 class HookFallbackTest(TempState):
-    """A broken hook must refuse peer messages and never block the user."""
+    """A broken hook steps aside (user decision, 2026-10-01): a peer message goes
+    through with a note that it was not checked, a person's own prompt is
+    untouched, and nothing is blocked or exits 2. fail_open = false brings the
+    S8-g2 refusal back."""
 
-    def _run(self, prompt):
-        env = dict(os.environ, XSM_FORCE_ERROR="1", XSM_HOME=self.tmp)
+    ENVELOPE = ('<cross-session-message from-mode="bypass">\n[xsm v1 id=1]\nhi\n'
+                '</cross-session-message>')
+
+    def _run(self, prompt, **env):
+        env = dict(os.environ, XSM_FORCE_ERROR="1", XSM_HOME=self.tmp, **env)
         payload = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "x",
                               "cwd": self.tmp, "prompt": prompt})
         return subprocess.run([sys.executable, os.path.join(REPO, "hooks", "xsm-hook.py")],
                               input=payload, capture_output=True, text=True, env=env)
 
-    def test_peer_message_is_blocked(self):
-        out = self._run('<cross-session-message from-mode="bypass">\n[xsm v1 id=1]\nhi\n'
-                        '</cross-session-message>')
-        self.assertIn('"decision": "block"', out.stdout)
+    def test_peer_message_passes_noted_as_unchecked(self):
+        out = self._run(self.ENVELOPE)
+        self.assertNotIn('"decision"', out.stdout)
+        self.assertIn("could not check this prompt", json.loads(out.stdout)[
+            "hookSpecificOutput"]["additionalContext"])
         self.assertEqual(out.returncode, 0)
+
+    def test_a_person_quoting_an_xsm_log_is_not_blocked_either(self):
+        out = self._run("why did this say [xsm v1 id=9 from=a] in the log?")
+        self.assertNotIn('"decision"', out.stdout)
+        self.assertEqual(out.returncode, 0)
+
+    def test_fail_open_off_blocks_a_peer_message_again(self):
+        for how in ("environment", "config"):
+            with self.subTest(how):
+                if how == "config":
+                    from xsm import paths
+                    paths.write_json(paths.path("config.json"), {"fail_open": False})
+                    out = self._run(self.ENVELOPE)
+                else:
+                    out = self._run(self.ENVELOPE, XSM_FAIL_OPEN="false")
+                self.assertIn('"decision": "block"', out.stdout)
+                self.assertEqual(out.returncode, 0)
 
     def test_human_prompt_passes(self):
         out = self._run("please refactor this file")
@@ -581,10 +605,11 @@ class ForecastTest(TempState):
 
 
 class UnknownSelfTest(TempState):
-    """A hook that cannot tell which session it guards must refuse peer
-    messages: scope is unchecked, so passing would make that session an open
-    door. Driven through handle() directly because whether the process tree
-    happens to contain a real `claude` ancestor is environment-dependent.
+    """A hook that cannot tell which session it guards cannot check scope. Until
+    2026-10-01 it refused the peer message; now the message goes through with a
+    note that it was not checked (user decision: a gap of our own does not stop a
+    conversation). Driven through handle() directly because whether the process
+    tree happens to contain a real `claude` ancestor is environment-dependent.
     """
 
     def _message(self):
@@ -599,11 +624,19 @@ class UnknownSelfTest(TempState):
         return receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "r1",
                                "cwd": self.tmp, "prompt": prompt, "session_title": "recv"})
 
-    def test_peer_message_is_refused(self):
+    def test_peer_message_passes_noted_as_unchecked(self):
+        from xsm import ledger
         out = self._handle(self._message())
-        self.assertEqual(out["decision"], "block")
-        self.assertIn("cannot identify this session", out["reason"])
-        self.assertTrue(os.listdir(os.path.join(self.tmp, "held")), "body must be kept")
+        self.assertNotIn("decision", out)
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("could not check this message", context)
+        self.assertIn("could not be identified", context)
+        self.assertIn("not from your user", context)
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp, "held")) and
+                         os.listdir(os.path.join(self.tmp, "held")), "nothing was held")
+        receipt = ledger.status("m1")["receipt"]
+        self.assertEqual(receipt["decision"], "delivered")
+        self.assertTrue(receipt["reason"].startswith("unchecked: "))
 
     def test_human_prompt_is_untouched(self):
         self.assertIsNone(self._handle("my own prompt"))
@@ -854,11 +887,39 @@ class NativeClaudeMessageTest(TempState):
                                 "\nhello\n</cross-session-message>")
         self.assertEqual(parsed.attrs["from"], "uds:/tmp/cc-socks/1.sock")
 
-    def test_a_sender_without_a_local_socket_is_held(self):
+    def test_a_sender_without_a_local_socket_passes_noted_with_where_it_came_from(self):
+        """Remote Control, a cloud session, another machine (user decision,
+        2026-10-01, ADR-0013): through, with its origin named."""
         me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
         decision, reason = self._check("bridge:remote-control", me, [])
-        self.assertEqual(decision, "block")
+        self.assertEqual(decision, "unchecked")
+        self.assertIn("bridge:remote-control", reason)
         self.assertIn("not a session on this machine", reason)
+
+    def test_remote_native_hold_brings_the_hold_back(self):
+        from unittest import mock
+        from xsm import receive
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        for how in ("config", "environment"):
+            with self.subTest(how):
+                cfg = {"strict_peers": False, "remote_native": "hold"} if how == "config" \
+                    else {"strict_peers": False}
+                env = {"XSM_REMOTE_NATIVE": "hold"} if how == "environment" else {}
+                with mock.patch.dict(os.environ, env), \
+                        mock.patch.object(receive.registry, "records", return_value=[]):
+                    decision, reason = receive.check(self._parsed("bridge:remote-control"), me, cfg)
+                self.assertEqual(decision, "block")
+                self.assertIn("not a session on this machine", reason)
+
+    def test_a_blocked_receiver_is_not_reached_from_off_the_machine_either(self):
+        from unittest import mock
+        from xsm import receive
+        me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
+        with mock.patch.object(receive.registry, "records", return_value=[]), \
+                mock.patch.object(receive.config, "blocked", return_value={"bbbbbb"}):
+            decision, _ = receive.check(self._parsed("bridge:remote-control"), me,
+                                        {"strict_peers": False})
+        self.assertEqual(decision, "block")
 
     def test_a_socket_whose_only_owner_ended_passes_as_local(self):
         ended = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "ended",
@@ -1785,7 +1846,10 @@ class HeldRecordTest(TempState):
 
     def test_injection_records_its_reply_address(self):
         from xsm import envelope, paths, receive
-        receive.register = lambda data, runtime: None
+        paths.write_json(paths.path("config.json"), {"strict_peers": True})
+        receive.register = lambda data, runtime: {
+            "runtime": "claude", "session_id": "r1", "ref": "bbbbbb", "name": "recv",
+            "alias": "claude-4", "cwd": self.tmp}
         prompt = ('<%s from="uds:/tmp/cc-socks/999.sock" from-mode="prompting">\nraw\n</%s>'
                   % (envelope.TAG, envelope.TAG))
         receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "r1",

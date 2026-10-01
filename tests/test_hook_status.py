@@ -205,7 +205,7 @@ class LauncherTest(TempState):
 class HookScriptTest(TempState):
     """hooks/xsm-hook.py: whatever the package does, never status 2."""
 
-    def _run(self, receive):
+    def _exec(self, receive, stdin="{}", **env):
         tree = tempfile.mkdtemp(dir=self.tmp)       # a new one each time: no stale bytecode
         os.makedirs(os.path.join(tree, "hooks"))
         os.makedirs(os.path.join(tree, "xsm"))
@@ -214,7 +214,11 @@ class HookScriptTest(TempState):
         with open(os.path.join(tree, "xsm", "receive.py"), "w") as fh:
             fh.write(receive)
         return subprocess.run([sys.executable, os.path.join(tree, "hooks", "xsm-hook.py")],
-                              input="{}", capture_output=True, text=True).returncode
+                              input=stdin, capture_output=True, text=True,
+                              env=dict(os.environ, XSM_HOME=self.tmp, **env))
+
+    def _run(self, receive):
+        return self._exec(receive).returncode
 
     def test_a_main_that_answers_2_exits_1(self):
         self.assertEqual(self._run("def main():\n    return 2\n"), 1)
@@ -244,43 +248,124 @@ class HookScriptTest(TempState):
                 self.assertEqual(self._real(event, prompt), (0, ""),
                                  "status 0 and no decision of any kind")
 
-    def test_only_a_prompt_carrying_the_peer_envelope_is_held_when_the_gate_breaks(self):
-        """The one decision a failure can still emit (S8-g2: a gate that breaks
-        must not wave a peer message through). It never reaches a person's own
-        text, and the status is 0, not the 2 that blocks a session."""
+    def test_a_prompt_carrying_the_peer_envelope_goes_through_noted_when_the_gate_breaks(self):
+        """User decision, 2026-10-01: a gate that breaks steps aside. Before it,
+        the one decision a failure could still emit was a block, and a person
+        pasting an xsm log was refused with it."""
         status, out = self._real("UserPromptSubmit",
                                  '<cross-session-message from-mode="bypass">\nhi\n'
                                  '</cross-session-message>')
         self.assertEqual(status, 0)
-        self.assertEqual(json.loads(out)["decision"], "block")
+        self.assertNotIn("decision", json.loads(out))
+        self.assertIn("could not check this prompt",
+                      json.loads(out)["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(self._real("PostToolUse", "<cross-session-message>"), (0, ""),
                          "a tool result has happened: nothing to hold back")
+
+    # Every way the gate can fail, for a person's own prompt that quotes an xsm log
+    # and for a real peer envelope: never a block, never status 2.
+
+    def _peer_texts(self):
+        from xsm import envelope
+        sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa", "session_id": "s1"}
+        return {"a person quoting a log": "why does the log say [xsm v1 id=9 from=a] here?",
+                "a real envelope": envelope.build("hi", msg_id="m9", sender=sender,
+                                                  scope="dir:x")}
+
+    def _assert_never_blocks(self, run, **why):
+        for label, text in self._peer_texts().items():
+            with self.subTest(label, **why):
+                out = run(json.dumps({"hook_event_name": "UserPromptSubmit",
+                                      "session_id": "s", "cwd": self.tmp, "prompt": text}))
+                self.assertNotIn('"decision"', out.stdout, out.stdout)
+                self.assertIn(out.returncode, (0, 1))
+                self.assertNotEqual(out.returncode, 2)
+
+    def test_a_state_folder_that_cannot_be_written_blocks_nothing(self):
+        locked = os.path.join(self.tmp, "a-file")        # a folder cannot be made under a file
+        open(locked, "w").close()
+
+        def run(stdin):
+            return subprocess.run(
+                [sys.executable, os.path.join(REPO, "hooks", "xsm-hook.py")], input=stdin,
+                capture_output=True, text=True,
+                env=dict(os.environ, XSM_HOME=os.path.join(locked, "xsm")))
+        self._assert_never_blocks(run, failure="unwritable XSM_HOME")
+
+    def test_an_xsm_that_does_not_import_blocks_nothing(self):
+        for source in ("raise ImportError('broken')\n", "def main(:\n"):
+            self._assert_never_blocks(
+                lambda stdin, source=source: self._exec(source, stdin), failure="ImportError")
+
+    def test_an_xsm_that_does_not_import_says_so_and_fail_open_off_refuses_again(self):
+        stdin = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s",
+                            "prompt": "<cross-session-message>\nhi\n</cross-session-message>"})
+        out = self._exec("raise ImportError('broken')\n", stdin)
+        self.assertIn("xsm could not be loaded",
+                      json.loads(out.stdout)["hookSpecificOutput"]["additionalContext"])
+        for how, env in (("environment", {"XSM_FAIL_OPEN": "0"}), ("config", {})):
+            with self.subTest(how):
+                if how == "config":
+                    with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+                        json.dump({"fail_open": False}, fh)
+                out = self._exec("raise ImportError('broken')\n", stdin, **env)
+                self.assertEqual(json.loads(out.stdout)["decision"], "block")
+                self.assertEqual(out.returncode, 0)
+        out = self._exec("raise ImportError('broken')\n", json.dumps({
+            "hook_event_name": "UserPromptSubmit", "prompt": "just me"}))
+        self.assertEqual((out.returncode, out.stdout), (0, ""), "a person's prompt is silent")
+
+    def test_a_failure_of_the_gate_with_a_real_xsm_blocks_nothing(self):
+        self._assert_never_blocks(
+            lambda stdin: subprocess.run(
+                [sys.executable, os.path.join(REPO, "hooks", "xsm-hook.py")], input=stdin,
+                capture_output=True, text=True,
+                env=dict(os.environ, XSM_HOME=self.tmp, XSM_FORCE_ERROR="1")),
+            failure="an error inside the gate")
 
 
 class NoPythonTest(TempState):
     """The plugin launcher when no usable python is found."""
 
-    def _run(self, stdin):
+    def _run(self, stdin, **env):
         plugin = os.path.join(self.tmp, "plugin-bare")
         os.makedirs(os.path.join(plugin, "hooks"), exist_ok=True)
         shutil.copy(os.path.join(REPO, "hooks", "xsm-hook"), os.path.join(plugin, "hooks", "xsm-hook"))
         out = subprocess.run([os.path.join(plugin, "hooks", "xsm-hook")], input=stdin,
                              capture_output=True, text=True,
                              env=dict(os.environ, XSM_PYTHON_CANDIDATES="/nonexistent/python",
-                                      XSM_HOME=self.tmp))
+                                      XSM_HOME=self.tmp, **env))
         return out.returncode, out.stdout
 
-    def test_a_persons_prompt_passes_and_only_a_peer_envelope_is_held(self):
+    def test_a_persons_prompt_passes_and_a_peer_envelope_goes_through_noted(self):
         for event, prompt in (("UserPromptSubmit", "응, 진행해"), ("SessionStart", ""),
                               ("PermissionRequest", ""), ("PostToolUse", "")):
             with self.subTest(event):
                 self.assertEqual(self._run(json.dumps({"hook_event_name": event,
                                                        "prompt": prompt})), (0, ""))
-        status, out = self._run(json.dumps({
-            "hook_event_name": "UserPromptSubmit",
-            "prompt": "<cross-session-message>\nhi\n</cross-session-message>"}))
-        self.assertEqual(status, 0)
-        self.assertEqual(json.loads(out)["decision"], "block")
+        for prompt in ("<cross-session-message>\nhi\n</cross-session-message>",
+                       "why does the log say [xsm v1 id=9] here?"):
+            with self.subTest(prompt):
+                status, out = self._run(json.dumps({"hook_event_name": "UserPromptSubmit",
+                                                    "prompt": prompt}))
+                self.assertEqual(status, 0)
+                self.assertNotIn("decision", json.loads(out), "never a block")
+                self.assertIn("no Python 3.9+ was found", json.loads(out)[
+                    "hookSpecificOutput"]["additionalContext"])
+
+    def test_fail_open_off_brings_the_refusal_back(self):
+        stdin = json.dumps({"hook_event_name": "UserPromptSubmit",
+                            "prompt": "<cross-session-message>\nhi\n</cross-session-message>"})
+        for how in ("environment", "config"):
+            with self.subTest(how):
+                if how == "config":
+                    with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+                        json.dump({"fail_open": False}, fh)
+                    status, out = self._run(stdin)
+                else:
+                    status, out = self._run(stdin, XSM_FAIL_OPEN="false")
+                self.assertEqual(status, 0)
+                self.assertEqual(json.loads(out)["decision"], "block")
 
 
 if __name__ == "__main__":

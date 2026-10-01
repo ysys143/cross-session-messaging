@@ -169,6 +169,10 @@ def _resolve_case(case):
     return run
 
 
+def message_body(case):
+    return case["message"].get("body", "")
+
+
 def _gate_case(case):
     def run(self):
         from xsm import envelope, paths
@@ -184,6 +188,12 @@ def _gate_case(case):
             from xsm import workers
             workers.save({"name": w["name"], "ref": records[w["session"]]["ref"],
                           "parent_ref": records[w["parent"]]["ref"]})
+        if case.get("ledger_queued"):
+            # This machine's own `xsm send` queued the message, then its sender
+            # exited: the ledger is what proves where the header came from.
+            from xsm import ledger
+            ledger.queued("vec-%s" % case["id"], records[case["ledger_queued"]["from"]],
+                          receiver, "dir:ws", "note", message_body(case))
 
         if message["kind"] == "raw":
             prompt = message.get("prompt", "")
@@ -247,6 +257,8 @@ def _gate_case(case):
             context = emitted["hookSpecificOutput"]["additionalContext"]
             for fragment in expect.get("context_contains", []):
                 self.assertIn(fragment, context, case["id"])
+            for fragment in expect.get("context_absent", []):
+                self.assertNotIn(fragment, context, case["id"])
         else:
             self.assertEqual(emitted["decision"], "block", case["id"])
             self.assertIn(expect["reason_contains"], emitted["reason"], case["id"])
