@@ -788,7 +788,7 @@
    }
   },
   {
-   "id": "a-claude-message-from-an-out-of-scope-session-is-held",
+   "id": "a-local-claude-message-from-an-out-of-scope-session-passes",
    "sessions": [
     {
      "name": "recv",
@@ -810,9 +810,7 @@
     "body": "native hello"
    },
    "expect": {
-    "output": "block",
-    "reason_contains": "out of scope",
-    "held": true
+    "output": "none"
    }
   },
   {

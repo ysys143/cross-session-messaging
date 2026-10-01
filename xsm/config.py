@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 
@@ -82,13 +83,40 @@ def alias_of(home_path: str) -> str:
 
 
 def git_root(cwd: str) -> str | None:
+    """The top of the working tree `cwd` is in: each linked worktree has its
+    own. Folders are linked, reached and joined by this."""
+    return git_repo(cwd)[0]
+
+
+def git_repo(cwd: str) -> tuple:
+    """(working-tree top, repository) for `cwd`, or (None, None) outside git.
+
+    The repository is the git common dir, the .git every linked worktree of
+    one clone shares. Comparing working-tree tops called a worktree Orca or
+    `claude --worktree` made and its main checkout "different git
+    repositories", so the default same-repository scope failed for the very
+    sessions it was for (issue #8 follow-up, 2026-10-01). Separate clones of
+    one remote keep separate common dirs and stay apart."""
     try:
-        out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel",
+                              "--git-common-dir"], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
-        return None
-    root = out.stdout.strip()
-    return os.path.realpath(root) if out.returncode == 0 and root else None
+        return None, None
+    lines = out.stdout.strip().splitlines()
+    if out.returncode != 0 or len(lines) != 2 or not lines[0]:
+        return None, None
+    # An older git prints the common dir relative to `cwd`.
+    common = lines[1] if os.path.isabs(lines[1]) else os.path.join(cwd, lines[1])
+    return os.path.realpath(lines[0]), os.path.realpath(common)
+
+
+def repo_name(common_dir: str) -> str:
+    """A repository's name from its common dir: the folder that holds `.git`
+    (the main checkout), or the bare repository's own name."""
+    if os.path.basename(common_dir) == ".git":
+        return os.path.basename(os.path.dirname(common_dir))
+    name = os.path.basename(common_dir)
+    return name[:-len(".git")] if name.endswith(".git") else name
 
 
 def _expand(pattern: str) -> str:
@@ -160,12 +188,11 @@ def _link_hint(a: dict, b: dict) -> str:
     if not (a.get("cwd") and b.get("cwd")):
         return ""
     there = project_root(b["cwd"])
-    # Asking is the agent's job, deciding is the person's: the tool shows them
-    # an approval form and connects on yes (user decision, 2026-10-01).
-    return ("; to connect the two folders, the session at %s asks its user with the xsm_link "
-            "MCP tool (dir=%s; an approval form, connects on yes), or the user types "
-            "/xsm link %s there (Codex: $xsm link %s)" % (project_root(a["cwd"]), there, there,
-                                                           there))
+    # The agent asks and the agent runs it (user decision, 2026-10-01): the
+    # command takes its user's reply as the verdict, the MCP tool a form.
+    return ("; to connect the two folders, the session at %s asks its user and runs "
+            "`xsm link %s` (or the xsm_link MCP tool)" % (project_root(a["cwd"]),
+                                                       shlex.quote(there)))
 
 
 def _reach_link(a: dict, b: dict, cfg: dict) -> str | None:
@@ -211,9 +238,9 @@ def reach_holds(r: dict, session: dict) -> bool:
 def _reach_hint(a: dict, b: dict) -> str:
     if not (a.get("ref") and b.get("cwd")):
         return ""
-    return ("; or your user can let this session reach %s (xsm_reach, or `xsm reach %s "
-            "--session ref:%s` in a terminal)" % (project_root(b["cwd"]), project_root(b["cwd"]),
-                                                  a["ref"]))
+    return ("; or, to let only this session reach %s, it asks its user and runs `xsm reach %s` "
+            "(or the xsm_reach MCP tool)" % (project_root(b["cwd"]),
+                                            shlex.quote(project_root(b["cwd"]))))
 
 
 def _worker_link(a: dict, b: dict) -> str | None:
@@ -257,9 +284,9 @@ def default_project(cwd: str):
     """The project every session belongs to without joining anything: the git
     repository it started in, or that folder when there is none. Returns
     (scope_id, root)."""
-    root = git_root(cwd)
+    root, common = git_repo(cwd)
     if root:
-        return "repo:" + os.path.basename(root), root
+        return "repo:" + repo_name(common), root
     folder = os.path.realpath(cwd)
     return "dir:" + os.path.basename(folder), folder
 
@@ -269,10 +296,11 @@ def _scope_for(a: dict, b: dict, cfg: dict):
     # to it, so two sessions of one repository keep talking under their
     # repository's scope even after that repository joins a named project.
     default = cfg.get("same_repo_scope", True)
-    ra, rb = git_root(a.get("cwd") or ""), git_root(b.get("cwd") or "")
+    (ta, ra), (tb, rb) = git_repo(a.get("cwd") or ""), git_repo(b.get("cwd") or "")
     ca, cb = os.path.realpath(a.get("cwd") or "a"), os.path.realpath(b.get("cwd") or "b")
     if default and ra and ra == rb:
-        return "repo:" + os.path.basename(ra), "same git repository"
+        return "repo:" + repo_name(ra), ("same git repository" if ta == tb else
+                                         "same git repository (linked worktree)")
     if default and not ra and not rb and ca == cb:
         return "dir:" + os.path.basename(ca), "same directory"
     for scope in cfg.get("scopes", []):

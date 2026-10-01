@@ -114,6 +114,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 | `bounces/<session-id>/<ms>.json` | `{"t", "reason", "held", "to": {name, alias, ref, runtime, cwd}, "connect_dir"?, "preview"}`: 받는 쪽 게이트가 보관한 네이티브 메시지를, 소켓으로 식별된 보낸 세션에 알리는 쪽지(이슈 #8). 보낸 세션의 다음 `UserPromptSubmit`(막히지 않은 것)과 xsm CLI·MCP 결과가 한 번 보여 주고 지운다. 메시지가 아니므로 게이트를 지나지 않고 다시 반송되지 않는다 |
 | `inbox/<thread-uuid>/<id>.json` | `{"id", "t", "content", "queued_id"?, "codex_home"?}`: Codex 대상 메시지의 봉투 사본(§2.2). 어느 경로로든 넘겨지면 지우고, 읽히지 않은 사본은 세션 포인터 보존 기간이 지나면 정리한다 |
 | `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "telemetry_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}], "reaches": [{"ref": str, "root": path, "t": number, "by": str, "runtime": str, "home": path, "session_id": str, "pid": number, "lstart": str?}], "links": [{"a": path, "b": path, "t": number, "by": str}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다. `links`는 `xsm link`가 쓴다(§5.3.1) |
+| `asked/<ref>.pending.json` | `{"verb", "target", "here"?, "cwd", "t", "session_id", "verdict": str\|null, "verdict_t"?}`, 모드 0600. 동의 없이 연결 명령을 실행한 에이전트의 요청. 그 세션에 사람이 다음에 입력한 메시지가 `verdict`로 붙고, 같은 명령을 다시 실행하면 한 번 쓰고 지운다(§5.3.3) |
 | `asked/<ref>.json` | `{"verb": "link"\|"join"\|"leave"\|"reach", "args": str, "cwd", "t", "session_id", "runtime"}`, 모드 0600. 사람이 세션에 직접 입력한 xsm 명령으로, 그 세션의 동의다(§5.3.3). 한 번 쓰면 지운다 |
 | `interpreter` | `{"path": str, "version": str}`. 훅이 실행될 인터프리터 절대 경로. `xsm install --python`이 쓴다 |
 | `homes.json` | `[{"path": str, "runtime": "claude"\|"codex", "alias": str}]` |
@@ -227,7 +228,7 @@ refused: only stopped sessions match 'life-b'
 `UserPromptSubmit`에서 순서대로 본다. `SessionStart`는 등록만 하고 절대 차단하지 않는다.
 
 1. 봉투도 헤더도 없다 → **아무것도 출력하지 않는다**(사람 입력).
-2. 헤더가 없다(Claude 자체의 피어 메시지) → `strict_peers`가 참이면 **차단**한다. 거짓(기본값)이면 수신 세션이 Claude이고, 봉투의 `from="uds:<socket>"`가 레지스트리에서 살아 있는(`live`·`unknown`) Claude 세션 **정확히 하나**의 소켓일 때만 그 세션을 발신자로 삼는다. 그 발신자에게 3·5·6·7번을 적용하고, 통과하면 **아무것도 출력하지 않는다**(Claude 자신의 안내가 그대로 보인다). `uds:` 소켓이지만 살아 있는 세션 하나로 정해지지 않으면(xsm이 없는 프로필, 낡은 기록, 여러 기록) 같은 기계·같은 사용자이므로 **통과**시키고 역시 아무것도 출력하지 않는다. `from`이 이 기계의 `uds:` 소켓이 아니면(Remote Control, 클라우드, 다른 기계) **차단**한다. Claude의 네이티브 봉투에는 세션 id가 없다(ADR-0013, 2026-09-30 개정). 이 경로에서 보관한 메시지의 발신자가 살아 있는 세션 하나로 식별되면, 그 세션 앞으로 `bounces/`에 쪽지를 남긴다. 범위 밖이면 쪽지에 받는 쪽 폴더(`connect_dir`)를 적어, 보낸 에이전트가 `xsm_link`로 사용자 승인을 받아 연결한 뒤 다시 보내게 한다(이슈 #8).
+2. 헤더가 없다(Claude 자체의 피어 메시지) → `strict_peers`가 참이면 **차단**한다. 수신 세션이 Claude가 아니면 **차단**한다. 봉투의 `from`이 이 기계의 `uds:` 소켓이면 발신자와 범위에 상관없이 **통과**시키고 아무것도 출력하지 않는다(Claude 자신의 안내가 그대로 보인다). 같은 기계·같은 사용자이므로 범위 검사는 지킬 것이 없고 Claude가 허락한 연결만 끊었다(ADR-0013, 2026-10-01 개정). 다만 사람이 `deny`로 막은 세션(수신 세션, 또는 소켓을 가진 살아 있는 세션 하나)이면 **차단**한다. 소켓을 가진 살아 있는 세션 하나가 있으면 판정 기록에 그 이름을 적는다. `from`이 이 기계의 `uds:` 소켓이 아니면(Remote Control, 클라우드, 다른 기계) **차단**한다. Claude의 네이티브 봉투에는 세션 id가 없다. 이 경로에서 보관한 메시지(지금은 사실상 `strict_peers`)의 발신자가 살아 있는 세션 하나로 식별되면, 그 세션 앞으로 `bounces/`에 쪽지를 남긴다(이슈 #8). 범위 검사는 xsm 헤더가 있는 메시지에만 적용되고, `xsm send`는 보내기 전에 범위 밖을 거부한다.
 3. 수신 세션이 자기 자신을 식별하지 못한다(세션 환경변수가 없고 기존 포인터도 없다) → **차단**. 범위를 검사할 수 없는 상태에서 통과시키면 그 세션이 열린 문이 된다.
 4. 발신자 `ref`가 레지스트리에 없다 → **차단**. 봉투의 `from`이 `uds:<socket>`인데 헤더의 발신자가 Claude 세션이 아니거나, 그 세션의 소켓이 봉투의 소켓과 다르다 → **차단**. Claude가 채우는 봉투가 실제 경로이고 헤더는 발신자가 쓰는 글이기 때문이다(ADR-0013). 어느 한쪽에 소켓이 없으면 비교하지 않는다.
 5. 발신자가 살아 있지 않다(`live`나 `unknown`이 아니다) → **차단**. 멈춘 세션의 포인터는 며칠 남으므로, 그 이름이 지금 메시지를 실어 나르지 못하게 한다(ADR-0009).
@@ -302,7 +303,7 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 
 `xsm join <이름>`은 호출한 세션의 프로젝트 폴더(git 루트, 없으면 그 폴더)를 `id`가 `<이름>`인 scope의 `{"root": …}` 구성원으로 추가한다. `xsm leave`는 그 구성원을 지우고, 구성원이 남지 않으면 scope를 지운다.
 
-- 기본 프로젝트가 먼저다. 모든 세션은 시작한 디렉터리의 프로젝트(`repo:<git 루트 이름>`, 저장소가 아니면 `dir:<폴더 이름>`)에 속하고, 두 세션의 기본 프로젝트가 같으면 이름 붙인 프로젝트와 관계없이 그 scope를 쓴다. 이름 붙인 프로젝트는 기본 프로젝트에 더해지는 중복 가입이다.
+- 기본 프로젝트가 먼저다. 모든 세션은 시작한 디렉터리의 프로젝트(`repo:<저장소 이름>`, 저장소가 아니면 `dir:<폴더 이름>`)에 속하고, 두 세션의 기본 프로젝트가 같으면 이름 붙인 프로젝트와 관계없이 그 scope를 쓴다. 이름 붙인 프로젝트는 기본 프로젝트에 더해지는 중복 가입이다. 같은 저장소인지는 `git rev-parse --git-common-dir`(모든 linked worktree가 함께 쓰는 `.git`)로 판정하고, 저장소 이름은 그 `.git`을 담은 메인 체크아웃 폴더 이름이다. 그래서 Orca나 `claude --worktree`가 만든 worktree와 메인 체크아웃은 같은 기본 프로젝트이고 판정 사유는 `same git repository (linked worktree)`다. 같은 원격의 별도 clone은 `.git`이 달라 다른 저장소다. link·reach·join의 폴더는 지금처럼 각 worktree의 toplevel이다(2026-10-01).
 - 두 세션은 **각자의 폴더가 같은 프로젝트의 구성원일 때만** 그 scope를 공유한다. 한쪽의 가입만으로는 열리지 않는다.
 - 이름은 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`이다. `root` 구성원이 없는 손으로 쓴 scope와 이름이 겹치면 가입을 거부한다.
 - 가입이 한쪽뿐이라 거부될 때 이유 문구에 가입하지 않은 폴더와 필요한 명령을 붙인다.
@@ -324,6 +325,8 @@ Claude는 우리 훅보다 **먼저** 자체 판정을 한다. 구현은 보내�
 - 두 경우 모두 `args`는 그 줄의 나머지 원문이다. 기록이 실패해도 훅은 아무 말 없이 통과시킨다. xsm 워커(`XSM_WORKER`)에서는 기록하지 않는다. xsm이 그 창에 글자를 쳐 넣기 때문이다. 이 파일은 훅만 쓴다. 피어 메시지나 도구 호출로는 만들어지지 않는다.
 - **사용.** 기록 후 10분 동안 한 번 쓴다. 쓰는 쪽(CLI `link`/`join`/`leave`/`reach`, MCP `xsm_link`/`xsm_join`/`xsm_reach`)은 동사가 같고, 대상이 같을 때만 쓴다. `link`와 `reach`의 대상은 세션 폴더 기준으로 푼 정규 프로젝트 루트로 비교하고, `join`/`leave`는 이름 그대로 비교한다. `link`는 연결하는 이쪽 폴더도 입력한 세션의 프로젝트여야 한다. `session_id`가 기록과 다르면(24비트 ref 충돌) 쓰지 않는다. 맞지 않는 요청은 동의를 소모하지 않는다.
 - **남는 한계.** Codex에서는 `codex queue` 항목(xsm이 Codex에 전달하는 길)도 사람의 입력과 같은 원문으로 `UserPromptSubmit`에 오므로, 봉투·헤더 없이 `$xsm link …`로 시작하는 항목을 넣을 수 있는 같은 OS 사용자의 프로세스는 동의를 위조할 수 있다. 이것은 xsm의 기존 신뢰 경계 안이다: 경계는 uid이고 동의 기록은 보안 장치가 아니다(ADR-0009). 두 런타임 모두, 세션의 입력창에 글자를 칠 수 있는 것(그 창에 대한 `tmux send-keys` 등)은 그 세션의 폼에 답할 수 있듯 동의도 만들 수 있다.
+
+- **물어보고 실행(판정, 2026-10-01).** 동의 없이 에이전트가 CLI `link`/`join`/`leave`/`reach`를 실행하면, 요청을 `asked/<ref>.pending.json`에 적고 "사용자에게 쉬운 말로 물어보라. 다음 메시지가 판정으로 남는다. 동의하면 같은 명령을 다시 실행하라"로 거부한다(종료 코드 2). 사람에게 명령 입력을 요구하지 않는다(사용자 결정: 묻는 것도 실행하는 것도 에이전트의 일이다). 그 세션의 `UserPromptSubmit`이 사람이 다음에 입력한 메시지를 판정으로 붙인다. 피어 메시지, 봉투를 담은 입력, `/xsm`·`$xsm` 명령은 제외한다. 같은 동사·대상으로 다시 실행하면 판정을 한 번 쓰고, 그 원문을 출력과 `decisions.jsonl`(`event: consent`)에, link·reach 기록의 `by`에 남긴다. xsm은 문장을 해석하지 않는다. 예/아니오는 에이전트가 읽고 정하고, 근거는 사람의 원문으로 남는다. MCP 도구가 폼을 띄울 수 없거나 답을 받지 못하면 같은 CLI 경로를 안내한다. 신뢰 경계는 입력 동의와 같다.
 
 ### 5.4 발신 사전 검사
 

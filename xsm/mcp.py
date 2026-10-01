@@ -433,10 +433,16 @@ class Server:
         return "endorsed: node %s now carries %s; run `xsm doc render %s`" % (
             new["id"], node["id"], args.get("doc"))
 
-    def allowed(self, question: str, command: str) -> tuple:
+    def allowed(self, question: str, command: str, agent_runs: bool = False) -> tuple:
         """Ask the person allow/deny. Returns (True, None) on their allow, else
-        (False, what to tell the agent)."""
+        (False, what to tell the agent). With `agent_runs`, the way round a
+        form that cannot show is the agent's own shell command, which asks
+        for the user's reply (consent.py) — never the person typing it."""
         if "elicitation" not in (self.client_caps or {}):
+            if agent_runs:
+                raise channel.ChannelError("this client cannot show a form; run `%s` in your "
+                                           "shell instead: it tells you to ask your user and "
+                                           "keeps their reply as the verdict" % command)
             raise channel.ChannelError("this client cannot ask its user; they can run "
                                        "`%s` in a terminal" % command)
         reply = self.ask_client("elicitation/create", {"message": question, "requestedSchema": {
@@ -448,6 +454,10 @@ class Server:
             return True, None
         if answer == "deny":
             return False, "your user declined: they chose 'deny'; do not work around it"
+        if agent_runs:
+            return False, ("your user did not answer (%s). If the form did not reach them, ask "
+                           "them in plain words and run `%s` in your shell: it keeps their reply "
+                           "as the verdict" % (why, command))
         return False, ("your user did not answer (%s); do not work around it. If the form did not "
                        "reach them, they can run `%s` in a terminal instead" % (why, command))
 
@@ -476,7 +486,8 @@ class Server:
                 "%s@%s asks to link %s with %s: the sessions of both folders talk, both ways, "
                 "until unlinked.%s\nAllow it?" % (
                     me.get("name"), me.get("alias"), root, other,
-                    ("\nReason: " + args["reason"]) if args.get("reason") else ""), command)
+                    ("\nReason: " + args["reason"]) if args.get("reason") else ""), command,
+                agent_runs=True)
             if not ok:
                 return refusal
         try:
@@ -502,7 +513,8 @@ class Server:
             ok, refusal = self.allowed(
                 "%s@%s asks to let %s %s the xsm project %r.%s\nAllow it?" % (
                     me.get("name"), me.get("alias"), root, verb, project,
-                    ("\nReason: " + args["reason"]) if args.get("reason") else ""), command)
+                    ("\nReason: " + args["reason"]) if args.get("reason") else ""), command,
+                agent_runs=True)
             if not ok:
                 return refusal + "; the folder's projects are unchanged"
         try:
@@ -539,7 +551,7 @@ class Server:
                 "%s@%s (%s) asks to talk with the sessions in %s, both ways, until it ends.%s\n"
                 "Allow it?" % (me.get("name"), me.get("alias"), me.get("ref"), root,
                                ("\nReason: " + args["reason"]) if args.get("reason") else ""),
-                command)
+                command, agent_runs=True)
             if not ok:
                 return refusal
         try:
@@ -692,7 +704,7 @@ def removed_version_note(exc: BaseException, tool: str | None) -> str | None:
     shell = SHELL_FORMS.get(tool or "", "xsm <command>")
     return ("This session's xsm MCP server runs from %s, which a plugin update removed. Start a "
             "new session to load the installed xsm. Until then run the same thing in the shell: "
-            "`%s`. If that is refused as your user's decision, ask them to type it in a terminal."
+            "`%s`. If it says it needs your user's yes, ask them and run it again."
             % (here, shell))
 
 

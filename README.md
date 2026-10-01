@@ -199,12 +199,12 @@ xsm send agent@hostB --text "..."    # another machine (after xsm remote add)
 
 The receiving side runs nothing. A hook acts as the gate: it checks the scope and the sender, then puts the
 message directly into the session's prompt. A rejected message is held, not dropped. Claude's own
-cross-session messages (`SendMessage`, no xsm header) pass the same scope check: they arrive untouched when the
-sending session shares a scope with this one, or is a session on this machine xsm does not know (a profile
-without xsm); they are held when xsm knows the sender and it is out of scope, or when they come from off this
-machine (Remote Control, cloud). When xsm holds a `SendMessage` from a session it can name, that sender sees once,
-on its next prompt or xsm command, that the message was not delivered and why; for an out-of-scope hold its agent is
-told to ask you with the `xsm_link` tool (an approval form that connects the folders on yes) and send it again. Set `"strict_peers": true` in
+cross-session messages (`SendMessage`, no xsm header) from a session on this machine arrive untouched, whatever
+the scope: Claude's own gate has already decided, and the sender is you on the same machine. Ones from off this
+machine (Remote Control, cloud) are held. Scope governs xsm's own messages, and `xsm send` refuses an out-of-scope
+target before sending. A linked worktree (Orca, `claude --worktree`) and its main checkout are one repository. To
+connect two folders the agent asks you in plain words and runs `xsm link <folder>` itself; your reply is kept as
+the verdict (or the `xsm_link` tool asks with a form). Set `"strict_peers": true` in
 `~/.xsm/config.json` to hold every message without an xsm header instead (ADR-0013). Claude's own gate still
 decides first: a message it holds for a permission-mode mismatch never reaches xsm.
 

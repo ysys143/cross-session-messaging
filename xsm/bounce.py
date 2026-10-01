@@ -86,11 +86,9 @@ def text(notes: list) -> str:
         if note.get("connect_dir"):
             lines.append(
                 "  To reach it, ask your user whether to connect this folder with %s, and do it "
-                "for them: call the xsm_link MCP tool with dir=%s — it shows them an approval "
-                "form and connects both folders on yes. Then send the message again. Do not "
-                "report the message as delivered. If auto mode refuses that call, tell your "
-                "user: `xsm install --refresh` lets xsm's approval-form tools ask."
-                % (note["connect_dir"], note["connect_dir"]))
+                "for them: run `xsm link %s` (their reply is kept as the verdict) or call the "
+                "xsm_link MCP tool (an approval form). Then send the message again. Do not "
+                "report the message as delivered." % (note["connect_dir"], note["connect_dir"]))
         else:
             lines.append("  Tell your user it was not delivered.")
     return "\n".join(lines)

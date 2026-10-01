@@ -779,7 +779,7 @@ class NativeClaudeMessageTest(TempState):
         decision, reason = self._check("uds:/tmp/cc-socks/1.sock", me,
                                        [sender, dict(sender, ref="cccccc")])
         self.assertEqual(decision, "pass")
-        self.assertIn("not a session xsm can check", reason)
+        self.assertIn("local Claude peer message", reason)
 
     def test_a_session_cleared_on_the_same_socket_is_not_a_second_owner(self):
         sender = {"runtime": "claude", "socket": "/tmp/cc-socks/1.sock", "state": "live",
@@ -808,7 +808,7 @@ class NativeClaudeMessageTest(TempState):
         me = {"runtime": "claude", "ref": "bbbbbb", "cwd": "/ws"}
         decision, reason = self._check("uds:/tmp/cc-socks/1.sock", me, [ended])
         self.assertEqual(decision, "pass")
-        self.assertIn("not a session xsm can check", reason)
+        self.assertIn("local Claude peer message", reason)
 
     def test_a_nested_envelope_is_judged_by_the_outer_sender(self):
         from unittest import mock
@@ -867,25 +867,31 @@ class NativeBounceTest(TempState):
                               'from-mode="bypass">\nplease review the diff\n'
                               '</cross-session-message>' % where)
 
-    def _gate(self, parsed, records):
+    def _gate(self, parsed, records, strict=True):
+        """Local native messages pass since 2026-10-01; strict_peers is what
+        holds one now, and its identified sender is who gets the note."""
         from unittest import mock
         from xsm import receive
         with mock.patch.object(receive.registry, "records", return_value=records), \
+                mock.patch.object(receive.config, "load",
+                                  return_value={"strict_peers": strict}), \
                 mock.patch.object(receive.config, "scope_for",
                                   return_value=(None, "different git repositories")):
             return receive._gate({"prompt": "x"}, "claude", self.me, parsed)
 
-    def test_the_sender_sees_once_that_it_was_held_and_how_to_connect(self):
-        from xsm import config, receive
+    def test_an_out_of_scope_local_message_passes_without_a_note(self):
+        from xsm import bounce
+        self.assertIsNone(self._gate(self._native(), [self.sender], strict=False))
+        self.assertEqual(bounce.take("s-sender"), [])
+
+    def test_the_sender_sees_once_that_it_was_held(self):
+        from xsm import receive
         out = self._gate(self._native(), [self.sender])
-        self.assertEqual(out["decision"], "block", "the receiver still holds it")
+        self.assertEqual(out["decision"], "block", "strict_peers still holds it")
         shown = receive._with_bounces("claude", self.sender, None)
         context = shown["hookSpecificOutput"]["additionalContext"]
         self.assertIn("journey-qa@claude", context)
         self.assertIn("NOT delivered", context)
-        self.assertIn("xsm_link", context)
-        self.assertIn("dir=%s" % config.project_root(self.there), context)
-        self.assertIn("approval form", context)
         self.assertIsNone(receive._with_bounces("claude", self.sender, None), "shown once")
 
     def test_no_note_for_a_sender_that_cannot_be_named(self):
@@ -938,6 +944,41 @@ class FormToolPermissionTest(TempState):
         install.allow_form_tools(home)
         self.assertEqual(sorted(paths.read_json(os.path.join(home, "settings.json"))
                                 ["permissions"]["allow"]), sorted(install.form_tool_names()))
+
+
+class WorktreeScopeTest(TempState):
+    """Issue #8 follow-up: a linked worktree (Orca, `claude --worktree`) and its
+    main checkout are one repository; a separate clone of the same remote is
+    not."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+        run = lambda *a: subprocess.run(a, check=True, capture_output=True)
+        self.main = os.path.join(self.tmp, "proj")
+        os.makedirs(self.main)
+        run("git", "-C", self.main, "init", "-q")
+        run("git", "-C", self.main, "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-q", "--allow-empty", "-m", "init")
+        self.worktree = os.path.join(self.tmp, "rusalka")
+        run("git", "-C", self.main, "worktree", "add", "-q", self.worktree)
+        self.clone = os.path.join(self.tmp, "clone")
+        run("git", "clone", "-q", self.main, self.clone)
+
+    def test_a_worktree_and_its_main_checkout_share_the_repository_scope(self):
+        from xsm import config
+        scope, why = config.scope_for({"cwd": self.main}, {"cwd": self.worktree})
+        self.assertEqual(scope, "repo:proj")
+        self.assertEqual(why, "same git repository (linked worktree)")
+        self.assertEqual(config.default_project(self.worktree)[0], "repo:proj")
+        self.assertEqual(config.git_root(self.worktree), os.path.realpath(self.worktree),
+                         "links and reaches still name the worktree's own folder")
+
+    def test_a_separate_clone_stays_out_of_scope(self):
+        from xsm import config
+        scope, why = config.scope_for({"cwd": self.main}, {"cwd": self.clone})
+        self.assertIsNone(scope)
+        self.assertIn("different git repositories", why)
 
 
 class PluginPackagingTest(TempState):

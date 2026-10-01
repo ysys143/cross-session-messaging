@@ -290,22 +290,49 @@ def _print_members(scope: dict, root: str) -> None:
         print("  %s%s" % (_home_tilde(m.get("root", "")), "  (this project)" if mine else ""))
 
 
+# The reply of the person that let the last _person_or_refuse through, if
+# that is what did; recorded as `by` on what it changed.
+_verdict: str | None = None
+
+
+def _by() -> str:
+    """Who decided: the person's own reply when one was given, else the user."""
+    person = os.environ.get("USER") or "person"
+    return "%s, replying: %s" % (person, _verdict) if _verdict else person
+
+
 def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None) -> str | None:
     """Changing who may talk to whom is the user's decision (ADR-0009). A
     person at this terminal decides; so does the command the person typed
     into the session running this (`typed` = (verb, target[, here]), see
-    consent.py), used up here."""
+    consent.py), and so does their reply when the agent asked them.
+
+    Asking is the agent's job and the typing too (user decision, 2026-10-01:
+    never send the person off to type a command). Without consent the request
+    is recorded, the agent is told to ask in plain words, and the person's
+    next message in that session is kept as the verdict; running the same
+    command again uses it."""
+    global _verdict
+    _verdict = None
     if workers.human_terminal():
         return None
-    if typed and consent.take(registry.me(), *typed):
+    me = registry.me()
+    if typed and consent.take(me, *typed):
         return None
     if typed:
-        # Asking is the agent's job (user decision, 2026-10-01): the tool shows
-        # the person an approval form and does it on yes.
-        return ("%s is your user's decision: ask them with the %s MCP tool (it shows them an "
-                "approval form and does it on yes); or they type `/xsm %s %s` in this session "
-                "(Codex: `$xsm %s %s`), or run it in a terminal" % (
-                    what, mcp_tool, typed[0], typed[1], typed[0], typed[1]))
+        verdict = consent.take_verdict(me, *typed)
+        if verdict is not None:
+            _verdict = verdict
+            paths.append_jsonl("decisions.jsonl", {
+                "event": "consent", "verb": typed[0], "target": typed[1], "verdict": verdict,
+                "by": (me or {}).get("name")})
+            print('approved on your user\'s reply: "%s"' % verdict.replace("\n", " ")[:200])
+            return None
+        consent.request(me, *typed)
+        return ("%s needs your user's yes. Ask them now, in plain words, whether to do it. Their "
+                "next message in this session is kept as the verdict: if they agree, run this "
+                "same command again; if not, leave it. (The %s MCP tool asks with a form "
+                "instead.)" % (what, mcp_tool))
     return ("%s is your user's decision: ask them with the %s MCP tool (it shows them a form), "
             "or they run it in a terminal" % (what, mcp_tool))
 
@@ -415,7 +442,7 @@ def cmd_reach(args) -> int:
         print("refused: %s" % why, file=sys.stderr)
         return REFUSED
     try:
-        entry, added = config.add_reach(me["ref"], folder, os.environ.get("USER") or "person",
+        entry, added = config.add_reach(me["ref"], folder, _by(),
                                         session=me)
     except ValueError as exc:
         print("refused: %s" % exc, file=sys.stderr)
@@ -476,7 +503,7 @@ def cmd_link(args) -> int:
         print("refused: %s" % why, file=sys.stderr)
         return REFUSED
     try:
-        entry, added = config.add_link(here, other, os.environ.get("USER") or "person")
+        entry, added = config.add_link(here, other, _by())
     except ValueError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return USAGE
@@ -1083,8 +1110,8 @@ def _native_note(report: dict) -> str:
     """How the gate treats Claude's own messages (no xsm header), ADR-0013."""
     return ("Claude messages without an xsm header are all held (strict_peers)"
             if report.get("strict_peers") else
-            "Claude messages without an xsm header pass unless xsm knows their sender and it is "
-            "out of scope; messages from off this machine are held")
+            "Claude messages without an xsm header pass from this machine, whatever the scope; "
+            "from off it they are held")
 
 
 def _doctor_rows(report: dict) -> list:
