@@ -92,9 +92,9 @@ bin/xsm doctor                                                # 설치 상태, �
 훅 명령(`hooks/xsm-hook` 런처: 쓸 수 있는 파이썬을 스스로 찾고, 열 수 없는 스크립트는 프롬프트를 막지 않는
 오류로 바꿉니다), MCP 서버 등록(`hooks/xsm-mcp` 런처), `~/.local/bin/xsm`이 그렇습니다. macOS는 세션을 연 앱에
 체크아웃이 있는 폴더(`~/Documents`) 접근을 막을 수 있고, 실행하지 못한 훅이 프롬프트를 막아서는 안 됩니다. 직전
-사본은 그보다 먼저 시작한 살아 있는 세션이 없어질 때까지 남고 그 뒤 정리됩니다. `xsm doctor`의 `runtime` 줄이
+사본은 그보다 먼저 시작한 살아 있는 세션이 없어질 때까지 남고, 그 뒤 다음 `xsm install`이 끝날 때 정리됩니다(그전에는 아닙니다. 정리가 프로세스 표를 읽는데 훅에는 그럴 시간이 없습니다). `xsm doctor`의 `runtime` 줄이
 사본을 알려 주고 체크아웃이 앞서가면 그렇게 말하며, 그러면 에이전트가 `<체크아웃>/bin/xsm install --refresh`를
-실행합니다. `--dev`(또는 `config.json`의 `"runtime": "checkout"`)는 xsm을 개발할 때 모든 것을 체크아웃에 둡니다.
+실행합니다. `--dev`(또는 `config.json`의 `"runtime": "checkout"`)는 xsm을 개발할 때 모든 것을 체크아웃에 둡니다. `--dev`는 그 줄을 스스로 저장하므로 이후의 `install --refresh`와 `doctor`도 그것을 지킵니다(사본으로 돌아가려면 그 줄을 지웁니다).
 Codex 직접 설치는 이미 가진 훅 명령을 그대로 둡니다. Codex의 신뢰가 그 문자열을 덮기 때문입니다. 새로 하는 설치는
 갱신해도 그대로인 `~/.xsm/runtime/current`를 씁니다. 기존 Codex 설치를 체크아웃에서 옮기는 것은
 `codex plugin add xsm@xsm`뿐입니다.
@@ -103,7 +103,7 @@ Codex 직접 설치는 이미 가진 훅 명령을 그대로 둡니다. Codex의
 그대로 둡니다). 그러면 두 세션의 권한 모드가 달라도 Claude가 내 다른 세션의 메시지를 전달합니다. 메시지 명령
 (`xsm send`, `inbox`, `list`, `who`, `held`, `ledger`, `status`, `doctor`, `--version`을 이름과 런타임의 절대
 경로로)과 MCP 도구(`xsm_send`, `xsm_inbox`, `xsm_post`, `xsm_channel`)도 `permissions.allow`에 넣어 auto와 default
-모드가 메시지를 막지 않게 합니다. `xsm uninstall`은 설치가 더한 것만 정확히 뺍니다. 이 기본값은 모두 열린 쪽이고
+모드가 메시지를 막지 않게 합니다. `xsm uninstall`은 설치가 더한 훅, MCP 항목, 스킬 링크, 상태줄, 설정 항목을 뺍니다. `~/.local/bin/xsm` 링크가 런타임 사본을 가리키고 다른 홈에 xsm이 남아 있지 않으면 그 링크도 뺍니다. `~/.xsm/runtime`의 사본은 남으므로, 그것을 쓰는 세션이 없을 때 그 폴더를 지우면 됩니다. 이 기본값은 모두 열린 쪽이고
 `~/.xsm/config.json`이나 환경 변수(이쪽이 이깁니다)로 닫을 수 있습니다: `runtime`(`snapshot` | `checkout`,
 `XSM_RUNTIME`), `claude_inbound`(`accept` | `leave`, `XSM_CLAUDE_INBOUND`), `allow_messaging`
 (`XSM_ALLOW_MESSAGING`), `human_send_connects`(`XSM_HUMAN_SEND_CONNECTS`: 사람이 직접 친 범위 밖 `xsm send`가

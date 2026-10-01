@@ -139,7 +139,10 @@ lives half an hour; their answer, ten minutes.
 update, or a state folder it could not write). Run the same command again with their words,
 exactly as they wrote them: `xsm unblock <ref> --reply "<their words>"` (every command that
 asks takes `--reply`). It is shown to you first and then goes ahead, as a kept reply is. Give
-only what they said; it is logged. Never write a yes they did not say.
+only what they said; it is logged, marked as given by you. xsm checks the words against what its
+hook kept of what they typed in this session, and words that are not theirs are ignored with a
+line saying so, so a yes you wrote yourself does not pass. Only a session whose hook never wrote
+anything takes your words as given. Never write a yes they did not say.
 
 A **reach** is narrower than a link: one session, for as long as it runs. It
 is for handing one thing to a session in another folder without connecting the
@@ -387,14 +390,9 @@ the scope and the message id. Answer with `xsm send "<sender>" --reply-to <id>`.
 
 **A note that your message was NOT delivered** (`[xsm] Your message to … was
 NOT delivered: its gate held it`) means a Claude `SendMessage` you sent was
-held on the other side. Do not report it as delivered. When it was out of
-scope the note says the message is kept as `<id>`: ask your user once, in plain
-words, whether to connect the folders; after they answer, run `xsm send --held
-<id>` (MCP: `xsm_send` with `held`), which shows their reply, and once more on a
-yes, which connects and sends it. One yes does both. If the note names no id,
-ask your user whether to connect the folders and run `xsm link <dir>` with the
-`dir` it names (their reply is kept as the verdict) or call the `xsm_link` MCP
-tool, then send the message again.
+held on the other side (a message from a session on this machine always passes;
+it is held for `strict_peers`, for `remote_native` = `hold`, or because a person
+blocked a session). Do not report it as delivered: tell your user it was not.
 
 **A note that a message was held here** (`[xsm] A message from … was held by this session's gate …
 kept as <id>`) means this session's gate kept it for your user to decide on, and nothing of it is
@@ -435,7 +433,7 @@ that opened a hold. Each can be set back in `~/.xsm/config.json` or with an envi
 
 | key | default | `false` / `hold` brings back |
 |---|---|---|
-| `fail_open` | `true` | a peer message is blocked when the hook breaks (S8-g2) |
+| `fail_open` | `true` | a peer message is blocked when the hook breaks, from a session xsm cannot identify or no one registered, or when a write fails (S8-g2) |
 | `remote_native` | `pass` | `hold`: Claude messages from off this machine are held |
 | `stale_sender` | `pass` | `hold`: a message from a sender that has exited is held |
 | `reply_from_request` | `true` | their own request is not read as their reply |
@@ -535,8 +533,10 @@ on a yes you run it, never they. A direct install updates by its checkout:
 (run by the checkout's own path: it copies the checkout to a new runtime under
 `~/.xsm/runtime`, points every hook, MCP registration, statusLine and
 `~/.local/bin/xsm` at it and prunes copies nothing runs from; doctor's `runtime`
-line says when the checkout is ahead of the copy; `--dev` runs from the checkout
-itself, for developing xsm). `xsm doctor` also names a hook command of the old
+line says when the checkout is ahead of the copy, and an unused older copy goes at the end
+of the next install; `--dev` runs from the checkout itself, for developing xsm, and saves
+`runtime=checkout` in `config.json` so a later refresh keeps it: delete that line to go back
+to a copy). `xsm doctor` also names a hook command of the old
 `python <script>` form as one that can block a prompt: replace it the same way,
 with `xsm install --refresh`. Pull only
 when `git -C <checkout> status --short --branch` shows no changed files and a

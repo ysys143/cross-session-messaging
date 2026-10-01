@@ -94,9 +94,9 @@ Claude hook command (the `hooks/xsm-hook` launcher, which finds a working python
 cannot open into an error, never a blocked prompt), the MCP server registration (the `hooks/xsm-mcp`
 launcher), and `~/.local/bin/xsm`. macOS can deny a session's app the folder a checkout lives in
 (`~/Documents`), and a hook that cannot run must not stop a prompt. The copy before the current one stays
-until no live session started before it, and is then pruned. `xsm doctor`'s `runtime` line names the copy and
+until no live session started before it, and is then pruned when the next `xsm install` finishes (not before: the pruning reads the process table, which a hook has no time for). `xsm doctor`'s `runtime` line names the copy and
 says when the checkout has moved on; the agent then runs `<checkout>/bin/xsm install --refresh`. `--dev`
-(or `"runtime": "checkout"` in `config.json`) keeps everything pointing at the checkout, for developing xsm.
+(or `"runtime": "checkout"` in `config.json`) keeps everything pointing at the checkout, for developing xsm; `--dev` saves that line itself, so a later `install --refresh` or `doctor` keeps it (delete the line to go back to a copy).
 A Codex direct install keeps the hook command it has, because Codex's trust covers its text; a new one names
 `~/.xsm/runtime/current`, which stays the same across refreshes. Only `codex plugin add xsm@xsm` moves an
 existing Codex install off its checkout.
@@ -106,7 +106,7 @@ a value the home already has stays), so Claude delivers a message from another o
 two permission modes are, and allows the messaging commands (`xsm send`, `inbox`, `list`, `who`, `held`,
 `ledger`, `status`, `doctor`, `--version`, by name and by the runtime's absolute path) and MCP tools
 (`xsm_send`, `xsm_inbox`, `xsm_post`, `xsm_channel`) in `permissions.allow`, so auto and default modes never
-stop a message. `xsm uninstall` takes out exactly what install added. Each of these defaults is open and can
+stop a message. `xsm uninstall` takes out the hooks, MCP entry, skill link, statusLine and settings entries install added, and the `~/.local/bin/xsm` link when it points into the runtime copy and no other home keeps xsm; the copies under `~/.xsm/runtime` stay, and that folder can be deleted once no session runs from it. Each of these defaults is open and can
 be closed in `~/.xsm/config.json` or by an environment variable (which wins): `runtime` (`snapshot` |
 `checkout`, `XSM_RUNTIME`), `claude_inbound` (`accept` | `leave`, `XSM_CLAUDE_INBOUND`), `allow_messaging`
 (`XSM_ALLOW_MESSAGING`), and `human_send_connects` (`XSM_HUMAN_SEND_CONNECTS`: an out-of-scope `xsm send` a
