@@ -919,8 +919,9 @@ def _install(args, targets) -> int:
             print("installed into %s (backup: %s)" % (result["file"], result.get("backup", "none")))
         _print_retired(home, install.remove_retired(home))
         if runtime == "claude":
-            print("  approval forms: %s (link, reach, join and the other tools that ask you; "
-                  "allowed so auto mode lets them ask)" % install.allow_form_tools(home))
+            print("  approval forms: %s (the xsm skill, link, reach, join and the other tools "
+                  "and commands that ask you; allowed so auto mode lets them ask)"
+                  % install.allow_form_tools(home))
         if runtime == "codex":
             cli_state = install.install_cli()
             if cli_state == "foreign":
