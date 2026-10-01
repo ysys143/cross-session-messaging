@@ -299,14 +299,16 @@ class McpServerTest(TempState):
         self.assertNotIn("terminal", text)
         self.assertEqual(config.projects(), [])
 
-    def test_the_terminal_command_names_the_folder_and_is_quoted(self):
+    def test_the_shell_command_is_one_the_agent_can_run_and_is_quoted(self):
+        """Issue #9: the fallback is run by the agent from its own folder, and
+        --dir is taken only from a person at a terminal, so it carries none."""
         import shlex
         from xsm import config
         here = os.path.join(self.tmp, "my proj")
         text = self._ask("xsm_join", {"project": "demo"}, {"result": {"action": "decline"}},
                          cwd=here)
-        root = config.project_root(here)
-        self.assertIn("`xsm join demo --dir %s`" % shlex.quote(root), text)
+        self.assertIn("`xsm join demo` in your shell", text)
+        self.assertNotIn("--dir", text)
         self.assertIn("approval_policy", text)
         other = os.path.join(self.tmp, "other folder")
         os.makedirs(other)
@@ -402,8 +404,10 @@ class McpServerTest(TempState):
         call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": "xsm_decide", "arguments": {"question": "?"}}}
         out, _ = self._run(init, call)
-        self.assertIn("cannot ask its user",
-                      next(m for m in out if m.get("id") == 2)["result"]["content"][0]["text"])
+        text = next(m for m in out if m.get("id") == 2)["result"]["content"][0]["text"]
+        self.assertIn("cannot show a form", text)
+        self.assertIn("xsm post --tag decision", text)
+        self.assertNotIn("in a terminal", text)
 
 
 if __name__ == "__main__":

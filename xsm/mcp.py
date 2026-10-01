@@ -373,9 +373,10 @@ class Server:
 
     def decide(self, where: tuple, me: dict, args: dict) -> str:
         if "elicitation" not in (self.client_caps or {}):
-            raise channel.ChannelError("this client cannot ask its user (no elicitation "
-                                       "support); a person can post the decision with "
-                                       "`xsm post --tag decision` in a terminal")
+            raise channel.ChannelError("this client cannot show a form (no elicitation "
+                                       "support); ask your user in plain words and run "
+                                       "`xsm post --tag decision \"<their decision>\"`: it "
+                                       "keeps their reply as the verdict")
         question = (args.get("question") or "").strip()
         # Offered as they will be compared: stripped, no empties, no repeats.
         # " yes " used to be offered as is and then compared stripped, so the
@@ -408,8 +409,9 @@ class Server:
     def endorse(self, me: dict, args: dict) -> str:
         from . import doc
         if "elicitation" not in (self.client_caps or {}):
-            raise channel.ChannelError("this client cannot ask its user; they can run "
-                                       "`xsm doc add … --tag endorsed` in a terminal")
+            raise channel.ChannelError("this client cannot show a form; ask your user in plain "
+                                       "words and run `xsm doc add <doc> --tag endorsed --parent "
+                                       "<node> --text \"…\"`: it keeps their reply as the verdict")
         path = args.get("doc") or ""
         if not os.path.isabs(path):
             path = os.path.join(me.get("cwd") or os.getcwd(), path)
@@ -433,18 +435,15 @@ class Server:
         return "endorsed: node %s now carries %s; run `xsm doc render %s`" % (
             new["id"], node["id"], args.get("doc"))
 
-    def allowed(self, question: str, command: str, agent_runs: bool = False) -> tuple:
+    def allowed(self, question: str, command: str, agent_runs: bool = True) -> tuple:
         """Ask the person allow/deny. Returns (True, None) on their allow, else
-        (False, what to tell the agent). With `agent_runs`, the way round a
-        form that cannot show is the agent's own shell command, which asks
-        for the user's reply (consent.py) — never the person typing it."""
+        (False, what to tell the agent). The way round a form that cannot show
+        is the agent's own shell command, which asks for the user's reply
+        (consent.py) — never the person typing it (user decision, 2026-10-01)."""
         if "elicitation" not in (self.client_caps or {}):
-            if agent_runs:
-                raise channel.ChannelError("this client cannot show a form; run `%s` in your "
-                                           "shell instead: it tells you to ask your user and "
-                                           "keeps their reply as the verdict" % command)
-            raise channel.ChannelError("this client cannot ask its user; they can run "
-                                       "`%s` in a terminal" % command)
+            raise channel.ChannelError("this client cannot show a form; run `%s` in your "
+                                       "shell instead: it tells you to ask your user and "
+                                       "keeps their reply as the verdict" % command)
         reply = self.ask_client("elicitation/create", {"message": question, "requestedSchema": {
             "type": "object", "properties": {"answer": {"type": "string", "title": "Permission",
                                                         "enum": ["allow", "deny"]}},
@@ -454,12 +453,9 @@ class Server:
             return True, None
         if answer == "deny":
             return False, "your user declined: they chose 'deny'; do not work around it"
-        if agent_runs:
-            return False, ("your user did not answer (%s). If the form did not reach them, ask "
-                           "them in plain words and run `%s` in your shell: it keeps their reply "
-                           "as the verdict" % (why, command))
-        return False, ("your user did not answer (%s); do not work around it. If the form did not "
-                       "reach them, they can run `%s` in a terminal instead" % (why, command))
+        return False, ("your user did not answer (%s). If the form did not reach them, ask "
+                       "them in plain words and run `%s` in your shell: it keeps their reply "
+                       "as the verdict" % (why, command))
 
     def link(self, me: dict, args: dict) -> str:
         from . import config
@@ -481,7 +477,9 @@ class Server:
         except ValueError as exc:
             raise channel.ChannelError(str(exc))
         if not consent.take(me, "link", other, here):
-            command = "xsm link %s --dir %s" % (shlex.quote(other), shlex.quote(root))
+            # Run from this session's own folder; --dir is taken only from a
+            # person at a terminal, so it would refuse the agent (issue #9).
+            command = "xsm link %s" % shlex.quote(other)
             ok, refusal = self.allowed(
                 "%s@%s asks to link %s with %s: the sessions of both folders talk, both ways, "
                 "until unlinked.%s\nAllow it?" % (
@@ -502,8 +500,9 @@ class Server:
         project, leaving = (args.get("project") or "").strip(), bool(args.get("leave"))
         root = config.project_root(me.get("cwd") or os.getcwd())
         verb = "leave" if leaving else "join"
-        # What the person can type instead; --dir names the folder asked about.
-        command = "xsm %s %s --dir %s" % (verb, shlex.quote(project), shlex.quote(root))
+        # What the agent runs instead, from this session's own folder: --dir is
+        # taken only from a person at a terminal (issue #9).
+        command = "xsm %s %s" % (verb, shlex.quote(project))
         if not leaving:
             try:
                 config.check_join(project)      # before the consent is used up, as for link
@@ -572,8 +571,9 @@ class Server:
             return "no waiting request from your workers" + (
                 " with id %s" % args["id"] if args.get("id") else "")
         if "elicitation" not in (self.client_caps or {}):
-            raise channel.ChannelError("this client cannot ask its user; they can answer with "
-                                       "`xsm approve %s` in a terminal" % shlex.quote(req["id"]))
+            raise channel.ChannelError("this client cannot show a form; ask your user in plain "
+                                       "words and run `xsm approve %s`: it keeps their reply as "
+                                       "the verdict" % shlex.quote(req["id"]))
         allow, deny = "allow", "deny"
         reply = self.ask_client("elicitation/create", {
             "message": "Worker %s is waiting for your permission:\n%s\nAllow it?"
@@ -584,8 +584,9 @@ class Server:
         answer, why = self.answer(reply, [allow, deny])
         if answer is None:
             return ("your user did not answer (%s); the request is still waiting and the worker "
-                    "is blocked until it is answered. Tell your user; they can answer it with "
-                    "`xsm approve %s` in a terminal" % (why, shlex.quote(req["id"])))
+                    "is blocked until it is answered. Ask your user in plain words and run "
+                    "`xsm approve %s`: it keeps their reply as the verdict" % (
+                        why, shlex.quote(req["id"])))
         workers.answer_asked(req["id"], answer == allow, me.get("ref"),
                              None if answer == allow else "your user said no")
         return "%s: worker %s's request [%s] %s" % (
@@ -616,8 +617,9 @@ class Server:
                 "answer": {"type": "string", "title": "Permission", "enum": [deny, allow]}},
                 "required": ["answer"]}}) if "elicitation" in (self.client_caps or {}) else None
         if reply is None:
-            raise channel.ChannelError("this client cannot ask its user; a person can run the "
-                                       "spawn in a terminal instead")
+            raise channel.ChannelError("this client cannot show a form; run the same `xsm spawn` "
+                                       "without --grant: it tells you what to ask your user and "
+                                       "keeps their reply as the verdict")
         answer, why = self.answer(reply, [deny, allow])
         if answer is None:
             # Nobody chose, so there is no decision to put on record.

@@ -89,11 +89,10 @@ Elicitation hook) is reported as their answer; xsm cannot tell it apart.
 The tool's result says which happened: "by the client's automatic reviewer",
 "declined — by your user, or by Codex without showing the form", "came back
 with no choice", "dismissed", or "they chose 'deny'". Only the last is
-certainly your user refusing, and then there is no command to offer. For the
-others, tell your user what the result says and the terminal command it names
-(`xsm link <folder> --dir <this folder>`, `xsm join <name> --dir <folder>`,
-`xsm reach <folder> --session ref:…`,
-`xsm approve <id>`), in case the form did not reach them. Do not call the tool
+certainly your user refusing. For the others, tell your user what the result
+says, ask them in plain words, and if they agree run the shell command it names
+(`xsm link <folder>`, `xsm join <name>`, `xsm reach <folder> --session ref:…`,
+`xsm approve <id>`): it keeps their reply as the verdict. Do not call the tool
 again in a loop, and never edit `~/.xsm/config.json` to get round it.
 
 A **reach** is narrower than a link: one session, for as long as it runs. It
@@ -284,10 +283,11 @@ xsm stop <worker>           # stop it and remove its records
   once saying `waiting: … Call the xsm_approve MCP tool with id …`. Do that
   now: the question goes to your user in a form. Once they answer, the worker
   starts and its `--task` reaches it on its own. Never send your user to the
-  tmux screen, and never answer it yourself. You get a note
-  saying what it is waiting for. **Never try to approve it yourself** —
-  `xsm approve` works only from a person's terminal, and trying to get around
-  that is permission laundering. Tell your user what is waiting and why.
+  tmux screen. You get a note saying what it is waiting for. **Never approve
+  it on your own** — that is permission laundering. Ask your user, saying
+  what is waiting and why; if the form cannot reach them, run `xsm approve
+  <id>`: it tells you to ask, keeps their reply as the verdict, and approves
+  on the rerun only after they answered.
 - `--full-access` and `--trust-hooks` remove your user's protections. Use them
   only when the work needs it, and only with their explicit permission: call
   the `xsm_grant` MCP tool with the reason, and pass the id it returns as
@@ -296,11 +296,11 @@ xsm stop <worker>           # stop it and remove its records
   it), do not stop there and do not work around it: ask your user with your
   question tool whether to request the permission, saying what the worker
   needs and why. If they agree, call `xsm_grant` again; their answer in the
-  form it shows is the permission. Never ask them to type shell commands —
-  unless the result says no choice of theirs came back (see "When a form does
-  not come back as your user's answer"); then say what it says, and that if
-  the form did not reach them they can run the spawn in a terminal themselves.
-  Nothing is recorded as their decision in that case.
+  form it shows is the permission. Never ask them to type shell commands. If
+  no choice of theirs came back (see "When a form does not come back as your
+  user's answer"), run the same `xsm spawn` without `--grant`: it says what to
+  ask, keeps their reply as the verdict, and starts the worker on the rerun
+  once they agreed.
 - If your user answers the grant form with deny, do not start that worker with
   those options; carry on without them or ask what they prefer.
 - **The same task three times is the end of it.** When a worker answers
@@ -308,8 +308,9 @@ xsm stop <worker>           # stop it and remove its records
   in a row, `spawn` refuses with `task-attempts-exhausted` and lists what was
   tried. Do not reword it and send it again — the lineage follows the task, and
   `--retry-of <task id>` is how you say a reworded try belongs to it. Tell your
-  user what failed and what the worker said it needed; only they can clear it,
-  with `xsm attempts clear <key>` in a terminal. `xsm attempts` and
+  user what failed and what the worker said it needed, and ask whether to
+  clear it; on their yes run `xsm attempts clear <key>` (it keeps their reply
+  as the verdict). `xsm attempts` and
   `xsm attempts show <key>` show what has been tried.
 - Workers cannot start workers unless the depth limit allows it (`max_depth`,
   default 1), and one session runs at most `max_workers` (default 4) at once.
@@ -317,8 +318,9 @@ xsm stop <worker>           # stop it and remove its records
   by themselves when the session that started them ends.
 - Inside Orca or herdr, `spawn` and `stop` refuse: that framework manages
   workers there. Use its own tools; xsm only carries messages between sessions.
-  Your user can lift that per framework with `xsm frameworks ignore orca` in a
-  terminal; you cannot, and must not work round it. `xsm frameworks` shows
+  To start xsm workers there anyway, ask your user; on their yes run
+  `xsm frameworks ignore orca` (their reply is kept as the verdict). Never
+  decide it on your own. `xsm frameworks` shows
   the current setting.
 
 ## Receiving
@@ -375,9 +377,10 @@ the command answers that it needs your user's yes: ask them in plain words,
 and if they agree run the same command again — their reply is kept as the
 verdict. Never send your user off to type a command.
 `xsm_approve`, `xsm_grant`, `xsm_decide` and `xsm_doc_endorse` exist to put a
-choice in front of your user: never stand in for them. Tell your user what you
-needed and that they can run it in a terminal (`xsm approve <id>`) or in a new
-session. The reverse also holds: when the shell is sandboxed and refuses, use
+choice in front of your user: never decide for them. Ask them in plain words
+and run the shell form (`xsm approve <id>`, `xsm post --tag decision "…"`,
+`xsm doc add … --tag endorsed`, `xsm spawn` without `--grant`): it keeps their
+reply as the verdict. The reverse also holds: when the shell is sandboxed and refuses, use
 the MCP tool (see Sending). Tell your user a session showing `orphaned` in
 `xsm doctor` needs restarting.
 

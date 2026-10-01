@@ -301,7 +301,8 @@ def _by() -> str:
     return "%s, replying: %s" % (person, _verdict) if _verdict else person
 
 
-def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None) -> str | None:
+def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
+                      ask: tuple | None = None) -> str | None:
     """Changing who may talk to whom is the user's decision (ADR-0009). A
     person at this terminal decides; so does the command the person typed
     into the session running this (`typed` = (verb, target[, here]), see
@@ -311,7 +312,8 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None) -> s
     never send the person off to type a command). Without consent the request
     is recorded, the agent is told to ask in plain words, and the person's
     next message in that session is kept as the verdict; running the same
-    command again uses it."""
+    command again uses it. `ask` = (verb, target) does the same for the
+    decisions nobody types as an /xsm command (approve, unblock, …)."""
     global _verdict
     _verdict = None
     if workers.human_terminal():
@@ -319,22 +321,24 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None) -> s
     me = registry.me()
     if typed and consent.take(me, *typed):
         return None
-    if typed:
-        verdict = consent.take_verdict(me, *typed)
-        if verdict is not None:
-            _verdict = verdict
-            paths.append_jsonl("decisions.jsonl", {
-                "event": "consent", "verb": typed[0], "target": typed[1], "verdict": verdict,
-                "by": (me or {}).get("name")})
-            print('approved on your user\'s reply: "%s"' % verdict.replace("\n", " ")[:200])
-            return None
-        consent.request(me, *typed)
-        return ("%s needs your user's yes. Ask them now, in plain words, whether to do it. Their "
-                "next message in this session is kept as the verdict: if they agree, run this "
-                "same command again; if not, leave it. (The %s MCP tool asks with a form "
-                "instead.)" % (what, mcp_tool))
-    return ("%s is your user's decision: ask them with the %s MCP tool (it shows them a form), "
-            "or they run it in a terminal" % (what, mcp_tool))
+    key = typed or ask
+    if not key:
+        return ("%s is your user's decision: ask them in plain words, then run this again"
+                % what)
+    verdict = consent.take_verdict(me, *key)
+    if verdict is not None:
+        _verdict = verdict
+        paths.append_jsonl("decisions.jsonl", {
+            "event": "consent", "verb": key[0], "target": key[1], "verdict": verdict,
+            "by": (me or {}).get("name")})
+        print('approved on your user\'s reply: "%s"' % verdict.replace("\n", " ")[:200])
+        return None
+    consent.request(me, *key)
+    tool = " (The %s MCP tool asks with a form instead.)" % mcp_tool \
+        if mcp_tool and mcp_tool != "no" else ""
+    return ("%s needs your user's yes. Ask them now, in plain words, whether to go ahead with "
+            "it. Their next message in this session is kept as the verdict: if they agree, run "
+            "this same command again; if not, leave it.%s" % (what, tool))
 
 
 def cmd_join(args) -> int:
@@ -516,9 +520,10 @@ def cmd_link(args) -> int:
 
 def cmd_block(args) -> int:
     if args.command == "unblock":
-        why = _person_or_refuse("lifting a block", "no")
+        why = _person_or_refuse("lifting the block on session %s" % args.ref, "no",
+                                ask=("unblock", args.ref))
         if why:
-            print("refused: lifting a block needs a person at a terminal", file=sys.stderr)
+            print("refused: %s" % why, file=sys.stderr)
             return REFUSED
         changed = config.unblock(args.ref)
     else:
@@ -531,10 +536,10 @@ def cmd_frameworks(args) -> int:
     """Whether xsm starts workers inside Orca or herdr. By default it does not
     (the framework owns them); a person can lift that per framework."""
     if args.action == "ignore":
-        why = _person_or_refuse("letting xsm start workers inside %s" % args.name, "no")
+        why = _person_or_refuse("letting xsm start workers inside %s" % args.name, "no",
+                                ask=("frameworks-ignore", args.name or ""))
         if why:
-            print("refused: only a person at a terminal can let xsm start workers inside a "
-                  "framework (run `xsm frameworks ignore %s` there)" % args.name, file=sys.stderr)
+            print("refused: %s" % why, file=sys.stderr)
             return REFUSED
     if args.action in ("ignore", "respect"):
         if not args.name:
@@ -882,8 +887,8 @@ def cmd_install(args) -> int:
 # newly loaded skill told it to call one (review, 2026-09-28).
 RESTART_NOTE = ("Sessions already open keep the xsm tools and hooks they started with: start a new "
                 "session, or reconnect the MCP server (Claude Code: /mcp, then xsm), to use new "
-                "ones. Until then, run the command in a terminal yourself (e.g. `xsm link "
-                "<folder> --dir <this folder>`).")
+                "ones. Until then, the agent runs the shell command (e.g. `xsm link <folder>`), "
+                "which asks for your reply.")
 
 
 def _install(args, targets) -> int:
@@ -1399,10 +1404,11 @@ def cmd_attempts(args) -> int:
         if not args.key:
             print("which lineage? xsm attempts clear <key>", file=sys.stderr)
             return USAGE
-        if not workers.human_terminal():
-            print("refused: only a person at a terminal clears a task's attempts. Tell your "
-                  "user what failed and what the worker said it needed; they run "
-                  "`xsm attempts clear %s`." % args.key, file=sys.stderr)
+        why = _person_or_refuse(
+            "clearing the attempts of %s (tell them what failed and what the worker said it "
+            "needed)" % args.key, "no", ask=("attempts-clear", args.key))
+        if why:
+            print("refused: %s" % why, file=sys.stderr)
             return REFUSED
         print("cleared %s" % args.key if attempts.clear(args.key) else "no such lineage %s"
               % args.key)
@@ -1466,8 +1472,19 @@ def cmd_approvals(args) -> int:
 
 def cmd_answer(args) -> int:
     approve = args.command == "approve"
+    approver = None
     if approve:
         req = next((r for r in workers.approvals() if r["id"] == args.id), None)
+        if req and not workers.human_terminal():
+            # The agent asks and runs it; their reply is the decision (user
+            # decision, 2026-10-01). Denying narrows, so anyone may.
+            why = _person_or_refuse("approving worker %s's request [%s]: %s" % (
+                req["worker"], req["id"], req["summary"]), "xsm_approve",
+                ask=("approve", req["id"]))
+            if why:
+                print("refused: %s" % why, file=sys.stderr)
+                return REFUSED
+            approver = _by()
         if req and workers.human_terminal():
             # Separate read and write handles: a tty opened "r+" in text mode
             # is not seekable and Python refuses it.
@@ -1478,7 +1495,7 @@ def cmd_answer(args) -> int:
                     print("not approved")
                     return REFUSED
     try:
-        req = workers.answer(args.id, approve, args.reason)
+        req = workers.answer(args.id, approve, args.reason, approver=approver)
     except workers.WorkerError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return REFUSED
@@ -1493,12 +1510,38 @@ def cmd_post(args) -> int:
     try:
         where = channel.resolve(here, args.channel)
         author = channel.author_here(me)
+        if args.tag == "decision" and author.get("kind") != "human":
+            author = _decided_by_reply(me, "recording as a decision in %s: %s" % (
+                where[0], (args.text or "")[:120]), "xsm_decide",
+                ("decide", _digest(where[1], args.text)))
+            if author is None:
+                return REFUSED
         rec = channel.post(where, author, args.text, args.tag, args.reply_to)
     except channel.ChannelError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return REFUSED
     print("posted %s to %s as %s" % (rec["id"], where[0], channel.label(author)))
     return OK
+
+
+def _digest(*parts) -> str:
+    """A short stable name for what is being decided, so the same command run
+    again finds the same request."""
+    import hashlib
+    return hashlib.sha256("\0".join(str(p or "") for p in parts).encode()).hexdigest()[:16]
+
+
+def _decided_by_reply(me: dict | None, what: str, mcp_tool: str, ask: tuple) -> dict | None:
+    """A person's decision made through their reply (user decision,
+    2026-10-01): the author is the person, with their words. None after
+    printing the ask when there is no reply yet."""
+    why = _person_or_refuse(what, mcp_tool, ask=ask)
+    if why:
+        print("refused: %s" % why, file=sys.stderr)
+        return None
+    return {"kind": "human", "name": os.environ.get("USER") or "person", "via": "verdict",
+            "verdict": _verdict, "asked_by": (me or {}).get("ref"),
+            "runtime": (me or {}).get("runtime")}
 
 
 def cmd_channel(args) -> int:
@@ -1540,8 +1583,17 @@ def cmd_doc(args) -> int:
     try:
         if args.action == "add":
             body = open(args.file, encoding="utf-8").read() if args.file else (args.text or "")
-            author = channel.author_here(registry.me())
-            node = doc.add(args.doc, author, body, args.tag or ["result"], args.parent or [])
+            me = registry.me()
+            author = channel.author_here(me)
+            if "endorsed" in (args.tag or []) and author.get("kind") != "human":
+                author = _decided_by_reply(me, "endorsing in %s: %s" % (args.doc, body[:120]),
+                                           "xsm_doc_endorse",
+                                           ("endorse", _digest(args.doc, body, args.parent)))
+                if author is None:
+                    return REFUSED
+            node = doc.add(args.doc, author, body, args.tag or ["result"], args.parent or [],
+                           approved=("verdict: %s" % author["verdict"])
+                           if author.get("via") == "verdict" else None)
             print("added node %s [%s] to %s" % (node["id"], ", ".join(node["tags"]),
                                                  os.path.basename(doc.nodes_dir(args.doc))))
         elif args.action == "render":

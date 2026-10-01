@@ -27,10 +27,11 @@ Nobody is at a background worker's screen, so what it would ask there comes to
 a person through xsm instead of the person going to the screen: a folder-trust
 screen before it starts, and a background Claude worker's permission prompts.
 Its PermissionRequest hook records the request, tells the caller,
-and waits for a person to answer with `xsm approve`/`xsm deny` in a terminal. its PermissionRequest hook records the request, tells the caller,
-and waits for a person to answer with `xsm approve`/`xsm deny` in a terminal.
-The caller's agent is told, never asked — an agent approving its own worker is
-the permission laundering the skill forbids.
+and waits for an answer: a person with `xsm approve`/`xsm deny`, or the caller's
+agent running `xsm approve` on its user's reply. The agent never decides on its
+own — approving its own worker unasked is the permission laundering the skill
+forbids — but asking its user and acting on their words is the person deciding
+(user decision, 2026-10-01; the reply is kept as `answered_by`).
 """
 from __future__ import annotations
 
@@ -113,8 +114,8 @@ def refuse_inside_framework() -> None:
     if host and not (host in ignored or "all" in ignored):
         raise WorkerError(
             "this terminal belongs to %s, which owns starting and stopping workers here; "
-            "use %s for that. xsm still carries messages between sessions. (A person can "
-            "let xsm start workers here anyway: `xsm frameworks ignore %s` in a terminal.)"
+            "use %s for that. xsm still carries messages between sessions. (To start xsm "
+            "workers here anyway, ask your user and run `xsm frameworks ignore %s`.)"
             % (host, host, host))
 
 
@@ -208,14 +209,48 @@ def create_grant(asked_by: str, runtime: str, cwd: str, options: list, answer: s
     return grant
 
 
+GRANT_WORDS = {"full_access": "FULL ACCESS (no sandbox, no approval prompts)",
+               "trust_hooks": "hooks run without Codex's trust review",
+               "outside_scope": "a folder outside this session's project, whose sessions it can "
+                                "then talk to",
+               "remote": "pairing with another machine over SSH"}
+
+
+def describe_grant(runtime: str, cwd: str, options: list) -> str:
+    """The decision in words a person can answer."""
+    what = "; ".join(GRANT_WORDS.get(o, o) for o in sorted(options))
+    if runtime.startswith("remote:"):
+        return "Pairing this project with %s (%s)" % (runtime[len("remote:"):], what)
+    return "Starting a %s worker in %s with %s" % (runtime, os.path.realpath(cwd), what)
+
+
 def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
               options: list) -> dict:
-    """Consume a grant that covers exactly this spawn, or refuse."""
+    """Consume a grant that covers exactly this spawn, or refuse.
+
+    Without --grant the person's reply decides (user decision, 2026-10-01):
+    the agent is told what to ask, their next message is kept as the verdict,
+    and running the same command again turns it into a one-use grant."""
     if not grant_id:
-        raise WorkerError("%s needs your user's explicit permission: ask with the xsm_grant MCP "
-                          "tool, then pass --grant <id>. If that call is blocked, ask your user "
-                          "whether to request it, and call it again if they agree" % " and ".join(
-                              "--" + o.replace("_", "-") for o in options))
+        from . import consent
+        target = "%s:%s:%s" % (runtime, os.path.realpath(cwd), ",".join(sorted(options)))
+        verdict = consent.take_verdict(caller, "grant", target)
+        if verdict is not None:
+            paths.append_jsonl("decisions.jsonl", {"event": "consent", "verb": "grant",
+                                                   "target": target, "verdict": verdict,
+                                                   "by": (caller or {}).get("name")})
+            print('approved on your user\'s reply: "%s"' % verdict.replace("\n", " ")[:200])
+            grant = create_grant((caller or {}).get("ref"), runtime, cwd, options,
+                                 "verdict: " + verdict)
+            p = paths.path(GRANTS, grant["id"] + ".json")
+            os.rename(p, p + ".used")         # spent on this spawn, like a --grant
+            return grant
+        consent.request(caller, "grant", target)
+        raise WorkerError(
+            "%s needs your user's yes. Ask them now, in plain words, whether to allow it. Their "
+            "next message in this session is kept as the verdict: if they agree, run this same "
+            "command again; if not, leave it. (The xsm_grant MCP tool asks with a form "
+            "instead; then pass --grant <id>.)" % describe_grant(runtime, cwd, options))
     p = paths.path(GRANTS, grant_id + ".json")
     claimed = p + ".used"
     try:
@@ -961,16 +996,23 @@ def answer_asked(req_id: str, approve: bool, asked_by: str | None, reason: str |
     return req
 
 
-def answer(req_id: str, approve: bool, reason: str | None = None) -> dict:
+def answer(req_id: str, approve: bool, reason: str | None = None,
+           approver: str | None = None) -> dict:
+    """Answer a worker's request. Approving is a person's: at a terminal, or
+    through `approver`, the person's own reply the agent asked for and the
+    CLI checked (user decision, 2026-10-01)."""
     req = paths.read_json(_approval_path(req_id))
     if not req:
         raise WorkerError("no approval request %s" % req_id)
     if req.get("status") != "pending":
         raise WorkerError("request %s is already %s" % (req_id, req.get("status")))
-    if approve and not human_terminal():
-        raise WorkerError("approving needs a person at a terminal; this is not one")
+    if approve and not human_terminal() and not approver:
+        raise WorkerError("approving is your user's decision: ask them in plain words and run "
+                          "`xsm approve %s` again; their reply is kept as the verdict" % req_id)
     req.update({"status": "approved" if approve else "denied", "answered": time.time(),
                 "reason": reason})
+    if approver:
+        req["answered_by"] = approver
     paths.write_json(_approval_path(req_id), req)
     return req
 

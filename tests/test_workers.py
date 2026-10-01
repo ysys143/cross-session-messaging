@@ -995,7 +995,8 @@ class Adr0009FixesTest(TempState):
         with mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaises(workers.WorkerError) as cm:
                 workers.spawn("claude", cwd=there, caller=caller, background=True)
-        self.assertIn("outside-scope", str(cm.exception))
+        self.assertIn("outside this session's project", str(cm.exception))
+        self.assertIn("needs your user's yes", str(cm.exception))
 
 
 class AttemptsTest(TempState):
@@ -1085,7 +1086,7 @@ class AttemptsTest(TempState):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.assertEqual(cli.main(["attempts", "clear", key]), 2)
-        self.assertIn("only a person", err.getvalue())
+        self.assertIn("needs your user's yes", err.getvalue())
         self.assertTrue(attempts.read(key), "still there")
         workers.human_terminal = lambda: True
         with contextlib.redirect_stdout(io.StringIO()):
