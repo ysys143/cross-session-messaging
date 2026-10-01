@@ -861,7 +861,7 @@ def cmd_install(args) -> int:
                 else "keeps it up to date"))
             _print_retired(home, install.remove_retired(home))
             if runtime == "claude" and install.allow_form_tools(home) == "added":
-                print("  allowed the xsm approval-form tools so auto mode lets them ask")
+                print("  allowed the xsm skill, approval-form tools and asking commands so auto mode lets them ask")
             if runtime == "codex":
                 cleared = install.clear_codex_leftovers(home)
                 if cleared:
@@ -990,7 +990,7 @@ def cmd_uninstall(args) -> int:
             if install.remove_statusline(home):
                 print("%s: removed the xsm statusLine" % home)
             if install.remove_form_tools(home):
-                print("%s: removed the xsm approval-form tools from permissions.allow" % home)
+                print("%s: removed the xsm skill, approval-form tools and asking commands from permissions.allow" % home)
         print("%s: removed %s xsm hook group(s)%s" % (
             result.get("file"), result.get("removed", 0),
             "" if not result.get("error") else " (%s)" % result["error"]))

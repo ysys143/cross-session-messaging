@@ -666,8 +666,17 @@ FORM_TOOLS = ("xsm_link", "xsm_reach", "xsm_join", "xsm_approve", "xsm_grant", "
 FORM_TOOL_PREFIXES = ("mcp__xsm__", "mcp__plugin_xsm_xsm__")
 
 
+# The same refusal hit the other road to a yes: auto mode denied the xsm skill
+# and `xsm unblock` as a bypass before xsm could ask the person (issue #9,
+# measured 2026-10-01). These commands ask the person and wait for their reply
+# when it is theirs to decide, so allowing the call lets them ask.
+ASKING_COMMANDS = ("link", "reach", "join", "leave", "unblock", "approve", "attempts clear",
+                   "frameworks ignore", "post", "doc add", "spawn", "remote add")
+
+
 def form_tool_names() -> list:
-    return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in FORM_TOOLS]
+    return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in FORM_TOOLS] + \
+        ["Skill(xsm)"] + ["Bash(xsm %s:*)" % c for c in ASKING_COMMANDS]
 
 
 def allow_form_tools(home: str) -> str:
