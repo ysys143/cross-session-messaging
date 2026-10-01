@@ -332,10 +332,12 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
         return consent.shown_refusal(verdict, what, kept)
     if verdict is not None:
         _verdict = verdict
-        paths.append_jsonl("decisions.jsonl", {
-            "event": "consent", "verb": key[0], "target": key[1], "verdict": verdict,
-            "by": (me or {}).get("name")})
-        print('approved on your user\'s reply: "%s"' % verdict.replace("\n", " ")[:200])
+        record = {"event": "consent", "verb": key[0], "target": key[1], "verdict": verdict,
+                  "by": (me or {}).get("name")}
+        if isinstance(kept, str):
+            record["old_hooks"] = True          # an older hook kept this reply
+        paths.append_jsonl("decisions.jsonl", record)
+        print(consent.approved_line(verdict, kept))
         return None
     if not kept:
         return consent.cannot_keep(what, mcp_tool)

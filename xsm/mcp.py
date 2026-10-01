@@ -60,7 +60,8 @@ TOOLS = [
                                                  "enum": ["full_access", "trust_hooks",
                                                           "outside_scope", "remote"]}},
          "reason": {"type": "string"},
-         "dir": {"type": "string", "description": "the worker's folder; default this session's"}},
+         "dir": {"type": "string", "description": "the worker's folder; default this session's "
+                 "(a remote pairing is always for this session's folder)"}},
          "required": ["runtime", "options", "reason"]}},
     {"name": "xsm_send",
      "description": ("Send a message to another session through xsm, the same as `xsm send`. Use "
@@ -632,7 +633,11 @@ class Server:
         if not options:
             raise channel.ChannelError("options must name full_access and/or trust_hooks")
         runtime = args.get("runtime")
-        cwd = os.path.realpath(os.path.expanduser(args.get("dir") or me.get("cwd") or os.getcwd()))
+        remote = isinstance(runtime, str) and runtime.startswith("remote:")
+        # `xsm remote add` takes no --dir: it pairs the session's own folder, and
+        # its grant is keyed by that folder, so `dir` cannot move a pairing.
+        cwd = os.path.realpath(os.path.expanduser(
+            (None if remote else args.get("dir")) or me.get("cwd") or os.getcwd()))
         reason = (args.get("reason") or "").strip() or "(no reason given)"
         words = {"remote": "PAIRING with another machine over SSH: sessions there in the paired "
                            "project can message this project",
@@ -653,7 +658,6 @@ class Server:
         # What the agent runs without --grant, and the ask that command finds.
         # workers.spawn adds outside_scope itself for a folder outside this
         # session's scope; the other options are the flags it was given.
-        remote = isinstance(runtime, str) and runtime.startswith("remote:")
         flags = [o for o in options if o in ("full_access", "trust_hooks")]
         if remote:
             command, asked = "xsm remote add %s --project <project>" % shlex.quote(runtime[7:]), \
@@ -682,9 +686,10 @@ class Server:
         if answer != allow:
             return "your user declined: they chose 'deny'; do not start that worker"
         g = workers.create_grant(me.get("ref"), runtime, cwd, options, answer)
-        return ("granted %s: xsm spawn %s --dir %s %s --grant %s   (one use, %d minutes)" % (
-            g["id"], runtime, cwd, " ".join("--" + o.replace("_", "-") for o in options), g["id"],
-            workers.GRANT_TTL // 60))
+        use = command if remote else "xsm spawn %s --dir %s %s" % (
+            runtime, cwd, " ".join("--" + o.replace("_", "-") for o in options))
+        return "granted %s: %s --grant %s   (one use, %d minutes)" % (
+            g["id"], use, g["id"], workers.GRANT_TTL // 60)
 
     # -- loop -------------------------------------------------------------------------
     def serve(self) -> int:

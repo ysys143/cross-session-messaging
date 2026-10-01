@@ -1024,6 +1024,33 @@ class PersonDecisionTest(TempState):
                 lambda: self._cli(["doc", "add", path, "--tag", "endorsed", "--parent",
                                    node["id"], "--text", body])[1])
 
+    def test_a_remote_pairing_is_asked_for_by_the_session_folder_its_command_uses(self):
+        """`xsm remote add` takes no --dir: it pairs the session's own folder.
+        The ask was keyed by the tool's `dir`, so a dir that was not the
+        session's folder recorded an ask the command never found (2026-10-01)."""
+        from xsm import consent, workers
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        args = {"runtime": "remote:box", "options": ["remote"], "reason": "pair", "dir": other}
+        text = self._form("xsm_grant", args)
+        self.assertIn("Ask your user now", text)
+        self.assertIn("`xsm remote add box --project <project>`", text)
+        self.assertEqual(self._pending()["target"], workers.grant_target(
+            "remote:box", os.path.realpath(self.tmp), ["remote"]), "the session's folder")
+        self.assertNotIn(os.path.realpath(other), self._pending()["target"])
+        self.assertTrue(consent.note_verdict(self.me, "응"))
+        code, text = self._cli(["remote", "add", "box", "--project", "demo"])
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "응"', text, "the command found the ask")
+        # A form they accept grants for that same folder, and names the command to run
+        granted = self._form("xsm_grant", args, {"result": {
+            "action": "accept", "content": {"answer": "allow once"}}})
+        gid = granted.split()[1].rstrip(":")
+        self.assertEqual(granted.split(":", 1)[1].split("--grant")[0].strip(),
+                         "xsm remote add box --project <project>")
+        grant = workers.use_grant(gid, self.me, "remote:box", self.tmp, ["remote"])
+        self.assertEqual(grant["id"], gid, "a grant for the session's folder covers the command")
+
     def test_a_decision_has_no_key_to_record_so_its_command_comes_first(self):
         """The text to record is the agent's: nothing to record before it runs."""
         text = self._form("xsm_decide", {"question": "Ship it?"})
@@ -1076,15 +1103,20 @@ class PersonDecisionTest(TempState):
 
     # -- an older hook with this CLI (version mix, 2026-10-01) ----------------------------
 
-    def test_a_reply_a_0414_hook_stored_is_shown_with_a_warning_and_still_passes(self):
-        """0.4.14 locks the first message and writes no `shown`; the CLI that
-        reads it cannot promise that their next message replaces it."""
+    def _old_hook_ask(self, target):
+        """An ask whose reply 0.4.14's hook stored: it locks the first message and
+        writes no `shown`."""
         import time
         from xsm import consent, paths
         now = time.time()
         paths.write_json(consent._pending_path(self.me["ref"]), {
-            "verb": "unblock", "target": "old111", "here": None, "cwd": self.tmp, "t": now - 20,
+            "verb": "unblock", "target": target, "here": None, "cwd": self.tmp, "t": now - 20,
             "session_id": "s-agent", "verdict": "응", "verdict_t": now - 10})
+
+    def test_a_reply_a_0414_hook_stored_is_shown_with_a_warning_and_still_passes(self):
+        """0.4.14 locks the first message and writes no `shown`; the CLI that
+        reads it cannot promise that their next message replaces it."""
+        self._old_hook_ask("old111")
         code, text = self._cli(["unblock", "old111"])
         self.assertEqual(code, 2, text)
         self.assertIn('your user replied: "응"', text)
@@ -1099,6 +1131,49 @@ class PersonDecisionTest(TempState):
         self._reply("응")
         code, text = self._cli(["unblock", "new111"])
         self.assertNotIn("older", text, "a current hook writes `shown`, so no warning")
+
+    def test_the_old_hook_note_comes_with_every_show_and_the_pass_line_says_it_too(self):
+        """It showed once: a rerun a moment later got the stored text with no
+        note, and one after the delay passed on it without a word (2026-10-01)."""
+        from xsm import config, paths
+        config.block("old222")
+        self._old_hook_ask("old222")
+        code, first = self._cli(["unblock", "old222"])
+        code, again = self._cli(["unblock", "old222"])           # inside SHOW_DELAY
+        self.assertEqual(code, 2, again)
+        for text in (first, again):
+            self.assertIn("hooks are older than this xsm command", text)
+        self._waited()
+        code, passed = self._cli(["unblock", "old222"])
+        self.assertEqual(code, 0, passed)                        # ease: it does not block
+        self.assertIn('approved on your user\'s reply: "응" (old hooks: their first message '
+                      'after the ask)', passed)
+        self.assertNotIn("old222", config.blocked())
+        logged = [d for d in paths.read_jsonl("decisions.jsonl") if d.get("event") == "consent"]
+        self.assertTrue(logged[-1]["old_hooks"], "the log carries it")
+
+    def test_a_reply_from_a_current_hook_says_nothing_of_old_hooks_on_the_pass(self):
+        from xsm import config, paths
+        config.block("new333")
+        self._asks(["unblock", "new333"])
+        self._reply("응")
+        self._shows(["unblock", "new333"], "응")
+        code, text = self._cli(["unblock", "new333"])
+        self.assertEqual(code, 0, text)
+        self.assertIn('approved on your user\'s reply: "응"', text)
+        self.assertNotIn("old hooks", text)
+        logged = [d for d in paths.read_jsonl("decisions.jsonl") if d.get("event") == "consent"]
+        self.assertNotIn("old_hooks", logged[-1])
+
+    def test_a_newer_reply_by_a_current_hook_ends_the_old_hook_note(self):
+        """The person's later message came through a hook that marks it, so the
+        reply is no longer the old hook's first message."""
+        self._old_hook_ask("old444")
+        self.assertIn("hooks are older", self._cli(["unblock", "old444"])[1])
+        self._reply("아니, 잠깐")
+        self.assertNotIn("old_hook", self._pending())
+        text = self._shows(["unblock", "old444"], "아니, 잠깐")
+        self.assertNotIn("hooks are older", text)
 
     def test_taking_is_one_name_and_the_unused_one_is_gone(self):
         from xsm import consent
@@ -1153,11 +1228,19 @@ class PersonDecisionTest(TempState):
                      "<turn_aborted>", "<user_shell_command>\n<command>ls</command>\n"
                      "</user_shell_command>", "<subagent_notification>x</subagent_notification>",
                      "<environment_context>\n<cwd>/x</cwd>\n</environment_context>",
-                     "<hook_prompt>x</hook_prompt>", "<some_new_tag attr=\"1\">x</some_new_tag>"):
+                     "<hook_prompt>x</hook_prompt>", "<some_new_tag attr=\"1\">x</some_new_tag>",
+                     "<ide_opened_file>The user opened a.py</ide_opened_file>",
+                     "<teammate-message>done</teammate-message>",
+                     "<task-notification>\n<task-id>x</task-id>\n</task-notification>"):
             with self.subTest(text[:20]):
                 self.assertTrue(consent.not_a_reply(text))
         for text in ("<3 응 해 줘", "< 응", "<yes> go ahead", "<-- 응", "<= 맞아", "<b>응",
-                     "<turn> 이야기하자 </turn_x>", "응 <turn_aborted>"):
+                     "<turn> 이야기하자 </turn_x>", "응 <turn_aborted>",
+                     # a person's own markup is a plain word, closed or not
+                     "<b>응</b> 해줘", "<yes>진행</yes>", "<i>네</i>", "<p>go</p>",
+                     "<ok>응</ok>", "<b>응</b>\n<b>진행</b>",
+                     # harness-style names, but not closed: a sentence about a tag
+                     "<some_thing> is what I meant", "<my-tag> 이거 말야"):
             with self.subTest(text):
                 self.assertFalse(consent.not_a_reply(text))
         self._asks(["unblock", "ccc111"])
@@ -1165,6 +1248,10 @@ class PersonDecisionTest(TempState):
         self.assertIsNone(self._pending()["verdict"])
         self._reply("<3 응")
         self.assertEqual(self._pending()["verdict"], "<3 응")
+        self._reply("<b>응</b> 해줘")
+        self.assertEqual(self._pending()["verdict"], "<b>응</b> 해줘", "plain-word markup is a reply")
+        self._reply("<yes>진행</yes>")
+        self.assertEqual(self._pending()["verdict"], "<yes>진행</yes>")
 
     # -- a verdict is long enough for several questions ---------------------------------------
 
@@ -1180,7 +1267,54 @@ class PersonDecisionTest(TempState):
             self.assertIn("-> Answer %d %s" % (i, "a" * 150), said, "no answer is cut")
             self.assertIn("Question %d" % i, said)
         self.assertNotIn("q" * 400, said, "the questions were shortened")
-        self.assertIn("...", said)
+        self.assertIn("…", said)
+
+    def test_four_answers_of_eleven_hundred_each_lose_a_little_not_the_last_one(self):
+        """Answers and notes past VERDICT_MAX were cut at the end, so the last
+        answer went first."""
+        import re
+        from xsm import consent
+        answers = {"Q%d?" % i: str(i) * 1100 for i in range(4)}
+        self._asks(["unblock", "eee111"])
+        self._answered(answers)
+        said = self._pending()["verdict"]
+        self.assertLessEqual(len(said), consent.VERDICT_MAX)
+        runs = []
+        for i in range(4):
+            found = re.search(r"Q%d\? -> (%d+)…(?:;|\Z)" % (i, i), said)
+            self.assertIsNotNone(found, "answer %d is there, cut and marked: %s" % (i, said[:80]))
+            runs.append(len(found.group(1)))
+        self.assertGreater(min(runs), 950, "each keeps nearly all of it")
+        self.assertLessEqual(max(runs) - min(runs), 1, "in proportion, none more than another")
+        self.assertTrue(said.startswith("Q0? -> 0000"), "the start of each is what is kept")
+
+    def test_questions_are_cut_first_then_notes_and_the_answers_last(self):
+        from xsm import consent
+        long_q = {"Question %d %s" % (i, "q" * 190): "Answer %d %s" % (i, "a" * 590)
+                  for i in range(4)}
+        notes = {q: {"notes": "note %s" % ("n" * 590)} for q in long_q}
+        self._asks(["unblock", "eee222"])
+        self._answered(long_q, notes)
+        said = self._pending()["verdict"]
+        self.assertLessEqual(len(said), consent.VERDICT_MAX)
+        self.assertEqual(said.count("a" * 590), 4, "every answer whole")
+        self.assertNotIn("q" * 100, said, "the questions went to their floor first")
+        self.assertIn("note n", said)
+        self.assertNotIn("n" * 590, said, "and the notes were shortened, marked")
+        self.assertRegex(said, r"\(notes: note n+…\)")
+        # With the notes small, the answers are what gives way, and the notes are cut first
+        small = {"Question %d" % i: "A" * 1100 for i in range(4)}
+        self._answered(small, {q: {"notes": "x" * 60} for q in small})
+        said = self._pending()["verdict"]
+        self.assertLessEqual(len(said), consent.VERDICT_MAX)
+        self.assertNotIn("x" * 60, said, "notes first")
+        self.assertNotIn("A" * 1100, said)
+        self.assertGreater(said.count("A"), 3400, "but the answers kept nearly everything")
+
+    def test_a_form_that_fits_is_kept_as_it_was_with_no_mark(self):
+        self._asks(["unblock", "eee333"])
+        self._answered({"Lift it?": "Yes", "Log it?": "No"})
+        self.assertEqual(self._pending()["verdict"], "Lift it? -> Yes; Log it? -> No")
 
     def test_a_long_reply_is_kept_beyond_the_old_thousand(self):
         from xsm import consent

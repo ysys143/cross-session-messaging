@@ -75,7 +75,8 @@ TTL = 600
 # counts from the ask itself (2026-10-01).
 ASK_MAX = 1800
 # What a verdict keeps of the person's words. A form of several questions had
-# its tail cut at 1000 (2026-10-01); answers_text shortens the questions first.
+# its tail cut at 1000 (2026-10-01); answers_text shortens the questions, then
+# the notes, and the answers last, each in proportion, so none loses its tail.
 VERDICT_MAX = 4000
 QUESTION_MAX = 200
 # A reply shown to the agent passes no sooner than this after it was shown, on
@@ -99,13 +100,15 @@ CLAUDE_COMMANDS = ("xsm", "xsm:xsm")
 # What the harness writes into a prompt is not the person answering: a
 # background task's completion, a hook's or a command's echo, a peer message.
 # A task completion was stored as the verdict (measured 2026-10-01). The
-# prefixes are the tags Claude Code and xsm use, and Codex's (underscores);
-# any other lowercase tag counts when it is also closed.
+# prefixes are the tags Claude Code and xsm use, and Codex's (underscores).
+# Any other tag counts when it is closed and written the harness way, with a
+# hyphen or underscore in its name; a plain word is a person's markup (`<b>응</b>
+# 해줘`, `<yes>진행</yes>`: 2026-10-01 review).
 HARNESS_PREFIXES = ("<task-notification", "<system-reminder", "<command-", "<local-command",
                     "<bash-", "<user-prompt-submit-hook", "<cross-session-message",
                     "<turn_aborted", "<user_shell_command", "<subagent_notification",
                     "<environment_context", "<hook_prompt")
-TAG_RE = re.compile(r"\A<([a-z][a-z0-9_-]*)[\s>]")
+TAG_RE = re.compile(r"\A<([a-z][a-z0-9]*[_-][a-z0-9_-]*)[\s>]")
 # A slash command (`/clear`, `/model opus`) is not an answer; a path ("/tmp/x") is.
 SLASH_RE = re.compile(r"\A/[A-Za-z][\w:.-]*(?:\s|\Z)")
 
@@ -222,6 +225,18 @@ def not_a_reply(text: str) -> bool:
     return bool(tag) and "</%s>" % tag.group(1) in text
 
 
+def _shrink(texts: list, excess: int, floor: int) -> list:
+    """`texts` shorter by `excess` characters in all, as far as `floor` (at
+    least 1) allows: each gives up a share in proportion to what it can spare,
+    rounded up so the total is not short, and a cut one ends with `…`."""
+    spare = [max(len(t) - floor, 0) for t in texts]
+    if excess <= 0 or not sum(spare):
+        return texts
+    take = min(excess, sum(spare))
+    cuts = [-(-take * s // sum(spare)) for s in spare]
+    return [t[:len(t) - c - 1] + "…" if c else t for t, c in zip(texts, cuts)]
+
+
 def answers_text(data: dict) -> str | None:
     """The person's choices in an AskUserQuestion result, one `<question> ->
     <answer>` per question (the answer is the option's label, or what they
@@ -230,28 +245,31 @@ def answers_text(data: dict) -> str | None:
     (2026-10-01). From the hook's `tool_response`, which carries the answers
     (Claude Code 2.1.286 also puts them in `tool_input`, so either would do). A
     result that is plain text comes through as it is. Past VERDICT_MAX the
-    questions are shortened, never the answers."""
+    questions are shortened first, then the notes, and only then the answers,
+    so the cut at VERDICT_MAX never takes the last answer whole."""
     out = data.get("tool_response")
     if isinstance(out, list):
         out = " ".join(b.get("text") or "" for b in out if isinstance(b, dict))
     if isinstance(out, str):
         return out.strip() or None
-    if not isinstance(out, dict) or not isinstance(out.get("answers"), dict):
+    if not isinstance(out, dict) or not isinstance(out.get("answers"), dict) or not out["answers"]:
         return None
-    notes = out.get("annotations") if isinstance(out.get("annotations"), dict) else {}
-    rows = []
+    marks = out.get("annotations") if isinstance(out.get("annotations"), dict) else {}
+    asked, answered, noted = [], [], []
     for question, answer in out["answers"].items():
-        note = (notes.get(question) or {}).get("notes") if isinstance(notes.get(question), dict) \
+        note = (marks.get(question) or {}).get("notes") if isinstance(marks.get(question), dict) \
             else None
-        tail = " -> %s" % answer
-        if isinstance(note, str) and note.strip():
-            tail += " (notes: %s)" % note.strip()
-        rows.append((str(question), tail))
-    if not rows:
-        return None
-    room = (VERDICT_MAX - sum(len(t) + 2 for _, t in rows)) // len(rows)
-    limit = min(QUESTION_MAX, max(room, 20))
-    return "; ".join((q if len(q) <= limit else q[:limit - 3] + "...") + t for q, t in rows)
+        q = str(question)
+        asked.append(q if len(q) <= QUESTION_MAX else q[:QUESTION_MAX - 1] + "…")
+        answered.append(str(answer))
+        noted.append(note.strip() if isinstance(note, str) else "")
+
+    def said() -> str:
+        return "; ".join("%s -> %s%s" % (q, a, " (notes: %s)" % n if n else "")
+                         for q, a, n in zip(asked, answered, noted))
+    for parts, floor in ((asked, 20), (noted, 20), (answered, 1)):
+        parts[:] = _shrink(parts, len(said()) - VERDICT_MAX, floor)
+    return said()
 
 
 def record(me: dict | None, data: dict) -> dict | None:
@@ -317,6 +335,7 @@ def note_verdict(me: dict | None, text: str) -> bool:
                 return False
             entry.update({"verdict": text.strip()[:VERDICT_MAX], "verdict_t": time.time(),
                           "shown": False})
+            entry.pop("old_hook", None)         # this reply came by a hook that marks it
             paths.write_json(p, entry, mode=0o600)
     except OSError:
         return False                    # a folder that cannot be written keeps no reply
@@ -349,7 +368,10 @@ def _matches(entry: dict, verb: str, want: str, want_here: str | None) -> bool:
 # Appended to what the agent is shown with a reply an older hook stored. The
 # hooks of a session started before an update keep running the old code, and
 # 0.4.14's kept only the first message after an ask (new ones mark theirs
-# `shown`, which an old one never writes; 2026-10-01).
+# `shown`, which an old one never writes; 2026-10-01). It is not let go of: the
+# first show marks the ask `old_hook`, so every later show carries the note and
+# the pass line says it too, for the agent and the log. It does not block (ease
+# of connection, and the first message is the person's own words).
 OLD_HOOK = ("Note: this session's xsm hooks are older than this xsm command, so only their first "
             "message after the ask was kept. If they said anything else since, it is not here, "
             "and you must not run this again on it: tell them a new session is needed for the "
@@ -365,18 +387,20 @@ def _take(me: dict, verb: str, want: str, want_here: str | None) -> tuple:
         return None, False, True
     now = time.time()
     if not entry.get("shown"):
-        old = "shown" not in entry
+        if "shown" not in entry:
+            entry["old_hook"] = True
         entry.update({"shown": True, "shown_t": now})
         paths.write_json(p, entry, mode=0o600)
-        return entry["verdict"], False, OLD_HOOK if old else True
+        return entry["verdict"], False, OLD_HOOK if entry.get("old_hook") else True
+    kept = OLD_HOOK if entry.get("old_hook") else True
     if now - float(entry.get("shown_t") or 0) < SHOW_DELAY:
-        return entry["verdict"], False, True
+        return entry["verdict"], False, kept
     try:
         os.unlink(p)
     except FileNotFoundError:
         return None, False, True        # used by another reader first
     _drop(p)                            # the lock too
-    return entry["verdict"], True, True
+    return entry["verdict"], True, kept
 
 
 def _record(me: dict, verb: str, want: str, want_here: str | None) -> None:
@@ -406,11 +430,12 @@ def take_or_request(me: dict | None, verb: str, target: str, here: str | None = 
       does not promise it.
     - (reply, False, kept): a reply the agent has not seen, marked as shown now,
       which the caller refuses with. `kept` is OLD_HOOK, a string to show with
-      it, for a reply an older hook stored.
+      it, for a reply an older hook stored (on every show of it).
     - (reply, True, kept): the reply that was shown, is still the latest and was
       shown at least SHOW_DELAY ago, which is used up: the caller goes ahead,
-      once. A rerun sooner than that gets the reply shown again, so a line that
-      runs the command twice does not pass on its own showing.
+      once, and says so with approved_line. A rerun sooner than that gets the
+      reply shown again, so a line that runs the command twice does not pass on
+      its own showing.
 
     One locked step, the read and the write together (_locked): a reply landing
     between a take and a separate request was overwritten unseen (adversarial
@@ -558,6 +583,15 @@ def shown_refusal(reply: str, what: str, kept=None) -> str:
             'go ahead; if it is a no or a question, do not: answer them, and their next '
             'message replaces it.' % (reply, what[:1].lower() + what[1:]))
     return text + " " + kept if isinstance(kept, str) else text
+
+
+def approved_line(verdict: str, kept=None) -> str:
+    """What a run prints when it goes ahead on a reply. `kept` is take_or_request's:
+    a string (OLD_HOOK) says the reply came from an older hook, so the output and
+    the log show it too."""
+    return 'approved on your user\'s reply: "%s"%s' % (
+        verdict.replace("\n", " ")[:200],
+        " (old hooks: their first message after the ask)" if isinstance(kept, str) else "")
 
 
 def in_words(command: str, kept: bool, runtime: str | None = None) -> str:
