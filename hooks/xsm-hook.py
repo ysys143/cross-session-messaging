@@ -8,4 +8,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xsm.receive import main  # noqa: E402
 
-sys.exit(main())
+# Never 2: Claude Code reads that status from a hook as "block" (2026-10-01).
+status = main()
+sys.exit(1 if status == 2 else status)

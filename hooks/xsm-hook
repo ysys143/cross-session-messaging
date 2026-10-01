@@ -20,7 +20,14 @@ for candidate in $candidates; do
     "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
         >/dev/null 2>&1 || continue
     unset IFS
-    exec "$candidate" "$here/hooks/xsm-hook.py" "$@"
+    # Not exec: Python exits 2 when it cannot open the script, and a hook that
+    # exits 2 blocks the prompt. macOS privacy protection can deny the app that
+    # started a session a folder such as ~/Documents, and a plugin loaded from a
+    # local folder runs from there (2026-10-01). That is an error, never a block.
+    "$candidate" "$here/hooks/xsm-hook.py" "$@"
+    status=$?
+    [ "$status" -ne 2 ] || status=1
+    exit "$status"
 done
 unset IFS
 

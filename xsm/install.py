@@ -101,7 +101,15 @@ def hook_command(runtime: str, event: str) -> str:
     # happened to export XSM_HOME, so a reinstall rewrote every hook.
     if os.environ.get("XSM_HOME") and not _is_default_home(os.environ["XSM_HOME"]):
         parts.insert(0, "XSM_HOME=%s" % os.environ["XSM_HOME"])
-    return "%s %s" % (" ".join(parts), MARKER)
+    command = " ".join(parts)
+    # Claude Code reads exit status 2 from a hook as "block", and Python exits 2
+    # when it cannot open the script. macOS privacy protection denied a
+    # session's app ~/Documents and every prompt was blocked (2026-10-01); a
+    # command that cannot run must be a plain error, exit 1. Codex's command is
+    # left as it is: a changed command makes its hooks untrusted again.
+    if runtime == "claude":
+        command += " || exit 1"
+    return "%s %s" % (command, MARKER)
 
 
 def _is_default_home(value: str) -> bool:
