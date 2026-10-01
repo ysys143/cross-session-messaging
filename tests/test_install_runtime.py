@@ -227,14 +227,18 @@ class SnapshotTest(_Checkout):
         self.assertIn(planned.replace(self.user_home, "~"), text)
         self.assertIn(os.path.join(planned, "hooks", "xsm-hook"), text)
 
-    def test_dev_points_the_hooks_at_the_checkout_and_a_refresh_moves_them_back(self):
-        from xsm import install, paths
+    def test_dev_points_the_hooks_at_the_checkout_and_a_refresh_keeps_them_there(self):
+        """2026-10-02: --dev is saved as the policy, so a refresh or doctor run without the
+        flag neither moves the hooks back to a copy nor calls the dev install out of date."""
+        from xsm import config, install, paths
         home = os.path.join(self.tmp, "claude-dev")
         target = os.path.join(home, "settings.json")
         code, text = _run_cli("install", "--claude-home", home, "--no-mcp", "--dev",
                               "--python", sys.executable)
         self.assertEqual(code, 0, text)
         self.assertIn("this checkout", text)
+        self.assertIn("runtime=checkout is saved in", text)
+        self.assertEqual(config.load()["runtime"], "checkout")
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "runtime", "current.json")))
         command = paths.read_json(target)["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         self.assertIn(os.path.join(self.checkout, "hooks", "xsm-hook"), command)
@@ -243,11 +247,97 @@ class SnapshotTest(_Checkout):
                          os.path.realpath(os.path.join(self.checkout, "bin", "xsm")))
         code, text = _run_cli("install", "--refresh", "--no-mcp", "--python", sys.executable)
         self.assertEqual(code, 0, text)
+        self.assertIsNone(install.runtime_current(), "no copy was made behind the person's back")
+        command = paths.read_json(target)["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        self.assertIn(os.path.join(self.checkout, "hooks", "xsm-hook"), command)
+        self.assertEqual(os.path.realpath(link),
+                         os.path.realpath(os.path.join(self.checkout, "bin", "xsm")))
+        actions = [a["action"] for a in install.plan(home, "claude")["actions"]]
+        self.assertEqual(set(actions), {"keep"}, "doctor sees nothing to replace")
+        # And a copy installed before is not what doctor measures it against.
+        install.make_snapshot()
+        self.assertEqual({a["action"] for a in install.plan(home, "claude")["actions"]}, {"keep"})
+        code, text = _run_cli("doctor")
+        self.assertIn("the checkout", [l for l in text.splitlines() if l.startswith("runtime ")][0])
+        self.assertNotIn(":replace", text)
+
+    def test_going_back_to_a_copy_is_deleting_the_line(self):
+        from xsm import config, install, paths
+        home = os.path.join(self.tmp, "claude-back")
+        target = os.path.join(home, "settings.json")
+        _run_cli("install", "--claude-home", home, "--no-mcp", "--dev", "--python", sys.executable)
+        raw = config.load()
+        raw.pop("runtime")
+        paths.write_json(paths.path(config.CONFIG), raw)
+        code, text = _run_cli("install", "--refresh", "--no-mcp", "--python", sys.executable)
+        self.assertEqual(code, 0, text)
         snap = install.runtime_current()
         command = paths.read_json(target)["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         self.assertIn(os.path.join(snap["path"], "hooks", "xsm-hook"), command)
-        self.assertEqual(os.path.realpath(link),
-                         os.path.realpath(os.path.join(snap["path"], "bin", "xsm")))
+
+    def test_dev_says_nothing_new_the_second_time_and_a_dry_run_saves_nothing(self):
+        from xsm import config
+        home = os.path.join(self.tmp, "claude-dev2")
+        code, text = _run_cli("install", "--claude-home", home, "--no-mcp", "--dev", "--dry-run",
+                              "--python", sys.executable)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("runtime", config.load())
+        _run_cli("install", "--claude-home", home, "--no-mcp", "--dev", "--python", sys.executable)
+        code, text = _run_cli("install", "--claude-home", home, "--no-mcp", "--dev",
+                              "--python", sys.executable)
+        self.assertNotIn("is saved in", text)
+
+    def test_a_second_refresh_with_nothing_changed_rewrites_nothing(self):
+        """2026-10-02: current.json (its `made`) and the `current` link were rewritten by
+        every refresh, so a refresh that changed nothing still changed the files."""
+        from xsm import install
+        first = install.make_snapshot()
+        record = os.path.join(self.tmp, "runtime", "current.json")
+        link = os.path.join(self.tmp, "runtime", "current")
+        before = (os.stat(record).st_mtime_ns, os.lstat(link).st_ino, os.lstat(link).st_mtime_ns)
+        time.sleep(0.02)
+        second = install.make_snapshot()
+        after = (os.stat(record).st_mtime_ns, os.lstat(link).st_ino, os.lstat(link).st_mtime_ns)
+        self.assertEqual(before, after)
+        self.assertEqual((second["id"], second["path"], second["made"]),
+                         (first["id"], first["path"], first["made"]))
+        # A change, a missing link, or a mark of retirement is still put right.
+        os.unlink(link)
+        install.make_snapshot()
+        self.assertEqual(os.readlink(link), first["id"])
+        self._edit()
+        third = install.make_snapshot()
+        self.assertNotEqual(third["id"], first["id"])
+
+    def test_uninstall_unlinks_the_path_link_into_a_copy_and_says_the_folder_can_go(self):
+        from xsm import install
+        home = os.path.join(self.tmp, "claude-un")
+        _run_cli("install", "--claude-home", home, "--no-mcp", "--python", sys.executable)
+        link = os.path.join(self.user_home, ".local", "bin", "xsm")
+        self.assertTrue(os.path.islink(link))
+        code, text = _run_cli("uninstall", "--claude-home", home)
+        self.assertEqual(code, 0, text)
+        self.assertFalse(os.path.lexists(link), "a link into the copy is not left dangling")
+        self.assertIn("removed the ~/.local/bin/xsm link", text)
+        self.assertIn("delete that folder", text)
+        self.assertTrue(os.path.isdir(install.runtime_dir()), "the copies are the person's to delete")
+
+    def test_uninstall_of_one_home_leaves_the_link_while_another_keeps_the_hooks(self):
+        a, b = (os.path.join(self.tmp, "claude-" + n) for n in ("a", "b"))
+        for home in (a, b):
+            _run_cli("install", "--claude-home", home, "--no-mcp", "--python", sys.executable)
+        link = os.path.join(self.user_home, ".local", "bin", "xsm")
+        _run_cli("uninstall", "--claude-home", a)
+        self.assertTrue(os.path.islink(link))
+        _run_cli("uninstall", "--claude-home", b)
+        self.assertFalse(os.path.lexists(link))
+
+    def test_uninstall_leaves_a_link_to_a_checkout_alone(self):
+        home = os.path.join(self.tmp, "claude-dev-un")
+        _run_cli("install", "--claude-home", home, "--no-mcp", "--dev", "--python", sys.executable)
+        link = os.path.join(self.user_home, ".local", "bin", "xsm")
+        _run_cli("uninstall", "--claude-home", home)
+        self.assertTrue(os.path.islink(link), "it points at the person's checkout")
 
     def test_a_refresh_after_a_change_replaces_the_hooks_in_place_and_the_link(self):
         from xsm import install, paths
@@ -469,6 +559,7 @@ class DoctorRuntimeTest(_Checkout):
         with mock.patch.dict(os.environ, {"XSM_RUNTIME": "checkout"}):
             lines = self._doctor()
         self.assertIn("a session macOS keeps out of that folder cannot run them", lines[0])
+        self.assertIn("delete the `runtime` line", lines[0], "the way back is named")
 
 
 class LauncherPinTest(TempState):

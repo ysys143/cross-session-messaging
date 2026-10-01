@@ -234,6 +234,17 @@ def _own_link(source: str) -> bool:
     return source in mine or _under_runtime(source)
 
 
+def remove_cli() -> bool:
+    """Unlink ~/.local/bin/xsm when it is a link into the runtime copies xsm made
+    under ~/.xsm/runtime, which uninstall leaves behind otherwise (2026-10-02). A
+    link to a checkout or to a plugin copy is not ours to remove."""
+    target = os.path.expanduser("~/.local/bin/xsm")
+    if not os.path.islink(target) or not _under_runtime(os.path.realpath(target)):
+        return False
+    os.unlink(target)
+    return True
+
+
 def install_cli() -> str:
     """Link the launcher on PATH, replacing a link into an older plugin version,
     and (from a checkout) a link into a snapshot or to the checkout itself."""
@@ -528,7 +539,8 @@ def make_snapshot() -> dict:
     sid, previous = digest[:12], runtime_current()
     dest = runtime_dir(sid)
     os.makedirs(runtime_dir(), mode=0o700, exist_ok=True)
-    if not (os.path.isdir(dest) and runtime_digest(dest, SNAPSHOT_FILES) == digest):
+    intact = os.path.isdir(dest) and runtime_digest(dest, SNAPSHOT_FILES) == digest
+    if not intact:
         tmp = dest + ".new"
         shutil.rmtree(tmp, ignore_errors=True)
         for name in runtime_files(REPO, SNAPSHOT_FILES):
@@ -537,6 +549,14 @@ def make_snapshot() -> dict:
             shutil.copy2(name, target)
         shutil.rmtree(dest, ignore_errors=True)
         os.replace(tmp, dest)
+    record = {"id": sid, "source": REPO, "rev": git_head(REPO), "describe": git_describe(),
+              "version": plugin_version()}
+    link, tmp_link = runtime_dir(LINK), runtime_dir(LINK + ".new")
+    if intact and previous and previous["id"] == sid and \
+            all(previous.get(k) == v for k, v in record.items()) and \
+            not os.path.exists(os.path.join(dest, RETIRED)) and \
+            os.path.islink(link) and os.readlink(link) == sid:
+        return previous         # nothing changed: a second refresh rewrites nothing
     if previous and previous["id"] != sid:
         try:                    # sessions that started before now may still run its hooks
             with open(os.path.join(previous["path"], RETIRED), "w") as fh:
@@ -547,15 +567,13 @@ def make_snapshot() -> dict:
         os.unlink(os.path.join(dest, RETIRED))
     except OSError:
         pass
-    link, tmp_link = runtime_dir(LINK), runtime_dir(LINK + ".new")
     try:
         os.unlink(tmp_link)
     except OSError:
         pass
     os.symlink(sid, tmp_link)
     os.replace(tmp_link, link)
-    record = {"id": sid, "source": REPO, "rev": git_head(REPO), "describe": git_describe(),
-              "version": plugin_version(), "made": time.time()}
+    record["made"] = time.time()
     paths.write_json(runtime_dir(CURRENT), record, mode=0o644)
     return dict(record, path=dest)
 

@@ -897,18 +897,33 @@ def cmd_held(args) -> int:
 
 def cmd_install(args) -> int:
     """`--dev` is the policy runtime=checkout for this run (policy.py), through
-    the variable that overrides it; the variable is put back afterwards."""
+    the variable that overrides it; the variable is put back afterwards, and the
+    choice is kept in config.json (`_keep_dev`)."""
     if not args.dev:
         return _cmd_install(args)
     before = os.environ.get("XSM_RUNTIME")
     os.environ["XSM_RUNTIME"] = "checkout"
     try:
-        return _cmd_install(args)
+        code = _cmd_install(args)
     finally:
         if before is None:
             os.environ.pop("XSM_RUNTIME", None)
         else:
             os.environ["XSM_RUNTIME"] = before
+    if code == OK and not args.dry_run and not install.runtime_in_place():
+        _keep_dev()
+    return code
+
+
+def _keep_dev() -> None:
+    """`--dev` is a choice, and `xsm install --refresh` or `xsm doctor` run later
+    without the flag moved the hooks back to a copy unasked and called the dev
+    install out of date (2026-10-02). It is saved as the policy, the same switch
+    anyone can set; deleting the line goes back to a copy."""
+    if config.set_value("runtime", "checkout"):
+        print("runtime=checkout is saved in %s, so `xsm install --refresh` and `xsm doctor` keep "
+              "running from this checkout; delete the `runtime` line there to go back to a copy"
+              % _home_tilde(paths.path(config.CONFIG)))
 
 
 def _cmd_install(args) -> int:
@@ -1141,7 +1156,8 @@ def _print_retired(home: str, gone: list) -> None:
 def cmd_uninstall(args) -> int:
     targets = [(h, "claude") for h in (args.claude_home or [])] + \
               [(h, "codex") for h in (args.codex_home or [])]
-    for home, runtime in targets or [(h["path"], h["runtime"]) for h in config.homes()]:
+    targets = targets or [(h["path"], h["runtime"]) for h in config.homes()]
+    for home, runtime in targets:
         result = install.remove(home, runtime)
         if install.remove_mcp(home, runtime):
             print("%s: removed the MCP server" % home)
@@ -1161,7 +1177,25 @@ def cmd_uninstall(args) -> int:
         print("%s: removed %s xsm hook group(s)%s" % (
             result.get("file"), result.get("removed", 0),
             "" if not result.get("error") else " (%s)" % result["error"]))
+    _uninstall_runtime(targets)
     return OK
+
+
+def _uninstall_runtime(done: list) -> None:
+    """What uninstall leaves of the runtime (2026-10-02): the `xsm` link on PATH goes
+    when it points into a copy and no other home keeps xsm's hooks; the copies
+    themselves are a folder for the person to delete once no session runs from it."""
+    gone = {os.path.realpath(os.path.expanduser(h)) for h, _ in done}
+    left = [h for h in config.homes() if os.path.realpath(h["path"]) not in gone
+            and os.path.isdir(h["path"]) and any(
+                a["action"] != "add" for a in install.plan(h["path"], h["runtime"]).get("actions", []))]
+    if left:
+        return
+    if install.remove_cli():
+        print("removed the ~/.local/bin/xsm link to the runtime copy")
+    if os.path.isdir(install.runtime_dir()):
+        print("%s still holds the runtime copies the hooks ran from: delete that folder once no "
+              "session runs from it" % _home_tilde(install.runtime_dir()))
 
 
 def cmd_doctor(args) -> int:
@@ -1331,7 +1365,8 @@ def _runtime_lines(rt: dict) -> list:
     if rt.get("mode") == "checkout":
         return ["the checkout %s (policy runtime=checkout, or --dev): the hooks, the MCP server "
                 "and `xsm` run from it, and a session macOS keeps out of that folder cannot run "
-                "them; `xsm install --refresh` without --dev moves them to a copy"
+                "them; delete the `runtime` line in ~/.xsm/config.json (and unset XSM_RUNTIME), "
+                "then `xsm install --refresh`, to move them to a copy"
                 % _home_tilde(rt.get("running_from") or "")]
     snap = rt.get("snapshot")
     if not snap:
@@ -2298,8 +2333,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="install into a home that already has the xsm plugin")
     ins.add_argument("--dev", action="store_true",
                      help="run the hooks, the MCP server and `xsm` from this checkout instead of a "
-                          "copy under ~/.xsm/runtime (for developing xsm; same as the policy "
-                          "runtime=checkout)")
+                          "copy under ~/.xsm/runtime (for developing xsm; saved as the policy "
+                          "runtime=checkout, so a later refresh keeps it)")
     ins.set_defaults(func=cmd_install)
 
     un = sub.add_parser("uninstall", help="remove only the hook groups xsm added")

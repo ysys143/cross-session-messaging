@@ -398,6 +398,16 @@ def _save(raw: dict) -> None:
     paths.write_json(paths.path(CONFIG), raw, mode=0o644)
 
 
+def set_value(name: str, value) -> bool:
+    """Write one top-level key of config.json; False when it already says that."""
+    raw = _raw()
+    if raw.get(name) == value:
+        return False
+    raw[name] = value
+    _save(raw)
+    return True
+
+
 def projects() -> list:
     """Scopes that `xsm join` manages, i.e. those whose members are folders."""
     return [s for s in load().get("scopes", []) if any(m.get("root") for m in s.get("members", []))]
