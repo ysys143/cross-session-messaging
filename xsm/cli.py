@@ -1519,8 +1519,12 @@ def cmd_answer(args) -> int:
             # session that started the worker asks about it, as MCP
             # `xsm_approve` does (workers.answer_asked).
             caller_ref = (registry.me() or {}).get("ref")
-            if not caller_ref or caller_ref != \
-                    (workers.load(req.get("worker") or "") or {}).get("parent_ref"):
+            parent = (workers.load(req.get("worker") or "") or {}).get("parent_ref")
+            if not parent:
+                print("refused: request %s belongs to a worker no session started; it waits for "
+                      "the person who started it" % req["id"], file=sys.stderr)
+                return REFUSED
+            if not caller_ref or caller_ref != parent:
                 print("refused: request %s belongs to a worker another session started; only "
                       "that session asks its user about it" % req["id"], file=sys.stderr)
                 return REFUSED

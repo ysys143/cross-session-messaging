@@ -76,6 +76,19 @@ class PersonDecisionTest(TempState):
         self.assertEqual(done["status"], "approved")
         self.assertIn("응 허용", done["answered_by"])
 
+    def test_a_worker_no_session_started_is_not_anothers(self):
+        from xsm import paths, workers
+        workers.save({"name": "w9", "runtime": "claude", "mode": "background", "pane": "%9",
+                      "cwd": self.tmp, "created": 0})
+        paths.write_json(workers._approval_path("r9"), {"id": "r9", "worker": "w9",
+                                                        "summary": "x", "status": "pending"})
+        code, text = self._cli(["approve", "r9"])
+        self.assertEqual(code, 2, text)
+        self.assertIn("no session started", text)
+        with self.assertRaises(workers.WorkerError) as cm:
+            workers.answer_asked("r9", True, "abc123")
+        self.assertIn("no session started", str(cm.exception))
+
     def test_denying_needs_no_one(self):
         from xsm import paths, workers
         workers.save({"name": "w2", "runtime": "claude", "mode": "background", "pane": "%2",

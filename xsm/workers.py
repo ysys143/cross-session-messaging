@@ -990,6 +990,9 @@ def answer_asked(req_id: str, approve: bool, asked_by: str | None, reason: str |
     if not req or req.get("status") != "pending":
         raise WorkerError("no pending approval request %s" % req_id)
     worker = load(req.get("worker") or "") or {}
+    if not worker.get("parent_ref"):
+        raise WorkerError("request %s belongs to a worker no session started; it waits for "
+                          "the person who started it" % req_id)
     if worker.get("parent_ref") != asked_by:
         raise WorkerError("request %s belongs to a worker another session started" % req_id)
     req.update({"status": "approved" if approve else "denied", "answered": time.time(),
