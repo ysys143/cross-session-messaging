@@ -205,12 +205,20 @@ The receiving side runs nothing. A hook acts as the gate: it checks the scope an
 message directly into the session's prompt. A rejected message is held, not dropped. Claude's own
 cross-session messages (`SendMessage`, no xsm header) from a session on this machine arrive untouched, whatever
 the scope: Claude's own gate has already decided, and the sender is you on the same machine. Ones from off this
-machine (Remote Control, cloud) are held. Scope governs xsm's own messages, and `xsm send` refuses an out-of-scope
+machine (Remote Control, cloud) pass with a note naming where they came from (`"remote_native": "hold"` holds them, as before). Scope governs xsm's own messages, and `xsm send` refuses an out-of-scope
 target before sending. A linked worktree (Orca, `claude --worktree`) and its main checkout are one repository. To
 connect two folders the agent asks you in plain words and runs `xsm link <folder>` itself; your reply is kept as
 the verdict (or the `xsm_link` tool asks with a form). Set `"strict_peers": true` in
 `~/.xsm/config.json` to hold every message without an xsm header instead (ADR-0013). Claude's own gate still
 decides first: a message it holds for a permission-mode mismatch never reaches xsm.
+
+A conversation you want between your own sessions is never stopped by a hold you cannot see. If the gate
+breaks, or cannot check a message (its sender exited, it came from off this machine), the message goes
+through with a `[xsm] could not check this message` note instead of being held; what is still held (a
+session you blocked, out of scope) is kept, both sides are told, and your agent delivers it on your yes
+(`xsm held deliver <id>`). Each opened hold can be closed again: `fail_open`, `remote_native`,
+`stale_sender`, `reply_from_request`, `reply_flag` in `~/.xsm/config.json`, or `XSM_<KEY>` in the
+environment; `xsm doctor` shows them on its `policy` line.
 
 ```bash
 xsm ledger                           # recent messages and their delivery state

@@ -52,17 +52,16 @@ inside one code block. If it fails with `sandbox-blocked`, call the MCP tool
 **`link <folder>`** — call the MCP tool `xsm_link` with `dir` set to the folder
 (both ways, until unlinked; what your user typed is the consent).
 
-**`join <project>`** / **`leave <project>`** — call `xsm_join` with `project`
-set to the word after it (and `leave` true for `leave`).
+**`join <project>`** / **`leave <project>`** — call `xsm_join` with `project` set to the word after it (and `leave` true for `leave`).
 
-**`reach <folder>`** — call `xsm_reach` with `dir` set to the folder (this
-session alone, until it ends).
+**`reach <folder>`** — call `xsm_reach` with `dir` set to the folder (this session alone, until it ends).
 
 For these four: call the tool once and reply with its result, copied exactly, inside one code block. Say
 your user refused only if it says they chose `deny` or declined. If the tool is missing or fails, run
 the same `xsm <command>` in the shell; if its result says the form got no answer, do what it says. When
 xsm says it needs their yes, ask in plain words (Claude Code only: or AskUserQuestion), run it again to
-see their reply, and again only on a yes. Never ask your user to type a command.
+see their reply, and again only on a yes; their own earlier request naming it is shown as that reply.
+Never ask your user to type a command.
 
 **Words that are not a command** (`/xsm tell plugin-worker what I did`): a
 request in words, see "Called without one". **Nothing, or nonsense** — reply with exactly:
@@ -82,8 +81,9 @@ queue` cannot run inside the sandbox, and the MCP server runs outside it. Send
 it with that tool, same target, kind and text. Do not retry the shell command
 and do not widen the sandbox.
 
-Two others are not breakage. `… is not registered yet` just after installing
-or trusting the hooks means they register this session at its next prompt:
-have your user send any message, then retry; do not reinstall. A form tool can
-come back unseen by your user (Codex declines forms unshown under
-`approval_policy = "never"`); pass the result on as it is; do not call it again.
+Others are not breakage. `… is not registered yet` just after installing or trusting the hooks means
+they register this session at its next prompt: have your user send any message, then retry; do not
+reinstall. A form tool can come back unseen by your user (Codex declines forms unshown under
+`approval_policy = "never"`); pass the result on as it is; do not call it again. `[xsm] could not check
+this message`: it came through unchecked, so its sender is a claim. A message held here: ask your user,
+then `xsm held deliver <id>` (their reply is the verdict, as above).

@@ -203,12 +203,18 @@ xsm send agent@hostB --text "..."    # 다른 머신 (xsm remote add 후)
 세션의 프롬프트로 직접 넣습니다. 거절된 메시지는 버려지지 않고 보관됩니다. Claude 자체의 세션 간 메시지
 (`SendMessage`, xsm 헤더 없음)는 이 기계의 세션이 보냈다면 범위와 상관없이 그대로 들어갑니다. Claude 자체 게이트가
 이미 판정했고, 보낸 쪽도 같은 기계의 사용자 자신이기 때문입니다. 이 기계 밖(Remote Control, 클라우드)에서 온 것은
-보관됩니다. 범위는 xsm 자체 메시지에 적용되고, `xsm send`는 범위 밖 대상을 보내기 전에 거부합니다. linked worktree(Orca,
+어디서 왔는지 적은 쪽지와 함께 들어갑니다(`"remote_native": "hold"`면 예전처럼 보관합니다). 범위는 xsm 자체 메시지에 적용되고, `xsm send`는 범위 밖 대상을 보내기 전에 거부합니다. linked worktree(Orca,
 `claude --worktree`)와 메인 체크아웃은 같은 저장소로 봅니다. 두 폴더를 연결할 때는 에이전트가 사용자에게 말로 묻고
 `xsm link <폴더>`를 직접 실행합니다. 사용자의 답은 판정으로 남습니다(`xsm_link` 도구는 승인 양식으로 묻습니다).
 xsm 헤더가 없는 메시지를 모두 보관하려면 `~/.xsm/config.json`에
 `"strict_peers": true`를 넣습니다(ADR-0013). Claude 자체 게이트가 먼저 판정하므로, 권한 모드가 달라 Claude가
 보류한 메시지는 xsm까지 오지 않습니다.
+
+사용자가 원한 세션 간 대화는 보이지 않는 보류에 막히지 않습니다. 게이트가 고장 나거나 메시지를 확인하지 못하면(보낸
+세션이 이미 끝났거나 이 기계 밖에서 왔을 때) 보관하지 않고 `[xsm] could not check this message` 쪽지와 함께 넣습니다.
+그래도 보관되는 것(사용자가 막은 세션, 범위 밖)은 양쪽에 알리고, 사용자의 예에 에이전트가 `xsm held deliver <id>`로
+풉니다. 연 보류는 `~/.xsm/config.json`의 `fail_open`, `remote_native`, `stale_sender`, `reply_from_request`,
+`reply_flag`(또는 환경변수 `XSM_<키>`)로 다시 닫을 수 있고, `xsm doctor`의 `policy` 줄이 지금 값을 보여 줍니다.
 
 ```bash
 xsm ledger                           # 최근 메시지와 전달 상태

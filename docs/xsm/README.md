@@ -205,7 +205,7 @@ xsm status <msg-id>
 xsm inbox                         # Codex 세션: 턴 도중 도착한 메시지를 지금 읽는다
                                   # (샌드박스 셸에서 Codex 상대 send는 바로 거부하고 MCP xsm_send를 안내한다)
 xsm ledger
-xsm held list | xsm held show <id>
+xsm held list | xsm held show <id> | xsm held deliver <id>   # deliver: 사용자의 예에 에이전트가 푼다
 xsm doctor | xsm selftest
 ```
 
@@ -268,7 +268,7 @@ xsm unlink ~/src/other-repo  # 누구나 지울 수 있다
 }
 ```
 
-`"strict_peers": true`를 넣으면 xsm 헤더가 없는 피어 메시지(Claude 자체의 `SendMessage`)를 발신자와 범위에 상관없이 모두 보류한다. 기본값은 거짓이다. 이때는 발신 세션을 소켓으로 찾아 xsm 메시지와 같은 범위 검사를 하고, xsm이 모르는 이 기계의 세션(xsm이 없는 프로필 등)이 보낸 것은 통과시키며, 이 기계 밖(Remote Control, 클라우드)에서 온 것은 보류한다(ADR-0013, 2026-09-30 개정).
+`"strict_peers": true`를 넣으면 xsm 헤더가 없는 피어 메시지(Claude 자체의 `SendMessage`)를 발신자와 범위에 상관없이 모두 보류한다. 기본값은 거짓이다. 이때는 발신 세션을 소켓으로 찾아 xsm 메시지와 같은 범위 검사를 하고, xsm이 모르는 이 기계의 세션(xsm이 없는 프로필 등)이 보낸 것은 통과시키며, 이 기계 밖(Remote Control, 클라우드)에서 온 것은 2026-10-01부터 통과시키되 어디서 왔는지 적은 "확인하지 못했다" 문맥을 붙인다(ADR-0013). `"remote_native": "hold"`가 보류하던 9/30 동작이다. 같은 날 연 다른 보류도 `config.json`의 키나 환경변수 `XSM_<대문자 키>`로 되돌린다: `fail_open`(훅이 고장 나면 피어 메시지를 막는다), `stale_sender`(끝난 세션의 메시지를 막는다), `reply_from_request`, `reply_flag`. 지금 값은 `xsm doctor`의 `policy` 줄이 보여 준다(PROTOCOL §3, §5.1~5.3).
 
 범위는 **보낼 때와 받을 때 두 번** 검사한다. 보낼 때 걸리면 메시지는 아예 나가지 않고, 받을 때 걸리면 본문을 보류 저장소에 남기고 차단한다.
 

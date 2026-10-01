@@ -247,7 +247,7 @@ cd $XSM_REPO && xsm list --dir /tmp/xsm-trial
 | 4-7 | 이름 충돌 | 4.2절 | `refused: 2 sessions match` + 후보 목록 |
 | 4-8 | 정지한 상대 | 4.3절 | `refused: only stopped sessions match` |
 | 4-9 | 검문 | 4.4절 | B에서 차단, `xsm held list`에 본문 보관 |
-| 4-10 | 고장 대비 | 관찰 터미널에서 `xsm selftest` | 피어 메시지 차단, 사람 입력 통과 |
+| 4-10 | 고장 대비 | 관찰 터미널에서 `xsm selftest` | 피어 메시지는 "확인하지 못했다" 문맥과 함께 통과(`fail_open`이 거짓이면 차단), 사람 입력은 그대로 통과 |
 | 4-11 | 프로젝트 가입 | 4.5절 | 양쪽이 가입한 뒤에만 `delivered`, 같은 저장소는 계속 기본 프로젝트, 탈퇴하면 다시 `refused` |
 | 4-12 | reach | 4.6절 | 승인한 세션만 그 폴더와 양방향 `delivered`, 같은 폴더의 다른 세션은 계속 `refused`, 거두면 다시 `refused` |
 | 4-13 | link | 4.7절 | 한쪽에서 입력한 `/xsm link`만으로 양식 없이 양쪽 폴더의 세션들이 양방향 `delivered`, 풀면 다시 `refused` |
