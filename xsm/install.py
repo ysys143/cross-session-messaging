@@ -219,19 +219,37 @@ def cli_path() -> str:
 PLUGIN_CACHE = r"/plugins/cache/xsm/xsm/[^/]+/"
 
 
+def _xsm_checkout(inside: str, depth: int, *tail: str) -> bool:
+    """Whether `inside` (a real path) is `<xsm checkout>/<tail>`: the folder `depth`
+    levels up holds xsm's own files, `xsm/__init__.py` and a plugin manifest naming
+    xsm. Another checkout of xsm, a worktree, a clone elsewhere. A plugin version
+    copy has the same files and is the plugin's, so it is not one (2026-10-02)."""
+    parts = inside.split(os.sep)
+    if len(parts) <= depth or tuple(parts[-len(tail):]) != tail:
+        return False
+    root = os.sep.join(parts[:-depth]) or os.sep
+    if re.search(PLUGIN_CACHE, root + "/"):
+        return False
+    manifest = paths.read_json(os.path.join(root, ".claude-plugin", "plugin.json"))
+    return os.path.isfile(os.path.join(root, "xsm", "__init__.py")) and \
+        isinstance(manifest, dict) and manifest.get("name") == PLUGIN_NAME
+
+
 def _own_link(source: str) -> bool:
     """Whether a link to `source` is one this checkout's install may move to the
-    runtime it installs: a link into a snapshot, or to the launcher of the
-    checkout it was copied from (installing from it is asking for what `xsm` on
-    PATH runs, 2026-10-01). Not from a plugin copy, which must never pull a
-    link off a person's working copy or a snapshot."""
+    runtime it installs: a link into a snapshot, to the launcher of the checkout it
+    was copied from (installing from it is asking for what `xsm` on PATH runs,
+    2026-10-01), or to the launcher of any other xsm checkout, a worktree or a clone
+    (2026-10-02: installing from one left the CLI on the old code while the hooks
+    moved). Not from a plugin copy, which must never pull a link off a person's
+    working copy or a snapshot."""
     if runtime_in_place():
         return False
     mine = [os.path.realpath(cli_path())]
     source_checkout = (runtime_current() or {}).get("source")
     if source_checkout:
         mine.append(os.path.realpath(os.path.join(source_checkout, "bin", "xsm")))
-    return source in mine or _under_runtime(source)
+    return source in mine or _under_runtime(source) or _xsm_checkout(source, 2, "bin", "xsm")
 
 
 def remove_cli() -> bool:
@@ -873,9 +891,10 @@ def skill_source() -> str:
 
 def _own_skill_link(real: str) -> bool:
     """Whether a link (its real path) was made by an earlier `xsm install`: into a
-    snapshot, or to the skill of this checkout or of the one the snapshot was
-    copied from. Not from a plugin copy, which must not take a link off a
-    working copy."""
+    snapshot, or to the skill of this checkout, of the one the snapshot was copied
+    from, or of any other xsm checkout (2026-10-02: it was called "something else"
+    and left on the old code). Not from a plugin copy, which must not take a link
+    off a working copy."""
     if _under_runtime(real):
         return True
     if runtime_in_place():
@@ -884,7 +903,7 @@ def _own_skill_link(real: str) -> bool:
     source = (runtime_current() or {}).get("source")
     if source:
         mine.append(os.path.realpath(os.path.join(source, "skills", "xsm")))
-    return real in mine
+    return real in mine or _xsm_checkout(real, 2, "skills", "xsm")
 
 
 def _skill_tree() -> dict:

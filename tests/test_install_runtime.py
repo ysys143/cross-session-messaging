@@ -444,6 +444,131 @@ class SnapshotTest(_Checkout):
                                  '"${PLUGIN_ROOT}/hooks/xsm-hook"')
 
 
+class OtherCheckoutTest(_Checkout):
+    """2026-10-02: installing from a different checkout (a worktree, a clone) left
+    `~/.local/bin/xsm` and `<home>/skills/xsm` "foreign" when they pointed at another
+    xsm checkout, so the hooks and the MCP server moved to the new copy while the CLI
+    and the skill stayed on the old code, and the skill was reported as "something
+    else". A link into any xsm checkout or into the runtime is ours; a real foreign
+    file is still left alone."""
+
+    def _other(self, name="other-xsm", manifest=None, init=True):
+        """Another xsm checkout: what makes it one is `xsm/__init__.py` and a plugin
+        manifest naming xsm; the launcher and the skill are enough for the rest."""
+        root = os.path.join(self.tmp, name)
+        os.makedirs(os.path.join(root, "xsm"))
+        os.makedirs(os.path.join(root, "bin"))
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        os.makedirs(os.path.join(root, "skills", "xsm"))
+        if init:
+            open(os.path.join(root, "xsm", "__init__.py"), "w").close()
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump(manifest or {"name": "xsm"}, fh)
+        with open(os.path.join(root, "bin", "xsm"), "w") as fh:
+            fh.write("#!/bin/sh\n")
+        with open(os.path.join(root, "skills", "xsm", "SKILL.md"), "w") as fh:
+            fh.write("---\nname: xsm\n---\n")
+        return root
+
+    def _cli_link(self):
+        return os.path.join(self.user_home, ".local", "bin", "xsm")
+
+    def test_a_cli_link_into_another_xsm_checkout_moves_to_the_runtime(self):
+        from xsm import install
+        other = self._other()
+        os.makedirs(os.path.dirname(self._cli_link()))
+        os.symlink(os.path.join(other, "bin", "xsm"), self._cli_link())
+        self.assertEqual(install.install_cli(), "replaced")
+        self.assertEqual(os.path.realpath(self._cli_link()), os.path.realpath(install.launcher()))
+        self.assertEqual(install.install_cli(), "current")
+
+    def test_and_so_does_one_into_the_runtime_of_an_earlier_install(self):
+        from xsm import install
+        first = install.make_snapshot()
+        os.makedirs(os.path.dirname(self._cli_link()))
+        os.symlink(os.path.join(first["path"], "bin", "xsm"), self._cli_link())
+        self._edit()
+        install.make_snapshot()
+        self.assertEqual(install.install_cli(), "replaced")
+
+    def test_a_link_to_something_that_is_not_an_xsm_checkout_is_still_foreign(self):
+        from xsm import install
+        os.makedirs(os.path.dirname(self._cli_link()))
+        for name, kw in (("no-manifest-name", {"manifest": {"name": "another-tool"}}),
+                         ("no-package", {"init": False})):
+            with self.subTest(name):
+                other = self._other(name, **kw)
+                if os.path.lexists(self._cli_link()):
+                    os.unlink(self._cli_link())
+                os.symlink(os.path.join(other, "bin", "xsm"), self._cli_link())
+                self.assertEqual(install.install_cli(), "foreign")
+                self.assertEqual(os.readlink(self._cli_link()), os.path.join(other, "bin", "xsm"))
+
+    def test_a_plugin_version_copy_is_not_a_checkout_and_a_plugin_run_takes_nothing(self):
+        from xsm import install
+        plugin = self._other(os.path.join("plugins", "cache", "xsm", "xsm", "0.4.15"))
+        self.assertFalse(install._xsm_checkout(os.path.join(plugin, "bin", "xsm"), 2, "bin", "xsm"))
+        other = self._other()
+        os.makedirs(os.path.dirname(self._cli_link()))
+        os.symlink(os.path.join(other, "bin", "xsm"), self._cli_link())
+        with mock.patch.object(install, "REPO", plugin):
+            self.assertEqual(install.install_cli(), "foreign", "a plugin copy never takes a link")
+        self.assertEqual(os.readlink(self._cli_link()), os.path.join(other, "bin", "xsm"))
+
+    def test_a_skill_link_into_another_xsm_checkout_is_stale_not_something_else(self):
+        from xsm import install
+        other = self._other()
+        home = os.path.join(self.tmp, "claude-skill-other")
+        link = os.path.join(home, "skills", "xsm")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(os.path.join(other, "skills", "xsm"), link)
+        self.assertEqual(install.skill_state(home)[0], "link-stale")
+        self.assertEqual(install.install_skill(home)[0], "link-stale", "plain install says so")
+        self.assertEqual(install.install_skill(home, refresh=True)[0], "linked")
+        self.assertEqual(os.path.realpath(link), os.path.realpath(install.skill_source()))
+
+    def test_a_skill_link_to_a_folder_that_is_no_xsm_checkout_is_left_alone(self):
+        from xsm import install
+        other = self._other("not-xsm", manifest={"name": "another-tool"})
+        home = os.path.join(self.tmp, "claude-skill-foreign")
+        link = os.path.join(home, "skills", "xsm")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(os.path.join(other, "skills", "xsm"), link)
+        self.assertEqual(install.skill_state(home)[0], "foreign")
+        self.assertEqual(install.install_skill(home, refresh=True)[0], "foreign")
+        self.assertEqual(os.readlink(link), os.path.join(other, "skills", "xsm"))
+
+    def test_uninstall_takes_the_skill_link_an_install_from_another_checkout_made(self):
+        from xsm import install
+        other = self._other()
+        home = os.path.join(self.tmp, "claude-skill-un")
+        link = os.path.join(home, "skills", "xsm")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(os.path.join(other, "skills", "xsm"), link)
+        self.assertTrue(install.remove_skill(home))
+        self.assertFalse(os.path.lexists(link))
+
+    def test_the_whole_install_from_the_second_checkout_leaves_nothing_on_the_old_code(self):
+        """The reported mix, end to end: the CLI link and the skill link, with --refresh."""
+        other = self._other()
+        home = os.path.join(self.tmp, "claude-mix")
+        os.makedirs(os.path.join(home, "skills"))
+        os.makedirs(os.path.dirname(self._cli_link()))
+        os.symlink(os.path.join(other, "bin", "xsm"), self._cli_link())
+        os.symlink(os.path.join(other, "skills", "xsm"), os.path.join(home, "skills", "xsm"))
+        code, text = _run_cli("install", "--claude-home", home, "--no-mcp", "--refresh",
+                              "--python", sys.executable)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("is something else", text)
+        self.assertNotIn("something else is at skills/xsm", text)
+        from xsm import install
+        snap = install.runtime_current()
+        self.assertEqual(os.path.realpath(self._cli_link()),
+                         os.path.realpath(os.path.join(snap["path"], "bin", "xsm")))
+        self.assertEqual(os.path.realpath(os.path.join(home, "skills", "xsm")),
+                         os.path.realpath(os.path.join(snap["path"], "skills", "xsm")))
+
+
 class PruneTest(_Checkout):
     def _two(self):
         from xsm import install
