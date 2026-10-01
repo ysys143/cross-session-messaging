@@ -28,12 +28,13 @@ The agent can also ask (user decision, 2026-10-01: "the user is asked, the
 agent does the typing"; and "store the user's approval message as the
 verdict"). When the agent runs `xsm link|join|leave|reach` with no consent,
 the CLI records the request (~/.xsm/asked/<ref>.pending.json) and tells the
-agent to ask its user in plain words. The next message the person types in
-that session is kept on the request, verbatim, as the verdict. The agent reads
-it, and if it is a yes runs the command again, which uses the request up and
-keeps the verdict with what it changed. xsm does not judge the words; it keeps
-them as the record of who decided what. Like typed consent this is inside the
-uid boundary (ADR-0009): a peer message without an envelope looks like typing.
+agent to ask its user in plain words. The person's latest message in that
+session is kept on the request, verbatim, as the verdict. The agent reads it
+in two steps: the first run after a reply refuses and shows it, the next run
+goes ahead and uses the request up, keeping the verdict with what it changed.
+xsm does not judge the words; it keeps them as the record of who decided what.
+Like typed consent this is inside the uid boundary (ADR-0009): a peer message
+without an envelope looks like typing.
 """
 from __future__ import annotations
 
@@ -53,6 +54,16 @@ CODEX_RE = re.compile(r"\A\s*\$xsm[ \t]+(%s)(?![^ \t\n])[ \t]*([^\n]*)" % "|".jo
 ARGS_RE = re.compile(r"\A\s*(%s)(?![^ \t\n])[ \t]*([^\n]*)" % "|".join(VERBS))
 # The plugin's skill may be named with or without its plugin prefix.
 CLAUDE_COMMANDS = ("xsm", "xsm:xsm")
+# What the harness writes into a prompt is not the person answering: a
+# background task's completion, a hook's or a command's echo, a peer message.
+# A task completion was stored as the verdict (measured 2026-10-01). The
+# prefixes are the tags Claude Code and xsm use; any other lowercase-hyphenated
+# tag counts when it is also closed.
+HARNESS_PREFIXES = ("<task-notification", "<system-reminder", "<command-", "<local-command",
+                    "<bash-", "<user-prompt-submit-hook", "<cross-session-message")
+TAG_RE = re.compile(r"\A<([a-z][a-z0-9]*(?:-[a-z0-9]+)+)[\s>]")
+# A slash command (`/clear`, `/model opus`) is not an answer; a path ("/tmp/x") is.
+SLASH_RE = re.compile(r"\A/[A-Za-z][\w:.-]*(?:\s|\Z)")
 
 
 def _path(ref: str) -> str:
@@ -90,6 +101,18 @@ def _write(me: dict | None, verb: str, args: str) -> dict | None:
     return entry
 
 
+def not_a_reply(text: str) -> bool:
+    """True for a prompt that cannot be the person's answer to a request: xsm's
+    own commands, other slash commands, and text the harness injected."""
+    text = text.strip()
+    if text.startswith(("$xsm", "/xsm")) or SLASH_RE.match(text):
+        return True
+    if text.startswith(HARNESS_PREFIXES):
+        return True
+    tag = TAG_RE.match(text)
+    return bool(tag) and "</%s>" % tag.group(1) in text
+
+
 def record(me: dict | None, data: dict) -> dict | None:
     """Keep the person's typed xsm command, from one hook call, as consent for
     this session. Returns what was written, or None when there is none."""
@@ -104,32 +127,41 @@ def record(me: dict | None, data: dict) -> dict | None:
         if envelope.parse(text).peer or envelope.looks_like_peer(text):
             return None
         m = CODEX_RE.match(text) if (me or {}).get("runtime") == "codex" else None
-        if not m and not text.lstrip().startswith(("/xsm", "$xsm")):
+        if not m and not not_a_reply(text):
             note_verdict(me, text)
     else:
         return None
     return _write(me, m.group(1), m.group(2)) if m else None
 
 
-def request(me: dict | None, verb: str, target: str, here: str | None = None) -> None:
+def request(me: dict | None, verb: str, target: str, here: str | None = None) -> bool:
     """Record that the agent asked to `verb` `target` and must ask its user;
-    their next typed message becomes the verdict (note_verdict)."""
+    their latest typed message becomes the verdict (note_verdict). False when
+    the reply cannot be kept here (no registered session, a worker, a state
+    folder that cannot be written), so the caller does not promise it."""
     if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not target:
-        return
+        return False
     cwd = me.get("cwd") or ""
-    paths.write_json(_pending_path(me["ref"]), {
-        "verb": verb, "target": resolve(verb, target, cwd),
-        "here": resolve(verb, here, cwd) if here else None, "cwd": cwd, "t": time.time(),
-        "session_id": str(me.get("session_id") or ""), "verdict": None}, mode=0o600)
+    try:
+        paths.write_json(_pending_path(me["ref"]), {
+            "verb": verb, "target": resolve(verb, target, cwd),
+            "here": resolve(verb, here, cwd) if here else None, "cwd": cwd, "t": time.time(),
+            "session_id": str(me.get("session_id") or ""), "verdict": None}, mode=0o600)
+    except OSError:
+        return False
+    return True
 
 
 def _fresh_pending(me: dict | None) -> tuple:
-    """(path, entry) of this session's unexpired request, or (None, None)."""
+    """(path, entry) of this session's unexpired request, or (None, None). A
+    request without a reply expires TTL after it was made; once the person has
+    replied, TTL after their latest reply."""
     if not me or not me.get("ref"):
         return None, None
     p = _pending_path(me["ref"])
     entry = paths.read_json(p)
-    if not isinstance(entry, dict) or time.time() - float(entry.get("t") or 0) > TTL:
+    if not isinstance(entry, dict) or \
+            time.time() - max(float(entry.get("t") or 0), float(entry.get("verdict_t") or 0)) > TTL:
         return None, None
     if entry.get("session_id") and me.get("session_id") and \
             entry["session_id"] != str(me["session_id"]):
@@ -138,31 +170,62 @@ def _fresh_pending(me: dict | None) -> tuple:
 
 
 def note_verdict(me: dict | None, text: str) -> bool:
-    """Keep the person's first message after a request as its verdict."""
+    """Keep the person's latest message after a request as its verdict. It
+    replaces an earlier one (user decision, 2026-10-01): the first message is
+    often a question ("does that delete the other records too?") and the yes
+    or no comes after it. A new reply has not been shown to the agent yet."""
     p, entry = _fresh_pending(me)
-    if not p or entry.get("verdict") is not None or not text.strip():
+    if not p or not text.strip():
         return False
-    entry.update({"verdict": text.strip()[:1000], "verdict_t": time.time()})
+    entry.update({"verdict": text.strip()[:1000], "verdict_t": time.time(), "shown": False})
     paths.write_json(p, entry, mode=0o600)
     return True
 
 
-def take_verdict(me: dict | None, verb: str, target: str, here: str | None = None) -> str | None:
-    """The person's reply to the request for exactly this, used up; None when
-    there is no such request or they have not answered yet."""
+def take_verdict(me: dict | None, verb: str, target: str, here: str | None = None) -> tuple:
+    """What the person said to the request for exactly this, in two steps
+    (user decision, 2026-10-01: xsm does not read the words, so the agent
+    reads them before anything is done on them). Returns (reply, go):
+    (None, False) when there is no such request or no reply yet; (reply, False)
+    for a reply the agent has not seen, which is marked as shown now and which
+    the caller refuses with; (reply, True) for the reply that was shown and is
+    still the latest, which is used up: the caller goes ahead, once."""
     p, entry = _fresh_pending(me)
     if not p or entry.get("verdict") is None or entry.get("verb") != verb:
-        return None
+        return None, False
     cwd = entry.get("cwd") or (me or {}).get("cwd") or ""
     if resolve(verb, target, (me or {}).get("cwd") or cwd) != entry.get("target"):
-        return None
+        return None, False
     if here and entry.get("here") and resolve(verb, here, cwd) != entry["here"]:
-        return None
+        return None, False
+    if not entry.get("shown"):
+        entry["shown"] = True
+        paths.write_json(p, entry, mode=0o600)
+        return entry["verdict"], False
     try:
         os.unlink(p)
     except OSError:
-        return None                     # used by another reader first
-    return entry["verdict"]
+        return None, False              # used by another reader first
+    return entry["verdict"], True
+
+
+def shown_refusal(reply: str, what: str) -> str:
+    """What the agent is told with a reply it has not seen: the words, and
+    that this run did not go ahead."""
+    return ('your user replied: "%s". If that is a yes to %s, run this same command again to '
+            'go ahead; if it is a no or a question, do not: answer them, and their next '
+            'message replaces it.' % (reply, what[:1].lower() + what[1:]))
+
+
+def cannot_keep(what: str, form_tool: str | None) -> str:
+    """The refusal when no reply can be kept here: say so, and never promise
+    what xsm cannot do (issue #9)."""
+    way = ("If the %s MCP tool is available, use it: it asks them with a form." % form_tool
+           if form_tool and form_tool != "no" else
+           "There is no form tool for this decision.")
+    return ("%s needs your user's yes, but xsm cannot keep their reply in this session (it is "
+            "not a registered session of theirs, or its state cannot be written). %s Otherwise "
+            "tell them plainly that this cannot be decided from here." % (what, way))
 
 
 def take(me: dict | None, verb: str, target: str, here: str | None = None) -> bool:

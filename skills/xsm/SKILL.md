@@ -61,8 +61,8 @@ session alone, until it ends).
 For these four: call the tool once and reply with its result, copied exactly,
 inside one code block. Say your user refused only if it says they chose `deny`.
 If the tool is missing, fails, or the form did not reach them, run the same
-`xsm <command>` in the shell; if it says it needs their yes, ask in plain words
-and run it again when they agree. Never ask your user to type a command.
+`xsm <command>` in the shell; if it says it needs their yes, ask in plain words, run it
+again to see their reply, and again only on a yes. Never ask your user to type a command.
 
 **Words that are not a command** (`/xsm tell plugin-worker what I did`): a
 request in words, see "Called without one". **Nothing, or nonsense** — reply with exactly:

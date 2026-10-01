@@ -376,7 +376,8 @@ class Server:
             raise channel.ChannelError("this client cannot show a form (no elicitation "
                                        "support); ask your user in plain words and run "
                                        "`xsm post --tag decision \"<their decision>\"`: it "
-                                       "keeps their reply as the verdict")
+                                       "keeps their reply as the verdict, shows it to you, "
+                                       "and goes ahead when you run it again on a yes")
         question = (args.get("question") or "").strip()
         # Offered as they will be compared: stripped, no empties, no repeats.
         # " yes " used to be offered as is and then compared stripped, so the
@@ -411,7 +412,9 @@ class Server:
         if "elicitation" not in (self.client_caps or {}):
             raise channel.ChannelError("this client cannot show a form; ask your user in plain "
                                        "words and run `xsm doc add <doc> --tag endorsed --parent "
-                                       "<node> --text \"…\"`: it keeps their reply as the verdict")
+                                       "<node> --text \"…\"`: it keeps their reply as the verdict, "
+                                       "shows it to you, and goes ahead when you run it "
+                                       "again on a yes")
         path = args.get("doc") or ""
         if not os.path.isabs(path):
             path = os.path.join(me.get("cwd") or os.getcwd(), path)
@@ -442,8 +445,9 @@ class Server:
         (consent.py) — never the person typing it (user decision, 2026-10-01)."""
         if "elicitation" not in (self.client_caps or {}):
             raise channel.ChannelError("this client cannot show a form; run `%s` in your "
-                                       "shell instead: it tells you to ask your user and "
-                                       "keeps their reply as the verdict" % command)
+                                       "shell instead: it tells you to ask your user, keeps "
+                                       "their reply as the verdict, shows it to you, and goes "
+                                       "ahead when you run it again on a yes" % command)
         reply = self.ask_client("elicitation/create", {"message": question, "requestedSchema": {
             "type": "object", "properties": {"answer": {"type": "string", "title": "Permission",
                                                         "enum": ["allow", "deny"]}},
@@ -455,7 +459,8 @@ class Server:
             return False, "your user declined: they chose 'deny'; do not work around it"
         return False, ("your user did not answer (%s). If the form did not reach them, ask "
                        "them in plain words and run `%s` in your shell: it keeps their reply "
-                       "as the verdict" % (why, command))
+                       "as the verdict, shows it to you, and goes ahead when you run it "
+                       "again on a yes" % (why, command))
 
     def link(self, me: dict, args: dict) -> str:
         from . import config
@@ -573,7 +578,8 @@ class Server:
         if "elicitation" not in (self.client_caps or {}):
             raise channel.ChannelError("this client cannot show a form; ask your user in plain "
                                        "words and run `xsm approve %s`: it keeps their reply as "
-                                       "the verdict" % shlex.quote(req["id"]))
+                                       "the verdict, shows it to you, and approves when you run "
+                                       "it again on a yes" % shlex.quote(req["id"]))
         allow, deny = "allow", "deny"
         reply = self.ask_client("elicitation/create", {
             "message": "Worker %s is waiting for your permission:\n%s\nAllow it?"
@@ -585,7 +591,8 @@ class Server:
         if answer is None:
             return ("your user did not answer (%s); the request is still waiting and the worker "
                     "is blocked until it is answered. Ask your user in plain words and run "
-                    "`xsm approve %s`: it keeps their reply as the verdict" % (
+                    "`xsm approve %s`: it keeps their reply as the verdict, shows it to "
+                    "you, and approves when you run it again on a yes" % (
                         why, shlex.quote(req["id"])))
         workers.answer_asked(req["id"], answer == allow, me.get("ref"),
                              None if answer == allow else "your user said no")
@@ -618,8 +625,9 @@ class Server:
                 "required": ["answer"]}}) if "elicitation" in (self.client_caps or {}) else None
         if reply is None:
             raise channel.ChannelError("this client cannot show a form; run the same `xsm spawn` "
-                                       "without --grant: it tells you what to ask your user and "
-                                       "keeps their reply as the verdict")
+                                       "without --grant: it tells you what to ask your user, "
+                                       "keeps their reply as the verdict, shows it to you, and "
+                                       "starts the worker when you run it again on a yes")
         answer, why = self.answer(reply, [deny, allow])
         if answer is None:
             # Nobody chose, so there is no decision to put on record.

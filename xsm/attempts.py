@@ -122,7 +122,8 @@ def check(key: str, limit: int) -> None:
     raise AttemptsError(
         "task-attempts-exhausted: this task has failed %d times in this folder (%s). "
         "Sending it again the same way gets the same answer. Tell your user what failed and "
-        "what the worker said it needed; a person clears it with `xsm attempts clear %s`."
+        "what the worker said it needed, then run `xsm attempts clear %s`: it tells you what "
+        "to ask them, and goes ahead on their yes."
         % (failed, history, key))
 
 

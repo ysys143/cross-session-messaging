@@ -666,7 +666,7 @@ A의 셸 모드(`!`)로 실행하면 모델 턴 없이 명령만 돈다. 10-6은
 |---|---|---|---|
 | 10-1 | 프레임워크 안 | Orca 터미널에서 `xsm spawn claude` | `refused: this terminal belongs to orca, …` |
 | 10-2 | 헤드리스 Claude + 승인 | `! xsm spawn claude --headless --model haiku --name hw1 --once --task 'Write 도구로 작업 폴더에 result.txt를 만들고 42를 넣어. 한 줄로 보고해.'` | `started hw1 … headless`, `task …: delivered`. A에 "hw1 is waiting for approval [id] Write: …" 알림이 오고, A의 에이전트는 승인하지 않는다 |
-| 10-2a | 승인은 사람만 | 에이전트에게 `xsm approve <id>`를 시키거나 셸 도구로 실행 | `refused: approving needs a person at a terminal` |
+| 10-2a | 승인은 사람의 답으로만 | 에이전트에게 `xsm approve <id>`를 시키거나 셸 도구로 실행 | 먼저 `refused: … needs your user's yes. Ask them now, …`. 사용자가 답하면 한 번 더 실행했을 때 `your user replied: "…"`를 보여 주고 거부하며, 그다음 실행에서 승인한다(§5.3.3). 이 워커를 시작하지 않은 세션이 실행하면 `belongs to a worker another session started` |
 | 10-2b | 사람이 승인 | 일반 터미널에서 `xsm approve <id>`, `yes` 입력(또는 `xsm attach hw1`에서 y) | 파일이 생기고 A에 답장이 오고, `xsm workers`가 `no workers`(once) |
 | 10-3 | tmux 패널 Claude | `! xsm spawn claude --model haiku --name pw1 --once --task '6*7을 계산해 숫자만 보고해'` | A 옆에 패널이 생기고 TUI 워커가 과제를 받아 42로 답한 뒤 패널이 닫힌다 |
 | 10-4 | 헤드리스 Codex | `! xsm spawn codex --headless --name cw1 --once --task '6*7을 계산해 숫자만 보고해'` | `model gpt-5.6-luna`, 답장 42가 A에 도착(pump가 대신 보낸다), 워커가 사라진다 |

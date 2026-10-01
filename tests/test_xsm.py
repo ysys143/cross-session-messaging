@@ -948,6 +948,80 @@ class FormToolPermissionTest(TempState):
         self.assertEqual(sorted(paths.read_json(os.path.join(home, "settings.json"))
                                 ["permissions"]["allow"]), sorted(install.form_tool_names()))
 
+    def test_only_the_commands_that_ask_are_allowed(self):
+        """Review, 2026-10-01: spawn, post and doc add mostly ask no one, so
+        the classifier keeps seeing them. The plugin's skill is named xsm:xsm."""
+        from xsm import install
+        names = install.form_tool_names()
+        for command in ("link", "reach", "join", "leave", "unblock", "approve",
+                        "attempts clear", "frameworks ignore", "remote add"):
+            self.assertIn("Bash(xsm %s:*)" % command, names)
+        for command in ("spawn", "post", "doc add"):
+            self.assertNotIn("Bash(xsm %s:*)" % command, names)
+        self.assertIn("Skill(xsm)", names)
+        self.assertIn("Skill(xsm:xsm)", names)
+
+    def test_a_rule_the_user_already_had_is_not_removed(self):
+        """A rule the user wrote looks exactly like one xsm added: only what
+        xsm added is taken back (review, 2026-10-01)."""
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "had-some")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        mine = ["Bash(xsm unblock:*)", "Skill(xsm)", "Bash(ls:*)"]
+        paths.write_json(target, {"permissions": {"allow": list(mine)}})
+        self.assertEqual(install.allow_form_tools(home), "added")
+        allow = paths.read_json(target)["permissions"]["allow"]
+        self.assertEqual(allow[:3], mine, "theirs stay where they were")
+        self.assertIn("Skill(xsm:xsm)", allow)
+        self.assertEqual(install.missing_form_tools(home), [])
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], mine)
+        self.assertFalse(install.remove_form_tools(home))
+
+    def test_when_everything_was_already_there_nothing_is_removed(self):
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "had-all")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": install.form_tool_names()}})
+        self.assertEqual(install.allow_form_tools(home), "already")
+        self.assertFalse(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"],
+                         install.form_tool_names())
+
+    def test_a_home_from_before_the_note_loses_the_known_names_as_it_did(self):
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "old-install")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] +
+                                                  install.form_tool_names()}})
+        self.assertEqual(os.listdir(paths.path(install.ALLOWED)) if os.path.isdir(
+            paths.path(install.ALLOWED)) else [], [], "no note: an earlier version added these")
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
+
+    def test_doctor_names_a_claude_home_without_the_allow_rules(self):
+        """A home with only the plugin never ran `xsm install`, so nothing put
+        the rules there. Doctor says so, and who can fix it: the agent."""
+        from xsm import cli, config, install
+        home = os.path.join(self.tmp, "plugin-only")
+        os.makedirs(home)
+        config.add_home(home, "claude")
+        self.assertIn("Skill(xsm:xsm)", install.doctor()["allow_missing"][os.path.realpath(home)])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["doctor"])
+        line = next(l for l in out.getvalue().splitlines() if l.startswith("allow "))
+        self.assertIn("Your agent can add them by running `xsm install --refresh`", line)
+        self.assertNotIn("type", line)
+        install.allow_form_tools(home)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertNotIn("\nallow ", out.getvalue())
+
 
 class WorktreeScopeTest(TempState):
     """Issue #8 follow-up: a linked worktree (Orca, `claude --worktree`) and its
@@ -1807,6 +1881,15 @@ class CodexInboxTest(TempState):
     def _send(self, text="hello"):
         from xsm import send
         return send.send("b", text, sender=self.a)
+
+    def test_a_blocked_target_says_who_lifts_the_block_and_how(self):
+        """Issue #9: not "only a person can", which sent the user to a terminal."""
+        from xsm import config
+        config.block(self.b["ref"])
+        r = self._send()
+        self.assertEqual(r.status, "refused")
+        self.assertIn("ask your user and run `xsm unblock %s`" % self.b["ref"], r.reason)
+        self.assertNotIn("only a person", r.reason)
 
     def test_a_message_waits_and_is_read_once(self):
         from xsm import inbox, ledger, receive

@@ -595,10 +595,15 @@ def statusline_command(base: str | None = None) -> str:
     return "%s statusline%s %s" % (launcher(), extra, MARKER)
 
 
-def _base_path(target: str) -> str:
+def _state_file(kind: str, target: str) -> str:
+    """xsm's own note about one settings file, kept under the state folder."""
     import hashlib
     key = hashlib.sha256(os.path.realpath(target).encode()).hexdigest()[:16]
-    return paths.path(STATUSLINE_BASE, key + ".json")
+    return paths.path(kind, key + ".json")
+
+
+def _base_path(target: str) -> str:
+    return _state_file(STATUSLINE_BASE, target)
 
 
 def statusline_base(target: str) -> dict | None:
@@ -668,50 +673,81 @@ FORM_TOOL_PREFIXES = ("mcp__xsm__", "mcp__plugin_xsm_xsm__")
 
 # The same refusal hit the other road to a yes: auto mode denied the xsm skill
 # and `xsm unblock` as a bypass before xsm could ask the person (issue #9,
-# measured 2026-10-01). These commands ask the person and wait for their reply
-# when it is theirs to decide, so allowing the call lets them ask.
+# measured 2026-10-01). These commands exist to put a person's decision to
+# them: each refuses and tells the agent to ask until the person has replied.
+# Allowing the call lets them ask. Commands that mostly ask no one (spawn,
+# post, doc add) are left to the classifier (review, 2026-10-01). The plugin's
+# skill is named `xsm:xsm` when Claude calls it (the skills documentation:
+# plugin skills are namespaced), the directly installed one `xsm`.
 ASKING_COMMANDS = ("link", "reach", "join", "leave", "unblock", "approve", "attempts clear",
-                   "frameworks ignore", "post", "doc add", "spawn", "remote add")
+                   "frameworks ignore", "remote add")
+ALLOWED = "allowed"           # one note per settings file: what xsm added to its allow list
 
 
 def form_tool_names() -> list:
     return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in FORM_TOOLS] + \
-        ["Skill(xsm)"] + ["Bash(xsm %s:*)" % c for c in ASKING_COMMANDS]
+        ["Skill(xsm)", "Skill(xsm:xsm)"] + ["Bash(xsm %s:*)" % c for c in ASKING_COMMANDS]
+
+
+def _allow_list(data) -> list:
+    perms = (data or {}).get("permissions")
+    allow = perms.get("allow") if isinstance(perms, dict) else None
+    return allow if isinstance(allow, list) else []
+
+
+def missing_form_tools(home: str) -> list:
+    """What `allow_form_tools` would add: the rules this Claude home lacks."""
+    allow = _allow_list(paths.read_json(_settings_file(home, "claude")))
+    return [n for n in form_tool_names() if n not in allow]
 
 
 def allow_form_tools(home: str) -> str:
-    """Add the form tools to this Claude home's permissions.allow: added | already."""
+    """Add the form tools to this Claude home's permissions.allow: added | already.
+
+    What is added is noted (ALLOWED), because a rule the user already had looks
+    exactly like one xsm put there and `remove_form_tools` must not take theirs.
+    The note is made on the first call even when nothing needed adding."""
     target = _settings_file(home, "claude")
     data = paths.read_json(target, {}) or {}
     perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
     allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
     missing = [n for n in form_tool_names() if n not in allow]
-    if not missing:
-        return "already"
-    if os.path.exists(target):
-        _backup(target)
-    perms["allow"] = allow + missing
-    data["permissions"] = perms
-    paths.write_json(target, data, mode=0o644)
-    return "added"
+    note = paths.read_json(_state_file(ALLOWED, target))
+    added = list(note.get("added") or []) if isinstance(note, dict) else []
+    if missing:
+        if os.path.exists(target):
+            _backup(target)
+        perms["allow"] = allow + missing
+        data["permissions"] = perms
+        paths.write_json(target, data, mode=0o644)
+        added += [n for n in missing if n not in added]
+    if missing or not isinstance(note, dict):
+        paths.write_json(_state_file(ALLOWED, target), {"file": target, "added": added})
+    return "added" if missing else "already"
 
 
 def remove_form_tools(home: str) -> bool:
-    """Take out exactly the entries allow_form_tools put in."""
+    """Take out the entries allow_form_tools put in, and only those. A home
+    from before the note existed has none, so the known names go, as they did."""
     target = _settings_file(home, "claude")
     data = paths.read_json(target)
-    perms = (data or {}).get("permissions")
-    allow = perms.get("allow") if isinstance(perms, dict) else None
-    if not isinstance(allow, list):
+    if not isinstance(data, dict):
         return False
-    names = set(form_tool_names())
+    allow = _allow_list(data)
+    note_path = _state_file(ALLOWED, target)
+    note = paths.read_json(note_path)
+    names = set(note["added"]) if isinstance(note, dict) and isinstance(note.get("added"), list) \
+        else set(form_tool_names())
     kept = [n for n in allow if n not in names]
-    if len(kept) == len(allow):
-        return False
-    _backup(target)
-    perms["allow"] = kept
-    paths.write_json(target, data, mode=0o644)
-    return True
+    if len(kept) != len(allow):
+        _backup(target)
+        data["permissions"]["allow"] = kept
+        paths.write_json(target, data, mode=0o644)
+    if isinstance(note, dict):
+        # Emptied, not deleted: with no note a second uninstall would fall back
+        # to the known names and take the rules the user had.
+        paths.write_json(note_path, {"file": target, "added": []})
+    return len(kept) != len(allow)
 
 
 def retired_commands(home: str) -> list:
@@ -978,6 +1014,8 @@ def doctor() -> dict:
         "plugins": {h["path"]: plugin_installed(h["path"]) for h in homes},
         "plugin_missing_hooks": {h["path"]: plugin_missing_hooks(h["path"]) for h in homes
                                  if h.get("runtime") == "claude"},
+        "allow_missing": {h["path"]: missing_form_tools(h["path"]) for h in homes
+                          if h.get("runtime") == "claude"},
         "stale": {h["path"]: stale_copies(h["path"], h.get("runtime") or "claude")
                   for h in homes},
         "leftovers": {h["path"]: leftovers(h["path"]) for h in homes},

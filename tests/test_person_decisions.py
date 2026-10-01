@@ -41,6 +41,13 @@ class PersonDecisionTest(TempState):
         self.assertNotIn("in a terminal", text)
         return text
 
+    def _shows(self, argv, reply):
+        """The first run after a reply shows it and does not go ahead (2026-10-01)."""
+        code, text = self._cli(argv)
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "%s"' % reply, text)
+        return text
+
     def test_approving_a_workers_request(self):
         from xsm import paths, workers
         workers.save({"name": "w1", "runtime": "claude", "mode": "background", "pane": "%1",
@@ -51,6 +58,8 @@ class PersonDecisionTest(TempState):
         text = self._asks(["approve", "r1"])
         self.assertIn("rm -rf build", text, "the agent can put the exact question")
         self._reply("응 허용")
+        self._shows(["approve", "r1"], "응 허용")
+        self.assertEqual((paths.read_json(workers._approval_path("r1")) or {})["status"], "pending")
         code, text = self._cli(["approve", "r1"])
         self.assertEqual(code, 0, text)
         done = paths.read_json(workers._approval_path("r1")) or {}
@@ -72,6 +81,10 @@ class PersonDecisionTest(TempState):
         self.assertIn("FULL ACCESS", str(cm.exception))
         self.assertIn("needs your user's yes", str(cm.exception))
         self._reply("yes, full access is fine this once")
+        with self.assertRaises(workers.WorkerError) as cm:
+            workers.use_grant(None, self.me, "codex", self.tmp, ["full_access"])
+        self.assertIn('your user replied: "yes, full access is fine this once"',
+                      str(cm.exception), "shown first, not acted on")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             grant = workers.use_grant(None, self.me, "codex", self.tmp, ["full_access"])
@@ -88,6 +101,8 @@ class PersonDecisionTest(TempState):
         attempts.finish(key, "failed", "needs network", "t1")
         self._asks(["attempts", "clear", key])
         self._reply("ok clear it")
+        self._shows(["attempts", "clear", key], "ok clear it")
+        self.assertTrue(attempts.read(key))
         self.assertEqual(self._cli(["attempts", "clear", key])[0], 0)
         self.assertFalse(attempts.read(key))
 
@@ -95,6 +110,8 @@ class PersonDecisionTest(TempState):
         from xsm import config
         self._asks(["frameworks", "ignore", "orca"])
         self._reply("그래")
+        self._shows(["frameworks", "ignore", "orca"], "그래")
+        self.assertNotIn("orca", config.ignored_frameworks())
         self.assertEqual(self._cli(["frameworks", "ignore", "orca"])[0], 0)
         self.assertIn("orca", config.ignored_frameworks())
 
@@ -103,6 +120,8 @@ class PersonDecisionTest(TempState):
         config.block("dddddd")
         self._asks(["unblock", "dddddd"])
         self._reply("unblock it")
+        self._shows(["unblock", "dddddd"], "unblock it")
+        self.assertIn("dddddd", config.blocked())
         self.assertEqual(self._cli(["unblock", "dddddd"])[0], 0)
         self.assertNotIn("dddddd", config.blocked())
 
@@ -110,6 +129,7 @@ class PersonDecisionTest(TempState):
         from xsm import channel
         self._asks(["post", "--tag", "decision", "ship on friday"])
         self._reply("yes, friday")
+        self._shows(["post", "--tag", "decision", "ship on friday"], "yes, friday")
         code, text = self._cli(["post", "--tag", "decision", "ship on friday"])
         self.assertEqual(code, 0, text)
         where = channel.resolve(self.tmp, None)
@@ -127,6 +147,7 @@ class PersonDecisionTest(TempState):
                 "--text", "cache is 2x faster"]
         self._asks(argv)
         self._reply("맞아, 보증해")
+        self._shows(argv, "맞아, 보증해")
         code, text = self._cli(argv)
         self.assertEqual(code, 0, text)
         endorsed = [n for n in doc.read(path) if "endorsed" in (n.get("tags") or [])][-1]
@@ -143,10 +164,184 @@ class PersonDecisionTest(TempState):
         self._asks(["unblock", "eeeeee"])
 
     def test_no_message_for_these_sends_the_person_to_a_terminal(self):
-        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "xsm")
-        for name in ("cli.py", "mcp.py", "workers.py"):
-            with open(os.path.join(root, name), encoding="utf-8") as fh:
-                self.assertNotIn("in a terminal", fh.read(), name)
+        """User decision, 2026-10-01: the agent asks and runs the command; no
+        text of ours tells a person to go and type one. Every phrase that did
+        is named here; a place where a person at a terminal really is the
+        subject is listed below, explicitly."""
+        import re
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        files = [os.path.join("xsm", n) for n in sorted(os.listdir(os.path.join(repo, "xsm")))
+                 if n.endswith(".py")] + [
+            os.path.join("skills", "xsm", "SKILL.md"),
+            os.path.join("skills", "xsm", "references", "guide.md"), "README.md", "README_ko.md"]
+        phrases = ("in a terminal", "needs a terminal", "only a person can", "a person clears",
+                   "(a person only)", "a person only", "needs a person", "a person can lift")
+        # (file, text around the phrase): a person typing at a terminal is the point.
+        genuine = (("xsm/otlp_export.py", "A person runs this in a terminal"),
+                   ("README.md", "The same commands work in a terminal as"),
+                   ("README.md", "# or in a terminal"))
+        for name in files:
+            with open(os.path.join(repo, name), encoding="utf-8") as fh:
+                text = fh.read()
+            # Adjacent string literals and wrapped lines read as one line.
+            text = re.sub(r'"\s*\n\s*"', "", text)
+            text = re.sub(r"\s*\n\s*(#\s*)?", " ", text)
+            for phrase in phrases:
+                for m in re.finditer(re.escape(phrase), text):
+                    around = text[max(0, m.start() - 60):m.end() + 60]
+                    if any(name.replace(os.sep, "/") == f and ok in around for f, ok in genuine):
+                        continue
+                    self.fail("%s still says %r: ...%s..." % (name, phrase, around))
+
+    def test_a_task_notification_is_never_the_reply(self):
+        """Measured 2026-10-01: a background task's completion arrived through
+        UserPromptSubmit and was stored as the verdict."""
+        self._asks(["unblock", "ffffff"])
+        for text in ("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+                     "</task-notification>",
+                     "<system-reminder>Hook says hi</system-reminder>",
+                     "<command-name>/clear</command-name>\n<command-message>clear</command-message>",
+                     "<local-command-stdout>ok</local-command-stdout>",
+                     "<bash-input>ls</bash-input>",
+                     "<user-prompt-submit-hook>x</user-prompt-submit-hook>",
+                     "<some-new-tag attr=\"1\">anything</some-new-tag>"):
+            with self.subTest(text=text[:30]):
+                self._reply(text)
+                self._asks(["unblock", "ffffff"])
+        self._reply("<br-tag> 이건 닫는 태그가 없는 사람의 말")
+        self._shows(["unblock", "ffffff"], "<br-tag> 이건 닫는 태그가 없는 사람의 말")
+
+    def test_a_slash_command_is_not_the_reply(self):
+        self._asks(["unblock", "aaaaaa"])
+        for text in ("/clear", "/model opus", "/compact  keep the tests", "/xsm list"):
+            with self.subTest(text=text):
+                self._reply(text)
+                self._asks(["unblock", "aaaaaa"])
+        self._reply("/tmp/x 에서 풀어도 돼")            # a path is a person talking
+        self._shows(["unblock", "aaaaaa"], "/tmp/x 에서 풀어도 돼")
+
+    def test_the_latest_reply_is_the_verdict(self):
+        """A clarifying question first, the yes after it: the yes decides, and
+        a no after a yes does too."""
+        from xsm import config
+        config.block("bbbbbb")
+        self._asks(["unblock", "bbbbbb"])
+        self._reply("이거 풀면 다른 기록도 같이 풀려?")
+        self._reply("응")
+        self._shows(["unblock", "bbbbbb"], "응")
+        self.assertEqual(self._cli(["unblock", "bbbbbb"])[0], 0)
+        self.assertNotIn("bbbbbb", config.blocked())
+
+    def test_a_reply_is_shown_before_it_can_pass(self):
+        from xsm import config
+        config.block("cccccc")
+        self._asks(["unblock", "cccccc"])
+        self._reply("아니 풀지 마")
+        self._shows(["unblock", "cccccc"], "아니 풀지 마")
+        self.assertIn("cccccc", config.blocked(), "showing is not going ahead")
+        self.assertEqual(self._cli(["unblock", "cccccc"])[0], 0, "the next run goes ahead")
+
+    def test_a_new_reply_after_it_was_shown_must_be_shown_too(self):
+        from xsm import config
+        config.block("dddddd")
+        self._asks(["unblock", "dddddd"])
+        self._reply("응")
+        self._shows(["unblock", "dddddd"], "응")
+        self._reply("아 잠깐, 아니야 풀지 마")
+        self._shows(["unblock", "dddddd"], "아 잠깐, 아니야 풀지 마")
+        self.assertIn("dddddd", config.blocked())
+        self.assertEqual(self._cli(["unblock", "dddddd"])[0], 0)
+        self.assertNotIn("dddddd", config.blocked())
+
+    def test_a_verdict_is_used_once(self):
+        from xsm import config
+        config.block("eeeeee")
+        self._asks(["unblock", "eeeeee"])
+        self._reply("응")
+        self._shows(["unblock", "eeeeee"], "응")
+        self.assertEqual(self._cli(["unblock", "eeeeee"])[0], 0)
+        config.block("eeeeee")
+        self._asks(["unblock", "eeeeee"])
+        self.assertIn("eeeeee", config.blocked())
+
+    def test_the_window_counts_from_the_reply_but_an_unanswered_ask_still_expires(self):
+        import time
+        from xsm import consent, paths
+        self._asks(["unblock", "abcabc"])
+        pending = consent._pending_path(self.me["ref"])
+        entry = paths.read_json(pending)
+        entry["t"] = time.time() - consent.TTL - 60            # asked long ago, unanswered
+        paths.write_json(pending, entry)
+        self._reply("응")
+        self.assertIsNone(paths.read_json(pending).get("verdict"), "an expired ask keeps nothing")
+        entry["t"] = time.time() - consent.TTL + 5             # asked just inside the window
+        paths.write_json(pending, entry)
+        self._reply("응")
+        entry = paths.read_json(pending)
+        self.assertEqual(entry["verdict"], "응")
+        entry["t"] = time.time() - consent.TTL - 60            # the reply is what is counted
+        entry["verdict_t"] = time.time() - 5
+        paths.write_json(pending, entry)
+        self._shows(["unblock", "abcabc"], "응")
+        entry = paths.read_json(pending)
+        entry["verdict_t"] = time.time() - consent.TTL - 5     # a reply this old is stale too
+        paths.write_json(pending, entry)
+        self._asks(["unblock", "abcabc"])
+
+    def test_only_the_session_that_started_the_worker_approves_on_a_reply(self):
+        from xsm import paths, workers
+        workers.save({"name": "w3", "runtime": "claude", "mode": "background", "pane": "%3",
+                      "cwd": self.tmp, "created": 0, "parent_ref": "someone"})
+        paths.write_json(workers._approval_path("r3"), {
+            "id": "r3", "worker": "w3", "summary": "Bash: ls", "status": "pending", "t": 0})
+        code, text = self._cli(["approve", "r3"])
+        self.assertEqual(code, 2)
+        self.assertIn("another session started", text)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "asked", "abc123.pending.json")),
+                         "no ask for what this session may not do")
+        self.assertEqual((paths.read_json(workers._approval_path("r3")) or {})["status"],
+                         "pending")
+
+    def test_a_reply_that_cannot_be_kept_is_not_promised(self):
+        """No registered session, a worker, or a state folder that cannot be
+        written: say so, point at the form tool, never at a keyboard."""
+        from xsm import consent
+        for label, me, env in (("no session", None, {}),
+                               ("a worker", self.me, {"XSM_WORKER": "w1"})):
+            with self.subTest(label), mock.patch.dict(os.environ, env):
+                self.me = me
+                code, text = self._cli(["join", "demo"])
+                self.assertEqual(code, 2, text)
+                self.assertIn("cannot keep their reply", text)
+                self.assertIn("xsm_join MCP tool", text)
+                self.assertNotIn("is kept as the verdict", text)
+                self.assertNotIn("type", text)
+
+    def test_a_state_folder_that_cannot_be_written_does_not_raise(self):
+        from xsm import consent, paths
+        with mock.patch.object(paths, "write_json", side_effect=PermissionError("denied")):
+            self.assertFalse(consent.request(self.me, "unblock", "abcabc"))
+        self.assertTrue(consent.request(self.me, "unblock", "abcabc"))
+        with mock.patch.object(paths, "write_json", side_effect=PermissionError("denied")):
+            code, text = self._cli(["unblock", "abcabc"])
+        self.assertEqual(code, 2, text)
+        self.assertIn("cannot keep their reply", text)
+
+    def test_a_spawn_that_cannot_keep_the_reply_says_so(self):
+        from xsm import workers
+        with self.assertRaises(workers.WorkerError) as cm:
+            workers.use_grant(None, None, "codex", self.tmp, ["full_access"])
+        self.assertIn("cannot keep their reply", str(cm.exception))
+        self.assertIn("xsm_grant MCP tool", str(cm.exception))
+
+    def test_frameworks_ignore_needs_a_name(self):
+        code, text = self._cli(["frameworks", "ignore"])
+        self.assertEqual(code, 4, text)
+        self.assertIn("usage: xsm frameworks ignore", text)
+        self.assertNotIn("None", text)
+        code, text = self._cli(["frameworks", "ignore", "nosuch"])
+        self.assertEqual(code, 4, text)
+        self.assertIn("unknown framework", text)
 
 
 if __name__ == "__main__":

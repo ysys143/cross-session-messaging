@@ -310,10 +310,12 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
 
     Asking is the agent's job and the typing too (user decision, 2026-10-01:
     never send the person off to type a command). Without consent the request
-    is recorded, the agent is told to ask in plain words, and the person's
-    next message in that session is kept as the verdict; running the same
-    command again uses it. `ask` = (verb, target) does the same for the
-    decisions nobody types as an /xsm command (approve, unblock, …)."""
+    is recorded and the agent is told to ask in plain words. The person's
+    latest message in that session is kept as the verdict, and running the
+    same command again shows the agent that reply without acting on it (a
+    question or a no is not a yes); the run after that goes ahead, once.
+    `ask` = (verb, target) does the same for the decisions nobody types as an
+    /xsm command (approve, unblock, …)."""
     global _verdict
     _verdict = None
     if workers.human_terminal():
@@ -325,7 +327,9 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
     if not key:
         return ("%s is your user's decision: ask them in plain words, then run this again"
                 % what)
-    verdict = consent.take_verdict(me, *key)
+    verdict, go = consent.take_verdict(me, *key)
+    if verdict is not None and not go:
+        return consent.shown_refusal(verdict, what)
     if verdict is not None:
         _verdict = verdict
         paths.append_jsonl("decisions.jsonl", {
@@ -333,12 +337,15 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
             "by": (me or {}).get("name")})
         print('approved on your user\'s reply: "%s"' % verdict.replace("\n", " ")[:200])
         return None
-    consent.request(me, *key)
+    if not consent.request(me, *key):
+        return consent.cannot_keep(what, mcp_tool)
     tool = " (The %s MCP tool asks with a form instead.)" % mcp_tool \
         if mcp_tool and mcp_tool != "no" else ""
     return ("%s needs your user's yes. Ask them now, in plain words, whether to go ahead with "
-            "it. Their next message in this session is kept as the verdict: if they agree, run "
-            "this same command again; if not, leave it.%s" % (what, tool))
+            "it. Their latest reply in this session is kept as the verdict: run this same "
+            "command again and it shows you that reply without acting on it; if it is a yes, "
+            "run it once more to go ahead, and if it is a no or a question, leave it and "
+            "answer them.%s" % (what, tool))
 
 
 def cmd_join(args) -> int:
@@ -534,17 +541,22 @@ def cmd_block(args) -> int:
 
 def cmd_frameworks(args) -> int:
     """Whether xsm starts workers inside Orca or herdr. By default it does not
-    (the framework owns them); a person can lift that per framework."""
-    if args.action == "ignore":
-        why = _person_or_refuse("letting xsm start workers inside %s" % args.name, "no",
-                                ask=("frameworks-ignore", args.name or ""))
-        if why:
-            print("refused: %s" % why, file=sys.stderr)
-            return REFUSED
+    (the framework owns them); your user can lift that per framework: the agent
+    asks them and runs `xsm frameworks ignore <name>`."""
     if args.action in ("ignore", "respect"):
         if not args.name:
             print("usage: xsm frameworks %s orca|herdr|all" % args.action, file=sys.stderr)
             return USAGE
+        if args.action == "ignore":
+            if args.name not in config.FRAMEWORK_NAMES + ("all",):   # before anyone is asked
+                print("unknown framework %r: one of %s, or all" % (
+                    args.name, ", ".join(config.FRAMEWORK_NAMES)), file=sys.stderr)
+                return USAGE
+            why = _person_or_refuse("letting xsm start workers inside %s" % args.name, "no",
+                                    ask=("frameworks-ignore", args.name))
+            if why:
+                print("refused: %s" % why, file=sys.stderr)
+                return REFUSED
         try:
             changed = config.set_framework_ignored(args.name, args.action == "ignore")
         except ValueError as exc:
@@ -1047,6 +1059,9 @@ def cmd_doctor(args) -> int:
             missing = (report.get("plugin_missing_hooks") or {}).get(home)
             print("plugin     %-45s xsm %s%s" % (_home_tilde(home), plugin, (
                 "  " + install.plugin_outdated_note(missing)) if missing else ""))
+    for home, missing in (report.get("allow_missing") or {}).items():
+        if missing:
+            print("allow      %s" % _allow_note(home, missing))
     for home, files in (report.get("stale") or {}).items():
         if files:
             print("stale      %s: %d file(s) behind the repo; refresh with `xsm install --refresh`"
@@ -1079,8 +1094,9 @@ def _stuck_lines(stuck: dict) -> list:
     """What is waiting on someone. Each of these cost an investigation once."""
     lines = []
     for req in stuck.get("approvals") or []:
-        lines.append("%s has waited %ds for a person: %s (xsm approve %s)" % (
-            req.get("worker"), req.get("waiting_s"), req.get("tool"), req.get("id")))
+        lines.append("%s has waited %ds for a yes or no from you: %s (the session that "
+                     "started it asks you and runs `xsm approve %s`)" % (
+                         req.get("worker"), req.get("waiting_s"), req.get("tool"), req.get("id")))
     for row in stuck.get("undelivered") or []:
         lines.append("%s -> %s is still queued: %s" % (
             (row.get("from") or {}).get("name"), (row.get("to") or {}).get("name"), row.get("id")))
@@ -1110,6 +1126,16 @@ def _orphan_note(pid: int, folder: str) -> str:
                 "restart that session to use the installed version" % (pid, version))
     return ("xsm MCP server pid %d runs from %s, which was removed; its xsm tools fail until "
             "that session restarts" % (pid, _home_tilde(folder)))
+
+
+def _allow_note(home: str, missing: list) -> str:
+    """A Claude home whose settings lack the rules that let the agent ask
+    (issue #9): auto mode can refuse the skill or the command before xsm asks.
+    Only `xsm install --refresh` writes them (never a hook), and the agent runs it."""
+    return ("%s: %d xsm allow rule(s) missing from settings.json (the skill, the approval "
+            "forms, the commands that ask you), so Claude's auto mode can stop the agent before "
+            "xsm asks you. Your agent can add them by running `xsm install --refresh`"
+            % (_home_tilde(home), len(missing)))
 
 
 def _native_note(report: dict) -> str:
@@ -1147,6 +1173,9 @@ def _doctor_rows(report: dict) -> list:
         if missing:
             rows.append(("plugin", "%s: %s" % (_home_tilde(home),
                                                install.plugin_outdated_note(missing))))
+    for home, missing in (report.get("allow_missing") or {}).items():
+        if missing:
+            rows.append(("allow", _allow_note(home, missing)))
     for home, files in (report.get("stale") or {}).items():
         if files:
             rows.append(("stale", "%s: %d file(s) behind; refresh with `xsm install --refresh`"
@@ -1478,7 +1507,15 @@ def cmd_answer(args) -> int:
         req = next((r for r in workers.approvals() if r["id"] == args.id), None)
         if req and not workers.human_terminal():
             # The agent asks and runs it; their reply is the decision (user
-            # decision, 2026-10-01). Denying narrows, so anyone may.
+            # decision, 2026-10-01). Denying narrows, so anyone may. Only the
+            # session that started the worker asks about it, as MCP
+            # `xsm_approve` does (workers.answer_asked).
+            caller_ref = (registry.me() or {}).get("ref")
+            if not caller_ref or caller_ref != \
+                    (workers.load(req.get("worker") or "") or {}).get("parent_ref"):
+                print("refused: request %s belongs to a worker another session started; only "
+                      "that session asks its user about it" % req["id"], file=sys.stderr)
+                return REFUSED
             why = _person_or_refuse("approving worker %s's request [%s]: %s" % (
                 req["worker"], req["id"], req["summary"]), "xsm_approve",
                 ask=("approve", req["id"]))
@@ -1762,7 +1799,7 @@ def build_parser() -> argparse.ArgumentParser:
     po = sub.add_parser("post", help="post to this project's channel (the shared record)")
     po.add_argument("text")
     po.add_argument("--tag", default="note", help="note, question, proposal, result, hypothesis, "
-                    "decision (a person only)")
+                    "decision (your user's)")
     po.add_argument("--reply-to")
     po.add_argument("--channel", help="a named project (default: this project)")
     po.add_argument("--dir")
@@ -1806,15 +1843,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("approvals", help="permission requests waiting for a person")
     ap.set_defaults(func=cmd_approvals)
     for verb in ("approve", "deny"):
-        sp = sub.add_parser(verb, help="%s a worker's permission request (approve needs a terminal)"
-                            % verb)
+        sp = sub.add_parser(verb, help="%s a worker's permission request (approve is your "
+                            "user's decision)" % verb)
         sp.add_argument("id")
         sp.add_argument("--reason")
         sp.set_defaults(func=cmd_answer)
 
     for verb, helptext in (
-            ("link", "link this project folder with another, both ways, until unlinked (a person "
-                     "only); no folder: list links"),
+            ("link", "link this project folder with another, both ways, until unlinked (your user "
+                     "decides); no folder: list links"),
             ("unlink", "take a link away (anyone)")):
         lk = sub.add_parser(verb, help=helptext)
         if verb == "link":
@@ -1824,24 +1861,24 @@ def build_parser() -> argparse.ArgumentParser:
         lk.add_argument("--dir", help="this side's folder (default: this session's)")
         lk.set_defaults(func=cmd_link)
     rc = sub.add_parser("reach", help="let one session talk with the sessions of another folder "
-                                      "while it runs (a person only); no folder: list them")
+                                      "while it runs (your user decides); no folder: list them")
     rc.add_argument("folder", nargs="?")
     rc.add_argument("--session", help="the session to allow (default: the one running this)")
     rc.add_argument("--drop", action="store_true", help="take the reach away (all, if no folder)")
     rc.set_defaults(func=cmd_reach)
     for verb, helptext in (("block", "stop one session from sending or receiving"),
-                           ("unblock", "lift a block (a person only)")):
+                           ("unblock", "lift a block (your user decides)")):
         bp = sub.add_parser(verb, help=helptext)
         bp.add_argument("ref")
         bp.set_defaults(func=cmd_block)
     at = sub.add_parser("attempts", help="how often a task has been handed to a worker, and "
-                                         "how it went (clear needs a person)")
+                                         "how it went (clear is your user's decision)")
     at.add_argument("action", nargs="?", default="list", choices=["list", "show", "clear"])
     at.add_argument("key", nargs="?")
     at.add_argument("--json", action="store_true")
     at.set_defaults(func=cmd_attempts)
     fw = sub.add_parser("frameworks", help="whether xsm starts workers inside Orca or herdr "
-                                           "(ignore needs a person)")
+                                           "(ignore is your user's decision)")
     fw.add_argument("action", nargs="?", default="list", choices=["list", "ignore", "respect"])
     fw.add_argument("name", nargs="?")
     fw.set_defaults(func=cmd_frameworks)

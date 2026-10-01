@@ -1049,6 +1049,7 @@ class AttemptsTest(TempState):
             attempts.check(key, 3)
         self.assertIn("task-attempts-exhausted", str(cm.exception))
         self.assertIn("xsm attempts clear %s" % key, str(cm.exception))
+        self.assertNotIn("a person clears", str(cm.exception))
 
     def test_a_retry_worded_differently_joins_the_same_lineage(self):
         from xsm import attempts

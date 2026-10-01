@@ -229,12 +229,16 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
     """Consume a grant that covers exactly this spawn, or refuse.
 
     Without --grant the person's reply decides (user decision, 2026-10-01):
-    the agent is told what to ask, their next message is kept as the verdict,
-    and running the same command again turns it into a one-use grant."""
+    the agent is told what to ask and their latest message is kept as the
+    verdict. Running the same command again shows the agent that reply without
+    acting on it; the run after that turns it into a one-use grant."""
     if not grant_id:
         from . import consent
         target = "%s:%s:%s" % (runtime, os.path.realpath(cwd), ",".join(sorted(options)))
-        verdict = consent.take_verdict(caller, "grant", target)
+        what = describe_grant(runtime, cwd, options)
+        verdict, go = consent.take_verdict(caller, "grant", target)
+        if verdict is not None and not go:
+            raise WorkerError(consent.shown_refusal(verdict, what))
         if verdict is not None:
             paths.append_jsonl("decisions.jsonl", {"event": "consent", "verb": "grant",
                                                    "target": target, "verdict": verdict,
@@ -245,12 +249,14 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
             p = paths.path(GRANTS, grant["id"] + ".json")
             os.rename(p, p + ".used")         # spent on this spawn, like a --grant
             return grant
-        consent.request(caller, "grant", target)
+        if not consent.request(caller, "grant", target):
+            raise WorkerError(consent.cannot_keep(what, "xsm_grant"))
         raise WorkerError(
             "%s needs your user's yes. Ask them now, in plain words, whether to allow it. Their "
-            "next message in this session is kept as the verdict: if they agree, run this same "
-            "command again; if not, leave it. (The xsm_grant MCP tool asks with a form "
-            "instead; then pass --grant <id>.)" % describe_grant(runtime, cwd, options))
+            "latest reply in this session is kept as the verdict: run this same command again "
+            "and it shows you that reply without acting on it; if it is a yes, run it once "
+            "more to go ahead, and if it is a no or a question, leave it and answer them. (The "
+            "xsm_grant MCP tool asks with a form instead; then pass --grant <id>.)" % what)
     p = paths.path(GRANTS, grant_id + ".json")
     claimed = p + ".used"
     try:
