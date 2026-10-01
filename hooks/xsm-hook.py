@@ -22,7 +22,8 @@ def step_aside() -> int:
     if "UserPromptSubmit" not in raw or not ("<cross-session-message" in raw or "[xsm v1" in raw):
         return 0
     value = os.environ.get("XSM_FAIL_OPEN", "").strip().lower()
-    if not value:
+    if value not in ("0", "false", "no", "off", "1", "true", "yes", "on"):
+        # What the switch does not take says nothing, as in xsm.config.policy: the file.
         try:
             with open(os.path.join(os.path.expanduser(os.environ.get("XSM_HOME", "~/.xsm")),
                                    "config.json"), encoding="utf-8") as fh:

@@ -60,7 +60,6 @@ class PolicyTest(TempState):
         self.assertEqual({n: policy.get(n) for n in policy.POLICIES},
                          {"runtime": "snapshot", "claude_inbound": "accept",
                           "allow_messaging": True, "human_send_connects": True})
-        self.assertEqual(policy.changed(), {})
 
     def test_config_json_switches_one_and_the_environment_wins(self):
         from xsm import config, paths, policy
@@ -68,7 +67,6 @@ class PolicyTest(TempState):
                                                     "allow_messaging": False})
         self.assertEqual((policy.get("runtime"), policy.get("allow_messaging")),
                          ("checkout", False))
-        self.assertEqual(policy.changed(), {"runtime": "checkout", "allow_messaging": False})
         with mock.patch.dict(os.environ, {"XSM_RUNTIME": "snapshot",
                                           "XSM_ALLOW_MESSAGING": "yes"}):
             self.assertEqual((policy.get("runtime"), policy.get("allow_messaging")),
@@ -81,12 +79,37 @@ class PolicyTest(TempState):
     def test_a_value_the_setting_does_not_take_never_closes_anything(self):
         from xsm import config, paths, policy
         paths.write_json(paths.path(config.CONFIG), {
-            "runtime": "somewhere", "claude_inbound": ["hold"], "allow_messaging": "no",
-            "human_send_connects": 0})
+            "runtime": "somewhere", "claude_inbound": ["hold"], "allow_messaging": "banana",
+            "human_send_connects": [0]})
         with mock.patch.dict(os.environ, {"XSM_RUNTIME": "nonsense",
                                           "XSM_ALLOW_MESSAGING": "maybe"}):
             self.assertEqual({n: policy.get(n) for n in policy.POLICIES},
                              {n: policy.default(n) for n in policy.POLICIES})
+
+    def test_a_bad_environment_value_falls_through_to_the_file_not_to_the_default(self):
+        """2026-10-02: policy.get did, config.policy did not; there is one reader now."""
+        from xsm import config, paths, policy
+        paths.write_json(paths.path(config.CONFIG), {
+            "runtime": "checkout", "allow_messaging": False, "fail_open": False,
+            "remote_native": "hold"})
+        with mock.patch.dict(os.environ, {"XSM_RUNTIME": "nonsense", "XSM_ALLOW_MESSAGING": "maybe",
+                                          "XSM_FAIL_OPEN": "maybe", "XSM_REMOTE_NATIVE": "later"}):
+            self.assertEqual((policy.get("runtime"), policy.get("allow_messaging")),
+                             ("checkout", False))
+            self.assertEqual((config.policy("fail_open"), config.policy("remote_native")),
+                             (False, "hold"))
+        with mock.patch.object(config, "policy", return_value="x") as reader:
+            self.assertEqual(policy.get("runtime"), "x", "one implementation: policy.get asks it")
+        reader.assert_called_once()
+
+    def test_the_two_entry_points_read_the_same_file_the_same_way(self):
+        from xsm import config, paths, policy
+        for raw, want in (("no", False), ("OFF", False), (0, False), (" false ", False),
+                          ("yes", True), (1, True), (True, True), ("banana", True)):
+            with self.subTest(raw=raw):
+                paths.write_json(paths.path(config.CONFIG), {"allow_messaging": raw})
+                self.assertIs(policy.get("allow_messaging"), want)
+                self.assertIs(config.policy("allow_messaging", True), want)
 
     def test_doctor_names_what_is_not_at_its_default_on_one_line(self):
         from xsm import config, paths

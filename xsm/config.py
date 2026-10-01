@@ -58,29 +58,38 @@ POLICY_DEFAULTS = {
     "reply_from_request": True,    # false: the person's own request is not read as their yes
     "reply_flag": True,            # false: `--reply "<their words>"` is not accepted
 }
+POLICY_CHOICES = {"remote_native": ("pass", "hold"), "stale_sender": ("pass", "hold")}
 _FALSE = ("0", "false", "no", "off")
 _TRUE = ("1", "true", "yes", "on")
 
 
-def policy(name: str, default=None, cfg: dict | None = None):
+def policy(name: str, default=None, cfg: dict | None = None, choices: tuple | None = None):
     """The value of one policy switch: the environment (XSM_<NAME>), then
-    config.json, then `default` (POLICY_DEFAULTS' when none is given). A value
-    of the wrong kind is ignored. Never raises: a hook asks."""
+    config.json, then `default` (POLICY_DEFAULTS' when none is given). The default's
+    kind says how a value is read: a bool takes 1/true/yes/on and 0/false/no/off, any
+    other takes a lowercased string, and one of `choices` when given. A value of the
+    wrong kind is ignored, and then the next source is asked, so a typo in the
+    environment falls through to the file and never past it to the default
+    (2026-10-02: policy.py and this read bad values differently). The one reader for
+    every switch, policy.get included. Never raises: a hook asks."""
     if default is None:
         default = POLICY_DEFAULTS.get(name)
-    raw = os.environ.get("XSM_" + name.upper())
-    if raw is None or not raw.strip():
-        try:
-            raw = (cfg if cfg is not None else load()).get(name)
-        except Exception:                          # noqa: BLE001 - a broken file is no policy
-            raw = None
-    if isinstance(default, bool):
-        if isinstance(raw, bool):
-            return raw
-        text = str(raw).strip().lower() if raw is not None else ""
-        return True if text in _TRUE else False if text in _FALSE else default
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip().lower()
+    choices = choices or POLICY_CHOICES.get(name)
+    sources = [os.environ.get("XSM_" + name.upper())]
+    try:
+        sources.append((cfg if cfg is not None else load()).get(name))
+    except Exception:                              # noqa: BLE001 - a broken file is no policy
+        pass
+    for raw in sources:
+        if isinstance(default, bool):
+            if isinstance(raw, bool):
+                return raw
+            text = str(raw).strip().lower() if raw is not None else ""
+            if text in _TRUE or text in _FALSE:
+                return text in _TRUE
+        elif isinstance(raw, str) and raw.strip() and \
+                (choices is None or raw.strip().lower() in choices):
+            return raw.strip().lower()
     return default
 
 

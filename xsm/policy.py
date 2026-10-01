@@ -7,13 +7,12 @@ can still be switched: a key of the same name in ~/.xsm/config.json, or the
 environment variable XSM_<NAME> (it wins over the file; "0", "false", "no" and
 "off" turn a switch off).
 
-`get(name)` is all a caller needs. The value is the default when the file or
-the variable holds something the setting does not take, so a typo can never
-close anything by accident.
+`get(name)` is all a caller needs. A file or variable that holds something the
+setting does not take is passed over (a bad variable falls through to the file,
+a bad file to the default), so a typo can never close anything by accident. It is
+config.policy that reads them, the same for every switch.
 """
 from __future__ import annotations
-
-import os
 
 from . import config
 
@@ -34,8 +33,6 @@ POLICIES = {
     # needs (a link, a join or a reach) and delivers, their typing being the yes.
     "human_send_connects": (True, None),
 }
-_TRUE = ("1", "true", "yes", "on")
-_FALSE = ("0", "false", "no", "off")
 
 
 def default(name: str):
@@ -43,26 +40,10 @@ def default(name: str):
 
 
 def get(name: str):
-    """The value of one policy: the environment, else config.json, else the default."""
+    """The value of one policy: the environment, else config.json, else the default.
+    One reader with config.policy, which every other switch uses."""
     fallback, choices = POLICIES[name]
-    text = (os.environ.get("XSM_" + name.upper()) or "").strip().lower()
-    if text:
-        if choices is None:
-            if text in _TRUE:
-                return True
-            if text in _FALSE:
-                return False
-        elif text in choices:
-            return text
-    value = config.load().get(name, fallback)
-    if choices is None:
-        return value if isinstance(value, bool) else fallback
-    return value if value in choices else fallback
-
-
-def changed() -> dict:
-    """{name: value} for each policy that is not at its default, for doctor."""
-    return {name: get(name) for name in POLICIES if get(name) != default(name)}
+    return config.policy(name, fallback, choices=choices)
 
 
 def defaults() -> dict:

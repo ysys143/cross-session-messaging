@@ -46,11 +46,15 @@ case $input in
                 # fail_open (policy, true by default): the prompt goes through with a
                 # note, and never a decision. XSM_FAIL_OPEN or config.json can say
                 # false, which brings back the old refusal (user decision, 2026-10-01).
+                # Read as xsm.config.policy reads it: 0/false/no/off, as a JSON value or
+                # a string; an environment value it does not take falls through to the
+                # file (2026-10-02).
                 closed=
-                case $(printf '%s' "${XSM_FAIL_OPEN:-}" | tr 'A-Z' 'a-z') in
+                case $(printf '%s' "${XSM_FAIL_OPEN:-}" | tr 'A-Z' 'a-z' | tr -d ' ') in
                     0|false|no|off) closed=1 ;;
-                    "") grep -Eq '"fail_open"[[:space:]]*:[[:space:]]*(false|0)' "$state/config.json" \
-                            2>/dev/null && closed=1 ;;
+                    1|true|yes|on) ;;
+                    *) grep -Eiq '"fail_open"[[:space:]]*:[[:space:]]*("[[:space:]]*(false|off|no|0)[[:space:]]*"|false|0)[[:space:]]*([,}]|$)' \
+                            "$state/config.json" 2>/dev/null && closed=1 ;;
                 esac
                 if [ -n "$closed" ]; then
                     printf '%s\n' '{"decision":"block","reason":"xsm: no Python 3.9+ was found, so this peer message was not checked or delivered (fail_open is off). Run xsm doctor.","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}'

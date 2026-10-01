@@ -387,6 +387,27 @@ class HookScriptTest(TempState):
             "hook_event_name": "UserPromptSubmit", "prompt": "just me"}))
         self.assertEqual((out.returncode, out.stdout), (0, ""), "a person's prompt is silent")
 
+    def test_the_fallback_reads_the_switch_as_config_policy_does(self):
+        """2026-10-02: the python fallback read a string "off" in config.json as true
+        while xsm.config.policy reads it as false; and an environment value the switch
+        does not take falls through to the file."""
+        stdin = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s",
+                            "prompt": "<cross-session-message>\nhi\n</cross-session-message>"})
+        for value, closed in (('"off"', True), ('"false"', True), ('"0"', True), ('"no"', True),
+                              (' " Off "', True), ("false", True), ("0", True),
+                              ('"on"', False), ("true", False), ('"maybe"', False)):
+            with self.subTest(value=value):
+                with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+                    fh.write('{"fail_open": %s}' % value)
+                out = self._exec("raise ImportError('broken')\n", stdin)
+                self.assertEqual("decision" in json.loads(out.stdout), closed, out.stdout)
+        with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+            fh.write('{"fail_open": "off"}')
+        out = self._exec("raise ImportError('broken')\n", stdin, XSM_FAIL_OPEN="banana")
+        self.assertEqual(json.loads(out.stdout)["decision"], "block", "a bad variable: the file")
+        out = self._exec("raise ImportError('broken')\n", stdin, XSM_FAIL_OPEN="yes")
+        self.assertNotIn("decision", json.loads(out.stdout), "a good variable wins")
+
     def test_a_failure_of_the_gate_with_a_real_xsm_blocks_nothing(self):
         self._assert_never_blocks(
             lambda stdin: subprocess.run(
@@ -438,6 +459,26 @@ class NoPythonTest(TempState):
                     status, out = self._run(stdin, XSM_FAIL_OPEN="false")
                 self.assertEqual(status, 0)
                 self.assertEqual(json.loads(out)["decision"], "block")
+
+    def test_the_launcher_fallback_reads_the_switch_as_config_policy_does_too(self):
+        stdin = json.dumps({"hook_event_name": "UserPromptSubmit",
+                            "prompt": "<cross-session-message>\nhi\n</cross-session-message>"})
+        for value, closed in (('"off"', True), ('"False"', True), ('"0"', True), ('"no"', True),
+                              ('" off "', True), ("false", True), ("0", True),
+                              ('"on"', False), ("true", False), ('"maybe"', False), ("0.5", False),
+                              ('"offline"', False)):
+            with self.subTest(value=value):
+                with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+                    fh.write('{"fail_open": %s}' % value)
+                status, out = self._run(stdin)
+                self.assertEqual((status, "decision" in json.loads(out)), (0, closed), out)
+        with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+            fh.write('{\n  "fail_open": "off",\n  "x": 1\n}\n')
+        self.assertEqual(json.loads(self._run(stdin)[1])["decision"], "block", "on its own line")
+        status, out = self._run(stdin, XSM_FAIL_OPEN="banana")
+        self.assertEqual(json.loads(out)["decision"], "block", "a bad variable: the file")
+        status, out = self._run(stdin, XSM_FAIL_OPEN="yes")
+        self.assertNotIn("decision", json.loads(out), "a good variable wins")
 
 
 if __name__ == "__main__":
