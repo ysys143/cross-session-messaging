@@ -76,6 +76,14 @@ class CodexInstallTest(unittest.TestCase):
             link = Path(tmp) / ".local/bin/xsm"
             self.assertTrue(link.exists(), str(link))
             self.assertTrue(link.is_symlink())
+            # `xsm` on PATH is the copy of this checkout under the state folder
+            # (2026-10-01), not the checkout; --dev keeps the checkout.
+            runtime = Path(tmp).resolve() / ".xsm/runtime"
+            self.assertEqual(link.resolve().parents[2], runtime)
+            self.assertEqual(link.resolve().name, "xsm")
+            dev = subprocess.run(result.args + ["--dev"], cwd=tmp, env=env, capture_output=True,
+                                 text=True)
+            self.assertEqual(dev.returncode, 0, dev.stdout + dev.stderr)
             self.assertEqual(link.resolve(), REPO / "bin/xsm")
             self.assertEqual(subprocess.run(["xsm", "--help"], cwd=tmp, env=env, capture_output=True).returncode, 0)
             env["PATH"] = "/usr/bin:/bin"

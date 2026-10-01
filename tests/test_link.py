@@ -496,7 +496,7 @@ class InstallNoteTest(TempState):
                 cli.main(["install", "--refresh"])
             return out.getvalue()
 
-        paths.write_json(target, {"permissions": {"allow": install.form_tool_names()
+        paths.write_json(target, {"permissions": {"allow": install.wanted_rules(home)
                                                   + list(install.STALE_RULES)}})
         self.assertIn("took out allow rules an earlier xsm added", refresh())
         self.assertNotIn("took out", refresh())

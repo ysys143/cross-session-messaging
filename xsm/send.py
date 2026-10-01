@@ -303,12 +303,16 @@ def native_forecast(sender: dict, target: dict) -> tuple:
     if setting == "accept":
         return "accept", "receiver's user settings say crossSessionInbound=accept"
     if setting in ("hold", "refuse"):
-        return setting, "receiver's settings say crossSessionInbound=%s" % setting
+        return setting, ("receiver's settings say crossSessionInbound=%s (its user's own "
+                         "choice: xsm install leaves a value that is set)" % setting)
     mine, theirs = registry.mode_class(sender), registry.mode_class(target)
     if mine is None or theirs is None:
         return "unknown", "one of the two permission modes is not known yet"
     if mine == theirs:
         return "accept", "both sessions run in %s mode" % theirs
     return "hold", ("sender is %s and receiver is %s, so Claude holds the message for its "
-                    "user; set crossSessionInbound to \"accept\" on the receiver, or match "
-                    "the permission modes" % (mine, theirs))
+                    "user. `xsm install --refresh` (your agent can run it) sets "
+                    "crossSessionInbound to \"accept\" in the receiver's Claude home, %s, after "
+                    "which a message goes through whatever the modes are (user decision, "
+                    "2026-10-01); or match the permission modes" % (
+                        mine, theirs, target.get("home") or "wherever it is installed"))

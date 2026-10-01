@@ -1,14 +1,20 @@
 #!/bin/sh
-# Hook entry point for a plugin install. `xsm install` pins an absolute
-# interpreter into the hook command it writes; a plugin is copied as it is, so
-# the interpreter has to be found here.
+# Hook entry point: a plugin runs it, and so does a direct Claude install
+# (`xsm install` writes this launcher into settings.json, 2026-10-01, rather
+# than `python <path>/xsm-hook.py`). The interpreter is found here, from the pin
+# `xsm install` recorded and then from what PATH has, so a python that went away
+# (a brew upgrade) leaves the hook running under another one, and a script that
+# cannot be read is status 1 below, never the 2 that blocks a prompt.
 #
 # A hook that cannot start is a gate that is open (S8-g2). If no usable python
 # is found, this still refuses a prompt carrying an xsm envelope, the way
 # xsm.receive's own catch-all does.
 here=$(cd "$(dirname "$0")/.." && pwd) || exit 0
 state=${XSM_HOME:-$HOME/.xsm}
-pinned=$(sed -n 's/.*"path"[^"]*"\([^"]*\)".*/\1/p' "$state/interpreter.json" 2>/dev/null | head -1)
+# `xsm install` writes the pin as $state/interpreter; interpreter.json is the name
+# an earlier launcher read. Both are looked at, so neither spelling leaves the pin unread.
+pinned=$(cat "$state/interpreter" "$state/interpreter.json" 2>/dev/null |
+    sed -n 's/.*"path"[^"]*"\([^"]*\)".*/\1/p' | head -1)
 # Overridable so the fallback can be tested, and for a machine whose python is
 # somewhere unusual.
 candidates=${XSM_PYTHON_CANDIDATES:-"$XSM_PYTHON:$pinned:python3:python3.14:python3.13:python3.12:/usr/bin/python3"}
