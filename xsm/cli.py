@@ -14,8 +14,8 @@ import shlex
 import sys
 import time
 
-from . import config, consent, envelope, housekeeping, inbox, install, ledger, paths, policy, receive, \
-    registry, resolve, send, workers
+from . import config, consent, envelope, housekeeping, inbox, install, ledger, paths, policy, probe, \
+    receive, registry, resolve, send, workers
 
 OK, REFUSED, UNCONFIRMED, USAGE = 0, 2, 3, 4
 
@@ -166,6 +166,14 @@ def _folder_groups(rows: list, me: dict | None, here: str, label) -> list:
 
 
 def cmd_list(args) -> int:
+    """A listing is what a person waits on, so no session's folder may hold it up: a
+    probe that does not answer in a second is unknown, and each folder is asked about
+    once (probe.quick; a stalled folder under ~/Documents froze it, 2026-10-02)."""
+    with probe.quick():
+        return _cmd_list(args)
+
+
+def _cmd_list(args) -> int:
     registry.adopt_open_codex()
     me = registry.me()
     if getattr(args, "action", None) == "clear":

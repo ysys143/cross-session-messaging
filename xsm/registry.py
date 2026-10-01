@@ -17,7 +17,7 @@ import os
 import sqlite3
 import time
 
-from . import config, identity, paths
+from . import config, identity, paths, probe
 
 
 def _record_path(runtime: str, session_id: str) -> str:
@@ -987,13 +987,20 @@ def inbound_setting(home: str, cwd: str | None = None) -> str | None:
     accepted (2026-09-29). A session launched with --settings or
     --setting-sources may still differ, which is why callers treat this as a
     prediction, not a verdict.
+
+    The project's files are in a folder that may not answer (under ~/Documents, on a
+    stalled mount): each is read with a deadline, and one that does not answer tightens
+    nothing, as one that is not there (2026-10-02, probe.py).
     """
     def read(path):
         value = (paths.read_json(path, {}) or {}).get("crossSessionInbound")
         return value if value in INBOUND_LADDER else None
+
+    def read_project(path):
+        return probe.remember(("inbound", path), lambda: probe.bounded(read, path, folder=cwd))
     value = read(os.path.join(home, "settings.json"))
     for name in ("settings.json", "settings.local.json"):
-        stricter = read(os.path.join(cwd, ".claude", name)) if cwd else None
+        stricter = read_project(os.path.join(cwd, ".claude", name)) if cwd else None
         if stricter and (value is None or
                          INBOUND_LADDER.index(stricter) > INBOUND_LADDER.index(value)):
             value = stricter

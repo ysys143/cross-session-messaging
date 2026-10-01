@@ -16,10 +16,9 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import time
 
-from . import paths
+from . import paths, probe
 
 CONFIG = "config.json"
 HOMES = "homes.json"
@@ -149,17 +148,17 @@ def git_repo(cwd: str) -> tuple:
     repositories", so the default same-repository scope failed for the very
     sessions it was for (issue #8 follow-up, 2026-10-01). Separate clones of
     one remote keep separate common dirs and stay apart."""
-    try:
-        out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel",
-                              "--git-common-dir"], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return None, None
-    lines = out.stdout.strip().splitlines()
-    if out.returncode != 0 or len(lines) != 2 or not lines[0]:
-        return None, None
-    # An older git prints the common dir relative to `cwd`.
-    common = lines[1] if os.path.isabs(lines[1]) else os.path.join(cwd, lines[1])
-    return os.path.realpath(lines[0]), os.path.realpath(common)
+    def ask():
+        out = probe.git(cwd, "rev-parse", "--show-toplevel", "--git-common-dir")
+        lines = (out or "").strip().splitlines()
+        if len(lines) != 2 or not lines[0]:
+            return None, None
+        # An older git prints the common dir relative to `cwd`.
+        common = lines[1] if os.path.isabs(lines[1]) else os.path.join(cwd, lines[1])
+        return os.path.realpath(lines[0]), os.path.realpath(common)
+    # Asked once per folder inside `xsm list` (probe.quick), and never waited on for
+    # long: a folder that does not answer is unknown (2026-10-02).
+    return probe.remember(("git_repo", cwd), ask)
 
 
 def repo_name(common_dir: str) -> str:
