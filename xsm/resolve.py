@@ -69,6 +69,13 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
                 # Any state: an address names one session exactly, and the
                 # caller decides what a stopped one means (send refuses it).
                 return Resolution("resolved", hits[0])
+            waiting = [r for r in registry.unregistered()
+                       if (r.get("ref") == value if key == "ref"
+                           else r.get("runtime") == key and r.get("session_id") == value)
+                       and r.get("state") not in ("stale", "ended")]
+            if waiting:
+                return Resolution("unregistered", candidates=waiting,
+                                  reason=_open_unregistered(waiting))
             return Resolution("not-found", reason="no session with %s" % target,
                               candidates=_live_addresses())
 
@@ -80,6 +87,9 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
     # The last @ is a qualifier only when it names a home we know about;
     # Codex allows @ inside a thread name (S7).
     known = {h.get("alias") for h in config.homes()} | {r.get("alias") for r in _pool(True)}
+    if alias and alias not in known:
+        # A session that has not registered may be in a home no hook has reported.
+        known |= {r.get("alias") for r in registry.unregistered()}
     if alias and alias not in known:
         name, alias = target, None
 
@@ -97,11 +107,10 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
         # intent than one that stopped, so it is reported first.
         waiting = [r for r in registry.unregistered()
                    if identity.normalize(r.get("name") or "") == wanted
-                   and (not alias or r.get("alias") == alias)]
+                   and (not alias or r.get("alias") == alias)
+                   and r.get("state") not in ("stale", "ended")]
         if waiting:
-            reason = "%s is open but has not registered with xsm: %s" % (
-                ", ".join("%s@%s" % (w.get("name"), w.get("alias")) for w in waiting),
-                waiting[0].get("why") or "its hook has not run")
+            reason = _open_unregistered(waiting)
             if pool:
                 reason += "\nstopped sessions with the same name:\n" + \
                           "\n".join(resume_hint(r) for r in pool)
@@ -117,6 +126,14 @@ def resolve(target: str, include_offline: bool = False) -> Resolution:
         return Resolution("ambiguous", candidates=usable,
                           reason="%d sessions match %r" % (len(usable), name))
     return Resolution("resolved", usable[0])
+
+
+def _open_unregistered(waiting: list) -> str:
+    """Sessions that are open and have not registered, and how each gets
+    registered (the row's own `why`)."""
+    return "%s is open but has not registered with xsm: %s" % (
+        ", ".join("%s@%s" % (w.get("name"), w.get("alias")) for w in waiting),
+        waiting[0].get("why") or "its hook has not run")
 
 
 def resume_hint(record: dict) -> str:

@@ -11,12 +11,11 @@ import glob
 import json
 import os
 import shlex
-import shutil
 import sys
 import time
 
-from . import config, consent, envelope, housekeeping, inbox, install, ledger, paths, receive, registry, \
-    resolve, send, workers
+from . import config, consent, envelope, housekeeping, inbox, install, ledger, paths, policy, receive, \
+    registry, resolve, send, workers
 
 OK, REFUSED, UNCONFIRMED, USAGE = 0, 2, 3, 4
 
@@ -645,14 +644,7 @@ def cmd_send(args) -> int:
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=False))
     else:
-        for note in result.notes:
-            print(note)
-        print("%s: %s" % (result.status, result.reason or result.msg_id or ""))
-        if result.candidates and "resume it with" not in (result.reason or "") \
-                and "has not registered" not in (result.reason or ""):
-            print("registered sessions right now:" if "no session" in (result.reason or "")
-                  else "candidates:")
-            print(resolve.describe(result.candidates))
+        print("\n".join(result.lines()))
     return {"delivered": OK, "sent-unconfirmed": UNCONFIRMED, "unknown": UNCONFIRMED,
             "held": REFUSED, "blocked": REFUSED, "refused": REFUSED}.get(result.status, USAGE)
 
@@ -894,6 +886,22 @@ def cmd_held(args) -> int:
 
 
 def cmd_install(args) -> int:
+    """`--dev` is the policy runtime=checkout for this run (policy.py), through
+    the variable that overrides it; the variable is put back afterwards."""
+    if not args.dev:
+        return _cmd_install(args)
+    before = os.environ.get("XSM_RUNTIME")
+    os.environ["XSM_RUNTIME"] = "checkout"
+    try:
+        return _cmd_install(args)
+    finally:
+        if before is None:
+            os.environ.pop("XSM_RUNTIME", None)
+        else:
+            os.environ["XSM_RUNTIME"] = before
+
+
+def _cmd_install(args) -> int:
     targets = [(h, "claude") for h in (args.claude_home or [])] + \
               [(h, "codex") for h in (args.codex_home or [])]
     if args.refresh and not targets:
@@ -931,13 +939,7 @@ def cmd_install(args) -> int:
                 else "keeps it up to date"))
             _print_retired(home, install.remove_retired(home))
             if runtime == "claude":
-                state = install.allow_form_tools(home)
-                if state == "added":
-                    print("  allowed the xsm skill, approval-form tools and asking commands so auto mode lets them ask")
-                elif state == "updated":
-                    print("  took out allow rules an earlier xsm added and no longer wants")
-                elif state == "invalid":
-                    print(_settings_invalid_note(home))
+                _claude_settings(home, quiet=True)
             if runtime == "codex":
                 cleared = install.clear_codex_leftovers(home)
                 if cleared:
@@ -979,10 +981,11 @@ def _install(args, targets) -> int:
         record = install.pin_python(chosen)
         print("hooks will run under %s%s" % (record["path"],
                                             " (%s)" % record["version"] if record["version"] else ""))
-    failed = False
+    root = _make_runtime(args.dry_run)
+    failed, linked = False, False
     for home, runtime in targets:
         if args.dry_run:
-            print(install.diff(home, runtime))
+            print(install.diff(home, runtime, root))
             continue
         result = install.apply(home, runtime)
         if result.get("error"):
@@ -995,28 +998,18 @@ def _install(args, targets) -> int:
             print("installed into %s (backup: %s)" % (result["file"], result.get("backup", "none")))
         _print_retired(home, install.remove_retired(home))
         if runtime == "claude":
-            state = install.allow_form_tools(home)
-            if state == "invalid":
-                print(_settings_invalid_note(home))
-            else:
-                print("  approval forms: %s (the xsm skill, link, reach, join and the other tools "
-                      "and commands that ask you; allowed so auto mode lets them ask)" % state)
-        if runtime == "codex":
-            cli_state = install.install_cli()
-            if cli_state == "foreign":
-                print("  cli: link bin/xsm onto PATH yourself: ln -s %s <directory-on-PATH>/xsm"
-                      % shlex.quote(install.launcher()))
-            else:
-                print("  cli: %s (~/.local/bin/xsm)" % cli_state)
-                if os.path.expanduser("~/.local/bin") not in os.environ.get("PATH", "").split(os.pathsep):
-                    print("  warning: add ~/.local/bin to PATH")
+            _claude_settings(home)
+        if not linked:
+            linked = True
+            _link_cli()
         if not args.no_commands:
             state, detail = install.install_skill(home, refresh=args.refresh)
             print("  skill: %s" % {
-                "linked": "linked to the repo",
-                "copy-current": "a copy is in place and matches the repo",
+                "linked": "linked to the installed runtime",
+                "copy-current": "a copy is in place and matches the runtime",
                 "copy-stale": "a copy has fallen behind; refresh it with `xsm install --refresh`",
-                "link-stale": "linked to an older plugin version; refresh it with `xsm install --refresh`",
+                "link-stale": "linked to an older runtime or plugin version; refresh it with "
+                              "`xsm install --refresh`",
                 "nested-link": "a link sits inside the existing directory (%s);\n"
                                "           remove it: rm %s" % (detail, detail),
                 "foreign": "something else is at skills/xsm; left alone",
@@ -1024,9 +1017,6 @@ def _install(args, targets) -> int:
             print("  commands: %s" % ("/xsm list, /xsm send <target> <message>, … "
                                       "(the skill takes them as arguments)" if runtime == "claude"
                                       else "$xsm list, $xsm send <target> <message>, …"))
-            if runtime != "codex" and not shutil.which("xsm"):
-                print("  warning: `xsm` is not on PATH, and the skill runs it by that name. "
-                      "Link it: ln -s %s ~/.local/bin/xsm" % install.launcher())
         if runtime == "claude" and args.statusline:
             outcome = install.install_statusline(home)
             print("  statusLine: %s" % {
@@ -1044,8 +1034,86 @@ def _install(args, targets) -> int:
         if runtime == "codex":
             print("  Codex asks you to trust hooks once, at the next session start. "
                   "Until you do, the hook does not run. Codex has no SessionEnd, so a "
-                  "stopped Codex session always reads as stale.")
+                  "stopped Codex session always reads as stale. A hook already trusted keeps "
+                  "the command it has, so a refresh never asks again; its script stays where "
+                  "it was, and only the plugin (`codex plugin add xsm@xsm`) moves it.")
+    if not args.dry_run:
+        try:
+            gone = install.prune_snapshots()
+        except OSError:
+            gone = []
+        if gone:
+            print("removed %d older runtime cop%s no session or config uses: %s" % (
+                len(gone), "y" if len(gone) == 1 else "ies", ", ".join(gone)))
     return USAGE if failed else OK
+
+
+def _make_runtime(dry_run: bool) -> str:
+    """Make the folder the hooks, the MCP server and `xsm` on PATH will run from,
+    and say which it is. A copy of this checkout under ~/.xsm/runtime, unless
+    this CLI is one already (a snapshot, a plugin copy), or the policy says
+    checkout (--dev). Failing to copy is not failing to install: the hooks then
+    run from the checkout, as they did before there were copies."""
+    if install.runtime_in_place():
+        print("runtime: %s (this is a copy already; nothing to copy)" % _home_tilde(install.REPO))
+        return install.runtime_root()
+    if policy.get("runtime") == "checkout":
+        print("runtime: this checkout, %s (--dev): a session that macOS keeps out of this folder "
+              "cannot run the hooks" % _home_tilde(install.REPO))
+        return install.REPO
+    if dry_run:
+        root = install.runtime_root(planned=True)
+        print("hooks would run from a copy of this checkout at %s" % _home_tilde(root))
+        return root
+    try:
+        snapshot = install.make_snapshot()
+    except OSError as err:
+        print("warning: could not copy the runtime under %s (%s); the hooks run from this "
+              "checkout" % (_home_tilde(paths.HOME), err), file=sys.stderr)
+        return install.REPO
+    print("runtime: %s, a copy of %s%s (hooks, MCP server and `xsm` run from it, outside the "
+          "folders macOS guards)" % (
+              _home_tilde(snapshot["path"]), _home_tilde(install.REPO),
+              " at %s" % (snapshot.get("describe") or snapshot["rev"][:7])
+              if snapshot.get("describe") or snapshot.get("rev") else ""))
+    return snapshot["path"]
+
+
+def _link_cli() -> None:
+    """`xsm` on PATH is the runtime's launcher, whichever runtime the home is."""
+    state = install.install_cli()
+    if state == "foreign":
+        print("  cli: ~/.local/bin/xsm is something else; link the launcher onto PATH yourself: "
+              "ln -s %s <directory-on-PATH>/xsm" % shlex.quote(install.launcher()))
+        return
+    print("  cli: %s (~/.local/bin/xsm)" % state)
+    if os.path.expanduser("~/.local/bin") not in os.environ.get("PATH", "").split(os.pathsep):
+        print("  warning: add ~/.local/bin to PATH")
+
+
+def _claude_settings(home: str, quiet: bool = False) -> None:
+    """What install writes into a Claude home's settings.json besides the hooks:
+    the allow rules, crossSessionInbound, and the path in xsm's own statusLine.
+    `quiet` (a home that is on the plugin) says only what changed."""
+    state = install.allow_form_tools(home)
+    if state == "invalid":
+        print(_settings_invalid_note(home))
+        return
+    if state == "updated":
+        print("  took out allow rules an earlier xsm added and no longer wants")
+    elif state == "added" or not quiet:
+        print("  allow rules: %s (the xsm skill, the approval forms and the messaging commands and "
+              "tools; so Claude's auto and default modes never stop a message or its ask)" % state)
+    inbound = install.set_inbound(home)
+    if inbound == "set":
+        print("  crossSessionInbound: set to \"accept\" (Claude delivers a message from another "
+              "of your sessions whatever the two permission modes are)")
+    elif inbound.startswith("kept:"):
+        print("  crossSessionInbound: this home says \"%s\", which is yours, so it stays; Claude "
+              "will %s the messages from your other sessions" % (
+                  inbound[5:], "hold for you" if inbound[5:] == "hold" else inbound[5:]))
+    if install.refresh_statusline(home):
+        print("  statusLine: now runs the installed runtime")
 
 
 def _settings_invalid_note(home: str) -> str:
@@ -1075,8 +1143,11 @@ def cmd_uninstall(args) -> int:
         if runtime == "claude":
             if install.remove_statusline(home):
                 print("%s: removed the xsm statusLine" % home)
+            if install.remove_inbound(home):
+                print("%s: removed the crossSessionInbound xsm set" % home)
             if install.remove_form_tools(home):
-                print("%s: removed the xsm skill, approval-form tools and asking commands from permissions.allow" % home)
+                print("%s: removed the xsm skill, approval-form tools, asking commands and "
+                      "messaging rules from permissions.allow" % home)
         print("%s: removed %s xsm hook group(s)%s" % (
             result.get("file"), result.get("removed", 0),
             "" if not result.get("error") else " (%s)" % result["error"]))
@@ -1085,7 +1156,7 @@ def cmd_uninstall(args) -> int:
 
 def cmd_doctor(args) -> int:
     report = install.doctor()
-    report["policy"] = config.policy_report()
+    report["policy"] = policy.report()
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=1))
         return OK
@@ -1099,6 +1170,10 @@ def cmd_doctor(args) -> int:
         for other in cli.get("on_path") or []:
             print("cli        also on PATH as %s: %s" % (other["via"], install.cli_text(other)))
     print("state      %s" % report["xsm_home"])
+    for line in _runtime_lines(report.get("runtime") or {}):
+        print("runtime    %s" % line)
+    if report.get("policy"):
+        print("policy     %s" % _policy_note(report["policy"]))
     print("python     %s%s" % (report["interpreter"], "" if report["interpreter_ok"] else "  TOO OLD"))
     versions = report.get("codex_binaries") or []
     if not versions:
@@ -1113,7 +1188,6 @@ def cmd_doctor(args) -> int:
           % (report["decisions_seen"], report["hook_errors_recent"]))
     print("held       %d message(s)" % report["held"])
     print("native     %s" % _native_note(report))
-    print("policy     %s" % _policy_note(report))
     for pid, folder in report.get("orphaned_servers") or []:
         print("orphaned   %s" % _orphan_note(pid, folder))
     for plan in report["installs"]:
@@ -1122,6 +1196,8 @@ def cmd_doctor(args) -> int:
             continue
         states = ", ".join("%s:%s" % (a["event"], a["action"]) for a in plan["actions"])
         print("install    %-45s %s" % (plan["file"], states))
+        for line in _hook_form_lines(plan):
+            print("hooks      %s" % line)
     for home in report.get("gone") or []:
         print("gone       %s: deleted; forget it with `xsm homes remove %s`" % (_home_tilde(home), home))
     for home, trust in (report.get("codex_trust") or {}).items():
@@ -1148,6 +1224,10 @@ def cmd_doctor(args) -> int:
             print("allow      %s" % _allow_note(home, missing))
     for home in report.get("settings_invalid") or {}:
         print("allow      %s" % _settings_invalid_note(home).strip())
+    for home, value in (report.get("inbound") or {}).items():
+        note = _inbound_note(home, value, report.get("policy") or {})
+        if note:
+            print("inbound    %s" % note)
     for home, files in (report.get("stale") or {}).items():
         if files:
             print("stale      %s: %d file(s) behind the repo; refresh with `xsm install --refresh`"
@@ -1229,9 +1309,97 @@ def _allow_note(home: str, missing: list) -> str:
     project setting or Shift+Tab turns it on per session), so it says it only
     matters there (2026-10-01)."""
     return ("%s: %d xsm allow rule(s) missing from settings.json (the skill, the approval "
-            "forms, the commands that ask you). Only Claude's auto mode cares: it can stop the "
-            "agent before xsm asks you. If you use auto mode in this home, your agent can add "
-            "them by running `xsm install --refresh`" % (_home_tilde(home), len(missing)))
+            "forms, the commands that ask you, and the messaging commands and tools). Claude's "
+            "auto mode and default mode can stop the agent on them, before xsm asks you or "
+            "before a message goes; your agent can add them by running `xsm install --refresh`"
+            % (_home_tilde(home), len(missing)))
+
+
+def _runtime_lines(rt: dict) -> list:
+    """Which runtime the installed hooks run from, and whether the checkout it
+    was copied from has moved on (the agent then runs `install --refresh`)."""
+    if rt.get("mode") == "checkout":
+        return ["the checkout %s (policy runtime=checkout, or --dev): the hooks, the MCP server "
+                "and `xsm` run from it, and a session macOS keeps out of that folder cannot run "
+                "them; `xsm install --refresh` without --dev moves them to a copy"
+                % _home_tilde(rt.get("running_from") or "")]
+    snap = rt.get("snapshot")
+    if not snap:
+        if rt.get("in_place"):
+            return ["this CLI runs from %s, a copy already" % _home_tilde(rt.get("running_from"))]
+        return ["no copy installed: the hooks, the MCP server and `xsm` run from the checkout %s, "
+                "and a session macOS keeps out of that folder cannot run them; your agent can "
+                "run `xsm install --refresh` to make a copy under ~/.xsm/runtime"
+                % _home_tilde(rt.get("running_from") or "")]
+    stamp = snap.get("describe") or (snap.get("rev") or "")[:7]
+    out = ["snapshot %s (xsm %s) at %s, copied from %s%s" % (
+        snap.get("id"), snap.get("version") or "?", _home_tilde(snap.get("path") or ""),
+        _home_tilde(snap.get("source") or "?"), " at %s" % stamp if stamp else "")]
+    checkout = rt.get("checkout")
+    if checkout and checkout.get("gone"):
+        out.append("the checkout %s it was copied from is gone; the copy keeps working"
+                   % _home_tilde(checkout["path"]))
+    elif checkout and not checkout.get("same"):
+        ahead = checkout.get("ahead")
+        out.append("the checkout %s is %s the copy: your agent can update it by running `%s "
+                   "install --refresh`" % (
+                       _home_tilde(checkout["path"]),
+                       "%d commit(s) ahead of" % ahead if ahead else "different from",
+                       os.path.join(checkout["path"], "bin", "xsm")))
+    return out
+
+
+def _policy_note(values: dict) -> str:
+    """Every switch and its value (policy.py, config.POLICY_DEFAULTS; set in
+    config.json or XSM_<NAME>); the ones moved off their open default are named,
+    so a machine put back on the old rules says so."""
+    shown = " ".join("%s=%s" % (k, str(v).lower()) for k, v in sorted(values.items()))
+    base = policy.defaults()
+    changed = sorted(k for k, v in values.items() if v != base.get(k))
+    return shown + ("  (not the default: %s)" % ", ".join(changed) if changed else "")
+
+
+def _hook_form_lines(plan: dict) -> list:
+    """What the hook commands in a Claude home's settings.json can do to a person:
+    the old forms are `python <script>`, whose status 2 for a script it cannot
+    open is "block" to Claude Code (2026-10-01)."""
+    if plan.get("runtime") != "claude":
+        return []
+    forms = {f for a in plan.get("actions", []) for f in a.get("forms", [])}
+    gone = sorted({s for a in plan.get("actions", []) for s in a.get("gone", [])})
+    where = _home_tilde(plan.get("file") or "")
+    out = []
+    if "unguarded" in forms:
+        out.append("%s: a hook here is the old `python <script>` form. If python cannot open the "
+                   "script (a folder macOS denies a session, a moved checkout) it exits 2 and "
+                   "Claude BLOCKS every prompt. Your agent can replace it by running "
+                   "`xsm install --refresh`" % where)
+    elif "guarded" in forms:
+        out.append("%s: a hook here is the `python <script> || exit 1` form. It no longer blocks "
+                   "a prompt, but stops working when that python or path goes away. Your agent "
+                   "can replace it by running `xsm install --refresh`" % where)
+    if gone:
+        out.append("%s: the hook script %s is gone, so those hooks fail on every event; `xsm "
+                   "install --refresh`" % (where, ", ".join(_home_tilde(s) for s in gone)))
+    return out
+
+
+def _inbound_note(home: str, value, changed: dict) -> str | None:
+    """What a Claude home's crossSessionInbound means for the messages it gets, or
+    None when it is "accept" or xsm was told to leave it."""
+    if value == "accept" or changed.get("claude_inbound") == "leave":
+        return None
+    where = _home_tilde(home)
+    if value is None:
+        return ("%s: crossSessionInbound is not set, so Claude holds a message from a session in "
+                "another permission mode for its user; your agent can run `xsm install "
+                "--refresh`, which sets \"accept\" (the setting is documented from Claude Code "
+                "2.1.224)" % where)
+    return ("%s: crossSessionInbound is \"%s\"%s, so Claude %s messages from your other "
+            "sessions; `xsm install` leaves a value that is set" % (
+                where, value, " (yours)" if value in ("hold", "refuse") else
+                ", which Claude does not recognize",
+                "drops" if value == "refuse" else "holds"))
 
 
 def _native_note(report: dict) -> str:
@@ -1245,16 +1413,6 @@ def _native_note(report: dict) -> str:
             + off_machine)
 
 
-def _policy_note(report: dict) -> str:
-    """Each switch that opened a hold and what it is set to (config.POLICY_DEFAULTS,
-    in config.json or XSM_<NAME>); the ones that are not the default are named,
-    so a machine put back on the old rules says so."""
-    policy = report.get("policy") or config.policy_report()
-    shown = " ".join("%s=%s" % (k, str(v).lower()) for k, v in policy.items())
-    changed = [k for k, v in policy.items() if v != config.POLICY_DEFAULTS.get(k)]
-    return shown + ("  (not the default: %s)" % ", ".join(changed) if changed else "")
-
-
 def _doctor_rows(report: dict) -> list:
     rows = [("state", _home_tilde(report["xsm_home"])),
             ("python", report["interpreter"] + ("" if report["interpreter_ok"] else " **TOO OLD**")),
@@ -1264,10 +1422,13 @@ def _doctor_rows(report: dict) -> list:
             ("hooks", "%d decision(s) recorded, %d internal error(s)"
              % (report["decisions_seen"], report["hook_errors_recent"])),
             ("held", "%d message(s)" % report["held"]),
-            ("native", _native_note(report)),
-            ("policy", _policy_note(report))]
+            ("native", _native_note(report))]
     if report.get("cli"):
         rows.insert(0, ("cli", install.cli_text(report["cli"])))
+    for line in _runtime_lines(report.get("runtime") or {}):
+        rows.append(("runtime", line))
+    if report.get("policy"):
+        rows.append(("policy", _policy_note(report["policy"])))
     for pid, folder in report.get("orphaned_servers") or []:
         rows.append(("orphaned", _orphan_note(pid, folder)))
     for plan in report["installs"]:
@@ -1275,6 +1436,8 @@ def _doctor_rows(report: dict) -> list:
                      if plan.get("error") else "%s: %s" % (
                          _home_tilde(plan["file"]),
                          ", ".join("%s %s" % (a["event"], a["action"]) for a in plan["actions"]))))
+        for line in _hook_form_lines(plan):
+            rows.append(("hooks", line))
     for home, trust in (report.get("codex_trust") or {}).items():
         missing = [e for e, ok in (trust or {}).items() if not ok]
         rows.append(("codex trust", "%s: %s" % (_home_tilde(home), (
@@ -1294,6 +1457,10 @@ def _doctor_rows(report: dict) -> list:
             rows.append(("allow", _allow_note(home, missing)))
     for home in report.get("settings_invalid") or {}:
         rows.append(("allow", _settings_invalid_note(home).strip()))
+    for home, value in (report.get("inbound") or {}).items():
+        note = _inbound_note(home, value, report.get("policy") or {})
+        if note:
+            rows.append(("inbound", note))
     for home, files in (report.get("stale") or {}).items():
         if files:
             rows.append(("stale", "%s: %d file(s) behind; refresh with `xsm install --refresh`"
@@ -2119,6 +2286,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="re-write what xsm installed in every home it knows")
     ins.add_argument("--force", action="store_true",
                      help="install into a home that already has the xsm plugin")
+    ins.add_argument("--dev", action="store_true",
+                     help="run the hooks, the MCP server and `xsm` from this checkout instead of a "
+                          "copy under ~/.xsm/runtime (for developing xsm; same as the policy "
+                          "runtime=checkout)")
     ins.set_defaults(func=cmd_install)
 
     un = sub.add_parser("uninstall", help="remove only the hook groups xsm added")
@@ -2158,7 +2329,14 @@ def main(argv=None) -> int:
     if args.xsm_home:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
-    paths.ensure_home()
+    try:
+        paths.ensure_home()
+    except OSError as err:
+        # A sandboxed or read-only shell cannot make the state folder, and every
+        # command died here with a traceback (audit, 2026-10-01). What only
+        # reads still works; what writes says why, below.
+        if not paths.blocked_write(err):
+            raise
     consent.supplied = None
     if getattr(args, "reply", None):
         if config.policy("reply_flag"):
@@ -2176,11 +2354,17 @@ def main(argv=None) -> int:
     # each would be noise, or would never close. And the two that read the
     # telemetry itself: each export would leave a span for the next export to
     # ship, and metrics would count its own calls.
-    if telemetry is None or args.command in ("mcp", "statusline",
-                                             "metrics", "otlp-export"):
-        code = args.func(args)
-    else:
-        code = _traced(telemetry, args)
+    try:
+        if telemetry is None or args.command in ("mcp", "statusline",
+                                                 "metrics", "otlp-export"):
+            code = args.func(args)
+        else:
+            code = _traced(telemetry, args)
+    except OSError as err:
+        if not paths.blocked_write(err):
+            raise
+        print(paths.sandbox_blocked(err), file=sys.stderr)
+        return REFUSED
     _inbox_notice(args.command)
     return code
 

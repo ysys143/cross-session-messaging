@@ -87,6 +87,28 @@ bin/xsm doctor                                                # 설치 상태, �
 `xsm install --refresh`로 갱신하세요. 플러그인을 갱신한 뒤에는 새 버전의 `bin/xsm`으로 `install --refresh`를
 실행합니다.
 
+직접 설치가 실행하는 코드: `xsm install`은 이 체크아웃의 실행에 필요한 것(`xsm/`, `hooks/`, `skills/`,
+`bin/`, 플러그인 매니페스트)을 `~/.xsm/runtime/<id>/`로 복사하고 모든 것을 그 사본으로 향하게 합니다. Claude
+훅 명령(`hooks/xsm-hook` 런처: 쓸 수 있는 파이썬을 스스로 찾고, 열 수 없는 스크립트는 프롬프트를 막지 않는
+오류로 바꿉니다), MCP 서버 등록(`hooks/xsm-mcp` 런처), `~/.local/bin/xsm`이 그렇습니다. macOS는 세션을 연 앱에
+체크아웃이 있는 폴더(`~/Documents`) 접근을 막을 수 있고, 실행하지 못한 훅이 프롬프트를 막아서는 안 됩니다. 직전
+사본은 그보다 먼저 시작한 살아 있는 세션이 없어질 때까지 남고 그 뒤 정리됩니다. `xsm doctor`의 `runtime` 줄이
+사본을 알려 주고 체크아웃이 앞서가면 그렇게 말하며, 그러면 에이전트가 `<체크아웃>/bin/xsm install --refresh`를
+실행합니다. `--dev`(또는 `config.json`의 `"runtime": "checkout"`)는 xsm을 개발할 때 모든 것을 체크아웃에 둡니다.
+Codex 직접 설치는 이미 가진 훅 명령을 그대로 둡니다. Codex의 신뢰가 그 문자열을 덮기 때문입니다. 새로 하는 설치는
+갱신해도 그대로인 `~/.xsm/runtime/current`를 씁니다. 기존 Codex 설치를 체크아웃에서 옮기는 것은
+`codex plugin add xsm@xsm`뿐입니다.
+
+설치는 Claude 홈마다 `crossSessionInbound`도 `"accept"`로 둡니다(Claude Code 2.1.224 이상, 홈에 이미 값이 있으면
+그대로 둡니다). 그러면 두 세션의 권한 모드가 달라도 Claude가 내 다른 세션의 메시지를 전달합니다. 메시지 명령
+(`xsm send`, `inbox`, `list`, `who`, `held`, `ledger`, `status`, `doctor`, `--version`을 이름과 런타임의 절대
+경로로)과 MCP 도구(`xsm_send`, `xsm_inbox`, `xsm_post`, `xsm_channel`)도 `permissions.allow`에 넣어 auto와 default
+모드가 메시지를 막지 않게 합니다. `xsm uninstall`은 설치가 더한 것만 정확히 뺍니다. 이 기본값은 모두 열린 쪽이고
+`~/.xsm/config.json`이나 환경 변수(이쪽이 이깁니다)로 닫을 수 있습니다: `runtime`(`snapshot` | `checkout`,
+`XSM_RUNTIME`), `claude_inbound`(`accept` | `leave`, `XSM_CLAUDE_INBOUND`), `allow_messaging`
+(`XSM_ALLOW_MESSAGING`), `human_send_connects`(`XSM_HUMAN_SEND_CONNECTS`: 사람이 직접 친 범위 밖 `xsm send`가
+필요한 폴더를 잇고 전달합니다). 기본값에서 벗어난 것은 `xsm doctor`가 `policy` 한 줄로 보여 줍니다.
+
 </details>
 
 <details>
@@ -94,9 +116,12 @@ bin/xsm doctor                                                # 설치 상태, �
 
 - 한 홈(Claude든 Codex든)에 플러그인과 직접 설치가 함께 있으면 훅이 두 번 실행되어 위험합니다.
   `xsm install`은 그런 홈을 거부하며, `--force`를 주면 넘어갑니다.
-- `install --codex-home`은 `bin/xsm`을 `~/.local/bin/xsm`에 자동으로 링크하므로, `~/.local/bin`이 PATH에
-  있는지 확인하세요. 플러그인 없이 `--claude-home`만 지정했다면 `bin/xsm`을 PATH에 직접 링크해야 합니다.
-  Claude 플러그인은 세션 안에서 PATH를 설정하고, Codex 플러그인은 위의 링크를 유지합니다.
+- `xsm install`은 설치한 런타임의 `bin/xsm`을 `~/.local/bin/xsm`에 자동으로 링크하므로(다른 것을 가리키는
+  링크는 건드리지 않습니다), `~/.local/bin`이 PATH에 있는지 확인하세요. Claude 플러그인은 세션 안에서 PATH를
+  설정하고, Codex 플러그인은 위의 링크를 유지합니다.
+- xsm을 설치하기 전에(또는 플러그인을 켜기 전에) 시작한 세션은 아직 훅이 돈 적이 없습니다. 그 세션은 처음 xsm
+  명령이나 도구를 실행할 때 스스로 등록하고, 그 이름으로 보내는 쪽에는 열려 있지만 등록되지 않았다는 것과
+  등록되는 방법이 알려집니다.
 - Linux에서는 X.Org의 세션 관리자도 이름이 `xsm`입니다(x11-session-utils 패키지). 설치되어 있다면
   `command -v xsm`으로 이쪽이 먼저 잡히는지 확인하세요.
 

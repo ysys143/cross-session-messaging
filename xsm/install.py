@@ -8,7 +8,10 @@ removes exactly the marked groups on uninstall. Every write is preceded by a
 timestamped backup and followed by a re-parse.
 
 The interpreter is pinned to an absolute path at install time. A hook that
-starts under the wrong python silently stops gating (S8-g2).
+starts under the wrong python silently stops gating (S8-g2). The hook command
+of a Claude home is the sh launcher hooks/xsm-hook, which reads that pin and
+falls back to the pythons PATH has, and runs from a copy of the checkout under
+~/.xsm/runtime (the snapshot below), not from the checkout (2026-10-01).
 """
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ import subprocess
 import sys
 import time
 
-from . import config, paths
+from . import config, paths, policy
 
 MARKER = "#xsm-hook"
 FILE_MARKER = "<!-- xsm-managed -->"        # command files earlier versions wrote
@@ -92,24 +95,68 @@ def pin_python(path: str) -> dict:
     return record
 
 
-def hook_command(runtime: str, event: str) -> str:
-    entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         "hooks", "xsm-hook.py")
-    parts = [pinned_python(), entry]
+def _quote(path: str) -> str:
+    """The path as a shell word: in double quotes, as hooks/hooks.json writes its
+    own, unless it holds a character those do not keep."""
+    return '"%s"' % path if not re.search(r'["$`\\]', path) else shlex.quote(path)
+
+
+def hook_command(runtime: str, event: str, root: str | None = None,
+                 existing: str | None = None) -> str:
+    """The command a hook group runs. `root` is the folder it runs from (default
+    runtime_root()); `existing` is the command already in a Codex hooks.json.
+
+    Claude: the sh launcher, `"<root>/hooks/xsm-hook" #xsm-hook`. It tries the
+    pinned python, then the others PATH has, and turns the status 2 a python
+    gives for a script it cannot open into 1. Claude Code reads status 2 from a
+    hook as "block": macOS privacy protection denied a session's app
+    ~/Documents and every prompt was blocked (2026-10-01), and the form before
+    this one, `python <path> || exit 1`, still depended on that one python and
+    that one path existing (user decision, 2026-10-01: a conversation the person
+    wants is never blocked by a component failure).
+
+    Codex: `python <script> #xsm-hook`, as it was. The command is part of what
+    Codex's trust hash covers, so a home that has one keeps its script path and
+    only a new install chooses (codex_script); the plugin's codex-hooks.json is
+    not touched at all."""
     # Only a non-default state directory is written into the command. Writing
     # the default too made the command depend on whether the installing shell
     # happened to export XSM_HOME, so a reinstall rewrote every hook.
-    if os.environ.get("XSM_HOME") and not _is_default_home(os.environ["XSM_HOME"]):
-        parts.insert(0, "XSM_HOME=%s" % os.environ["XSM_HOME"])
-    command = " ".join(parts)
-    # Claude Code reads exit status 2 from a hook as "block", and Python exits 2
-    # when it cannot open the script. macOS privacy protection denied a
-    # session's app ~/Documents and every prompt was blocked (2026-10-01); a
-    # command that cannot run must be a plain error, exit 1. Codex's command is
-    # left as it is: a changed command makes its hooks untrusted again.
+    prefix = "XSM_HOME=%s " % os.environ["XSM_HOME"] \
+        if os.environ.get("XSM_HOME") and not _is_default_home(os.environ["XSM_HOME"]) else ""
     if runtime == "claude":
-        command += " || exit 1"
-    return "%s %s" % (command, MARKER)
+        return "%s%s %s" % (prefix, _quote(os.path.join(root or runtime_root(), "hooks",
+                                                        "xsm-hook")), MARKER)
+    return "%s%s %s %s" % (prefix, pinned_python(), codex_script(existing, root), MARKER)
+
+
+def codex_script(existing: str | None = None, root: str | None = None) -> str:
+    """The hook script of a Codex direct install. A command already there keeps
+    its script (changing it would make Codex ask to trust the hooks again); a
+    new install runs from ~/.xsm/runtime/current when it runs from a snapshot,
+    a path that stays the same when a refresh makes a newer one, so a refresh
+    never costs a re-trust."""
+    found = re.search(r"(\S+/hooks/xsm-hook\.py)", existing or "")
+    if found and os.path.exists(found.group(1)):
+        return found.group(1)
+    base = root or runtime_root()
+    if _under_runtime(base):
+        base = runtime_dir(LINK)
+    return os.path.join(base, "hooks", "xsm-hook.py")
+
+
+def hook_form(command: str | None) -> str | None:
+    """Which of the commands xsm has written this is: "launcher" (current),
+    "guarded" (`python <path> || exit 1`, the form after 0.4.14 and before the
+    launcher), "unguarded" (0.4.14 and before: Python's status 2 for a script it
+    cannot open blocks the prompt), "other" for anything else marked ours, None
+    for a command that is not xsm's."""
+    command = command or ""
+    if MARKER not in command:
+        return None
+    if "xsm-hook.py" in command:
+        return "guarded" if "|| exit 1" in command else "unguarded"
+    return "launcher" if "/hooks/xsm-hook" in command else "other"
 
 
 def _is_default_home(value: str) -> bool:
@@ -154,8 +201,15 @@ def _backup(target: str) -> str:
 
 def launcher() -> str:
     """The absolute `xsm` for what xsm writes into another program's config (a
-    worker's allow-list, a statusLine). The launcher in the repo works wherever
-    it is called from, so those never depend on PATH."""
+    worker's allow-list, a statusLine) and onto PATH: the one in the runtime the
+    hooks run from (runtime_root). The launcher works wherever it is called
+    from, so those never depend on PATH."""
+    return os.path.join(runtime_root(), "bin", "xsm")
+
+
+def cli_path() -> str:
+    """The `xsm` of the folder this CLI is running from, which is not
+    launcher() while a snapshot is what is installed."""
     return os.path.join(REPO, "bin", "xsm")
 
 
@@ -165,14 +219,35 @@ def launcher() -> str:
 PLUGIN_CACHE = r"/plugins/cache/xsm/xsm/[^/]+/"
 
 
+def _own_link(source: str) -> bool:
+    """Whether a link to `source` is one this checkout's install may move to the
+    runtime it installs: a link into a snapshot, or to the launcher of the
+    checkout it was copied from (installing from it is asking for what `xsm` on
+    PATH runs, 2026-10-01). Not from a plugin copy, which must never pull a
+    link off a person's working copy or a snapshot."""
+    if runtime_in_place():
+        return False
+    mine = [os.path.realpath(cli_path())]
+    source_checkout = (runtime_current() or {}).get("source")
+    if source_checkout:
+        mine.append(os.path.realpath(os.path.join(source_checkout, "bin", "xsm")))
+    return source in mine or _under_runtime(source)
+
+
 def install_cli() -> str:
-    """Link the launcher on PATH, replacing only a link into an older plugin version."""
+    """Link the launcher on PATH, replacing a link into an older plugin version,
+    and (from a checkout) a link into a snapshot or to the checkout itself."""
     target = os.path.expanduser("~/.local/bin/xsm")
     state = "linked"
     if os.path.islink(target):
         source = os.path.realpath(target)
         if source == os.path.realpath(launcher()):
             return "current"
+        if _own_link(source):
+            os.unlink(target)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.symlink(launcher(), target)
+            return "replaced"
         repo = os.path.dirname(os.path.dirname(source))
         if not re.search(PLUGIN_CACHE + "bin/xsm$", source) or (
                 os.path.exists(source) and not os.path.isfile(os.path.join(repo, "xsm", "install.py"))):
@@ -213,6 +288,17 @@ def plugin_installed(home: str) -> str | None:
     return codex["version"] if codex else None
 
 
+def plugin_disabled(home: str) -> bool:
+    """Whether this Claude home's settings switch the xsm plugin off
+    (`enabledPlugins: {"xsm@xsm": false}`): its hooks do not run, so having it
+    installed is no consent to register a session."""
+    data = paths.read_json(_settings_file(home, "claude"))
+    enabled = data.get("enabledPlugins") if isinstance(data, dict) else None
+    return isinstance(enabled, dict) and any(
+        (key == PLUGIN_NAME or key.startswith(PLUGIN_NAME + "@")) and value is False
+        for key, value in enabled.items())
+
+
 def plugin_root(home: str) -> str | None:
     """The folder of the xsm plugin in this home (`<root>/bin/xsm` runs that
     version by its absolute path), or None."""
@@ -242,7 +328,7 @@ def cli_info() -> dict:
     not knowable from the name `xsm` on PATH (2026-10-01: a plugin, a checkout
     and sessions started before an update at once); this says."""
     return {"version": plugin_version(), "describe": git_describe(),
-            "path": os.path.realpath(launcher())}
+            "path": os.path.realpath(cli_path())}
 
 
 def cli_text(info: dict) -> str:
@@ -257,7 +343,7 @@ def xsm_on_path() -> list:
     """Each `xsm` on PATH other than this CLI, first one first: {"version",
     "describe", "path", "via"}, with the version its folder's plugin manifest
     says and `via` the name as PATH has it."""
-    seen, found = {os.path.realpath(launcher())}, []
+    seen, found = {os.path.realpath(cli_path())}, []
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         via = shutil.which("xsm", path=folder) if folder else None
         real = os.path.realpath(via) if via else None
@@ -311,12 +397,17 @@ def plugin_revision(root: str | None) -> str | None:
     return rev if isinstance(rev, str) and _REV.fullmatch(rev) else git_head(root)
 
 
-def runtime_digest(root: str) -> str | None:
-    """A hash of the names and bytes of RUNTIME_FILES in a folder, or None when
-    there are none or one cannot be read."""
-    names = sorted({p for pattern in RUNTIME_FILES
-                    for p in glob.glob(os.path.join(root, pattern), recursive=True)
-                    if os.path.isfile(p) and "__pycache__" not in p})
+def runtime_files(root: str, patterns: tuple = RUNTIME_FILES) -> list:
+    """The files of a folder that `patterns` name, sorted."""
+    return sorted({p for pattern in patterns
+                   for p in glob.glob(os.path.join(root, pattern), recursive=True)
+                   if os.path.isfile(p) and "__pycache__" not in p})
+
+
+def runtime_digest(root: str, patterns: tuple = RUNTIME_FILES) -> str | None:
+    """A hash of the names and bytes of `patterns` (RUNTIME_FILES) in a folder,
+    or None when there are none or one cannot be read."""
+    names = runtime_files(root, patterns)
     if not names:
         return None
     digest = hashlib.sha256()
@@ -364,6 +455,240 @@ def plugin_older(version: str | None, root: str | None, revision: str | None = N
         return "differs from this CLI (%s)" % revision[:7]
     theirs, ours = runtime_digest(root), runtime_digest(REPO)
     return "differs from this CLI" if theirs and ours and theirs != ours else None
+
+
+# --- the runtime the installed hooks run from -------------------------------------------
+#
+# macOS privacy protection can deny a session's app the folder a checkout lives
+# in (~/Documents), and `python .../Documents/.../xsm-hook.py` then answered
+# status 2, which Claude Code reads as "block": every prompt of every session
+# stopped (2026-10-01). User decision, the same day: the running code moves out
+# of the checkout. `xsm install` copies what xsm needs at run time to
+# ~/.xsm/runtime/<id>/ and points the hooks, the MCP server and `xsm` on PATH at
+# that copy; the checkout is for development (--dev, or policy runtime=checkout).
+
+SNAPSHOTS = "runtime"           # ~/.xsm/runtime/<id>/, current.json, current -> <id>
+CURRENT = "current.json"        # which snapshot is installed, and the checkout it came from
+LINK = "current"                # a path that stays the same while the snapshot changes
+RETIRED = ".retired"            # in a snapshot a newer one replaced: when it was
+SNAPSHOT_FILES = RUNTIME_FILES + (".claude-plugin/plugin.json", ".codex-plugin/plugin.json")
+_ID = re.compile(r"[0-9a-f]{12}")
+
+
+def runtime_dir(*parts: str) -> str:
+    return paths.path(SNAPSHOTS, *parts)
+
+
+def _under_runtime(path: str) -> bool:
+    return (os.path.realpath(path) + os.sep).startswith(os.path.realpath(runtime_dir()) + os.sep)
+
+
+def runtime_in_place() -> bool:
+    """Whether this CLI runs from what the hooks run from already: a snapshot,
+    or a copy of the Claude or Codex plugin. There is nothing to copy then."""
+    return _under_runtime(REPO) or bool(re.search(PLUGIN_CACHE, os.path.realpath(REPO) + "/"))
+
+
+def runtime_current() -> dict | None:
+    """The installed snapshot, as current.json records it plus its `path`, or
+    None when none is installed or its folder is gone."""
+    record = paths.read_json(runtime_dir(CURRENT))
+    if not isinstance(record, dict) or not isinstance(record.get("id"), str) \
+            or not _ID.fullmatch(record["id"]):
+        return None
+    folder = runtime_dir(record["id"])
+    return dict(record, path=folder) if os.path.isdir(folder) else None
+
+
+def runtime_root(planned: bool = False) -> str:
+    """The folder the hooks, the MCP server and `xsm` on PATH run from: this
+    checkout for `--dev` (policy runtime=checkout) and when this CLI is itself a
+    snapshot or a plugin copy; else the installed snapshot, or this folder until
+    one is installed. `planned`: where `xsm install` would put the snapshot of
+    this checkout, for a dry run."""
+    if runtime_in_place() or policy.get("runtime") == "checkout":
+        return REPO
+    if planned:
+        digest = runtime_digest(REPO, SNAPSHOT_FILES)
+        return runtime_dir(digest[:12]) if digest else REPO
+    current = runtime_current()
+    return current["path"] if current else REPO
+
+
+def make_snapshot() -> dict:
+    """Copy this checkout's runtime to ~/.xsm/runtime/<id>/ (the first 12 hex of
+    runtime_digest over SNAPSHOT_FILES, so the same code is the same folder and a
+    dirty checkout is not mistaken for its commit), make it the installed one,
+    and return what current.json now says. The folder is built beside and renamed
+    into place, so a session never sees half of it. OSError when it cannot be
+    made; the caller then runs from the checkout as before."""
+    digest = runtime_digest(REPO, SNAPSHOT_FILES)
+    if not digest:
+        raise OSError("no xsm files to copy under %s" % REPO)
+    sid, previous = digest[:12], runtime_current()
+    dest = runtime_dir(sid)
+    os.makedirs(runtime_dir(), mode=0o700, exist_ok=True)
+    if not (os.path.isdir(dest) and runtime_digest(dest, SNAPSHOT_FILES) == digest):
+        tmp = dest + ".new"
+        shutil.rmtree(tmp, ignore_errors=True)
+        for name in runtime_files(REPO, SNAPSHOT_FILES):
+            target = os.path.join(tmp, os.path.relpath(name, REPO))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(name, target)
+        shutil.rmtree(dest, ignore_errors=True)
+        os.replace(tmp, dest)
+    if previous and previous["id"] != sid:
+        try:                    # sessions that started before now may still run its hooks
+            with open(os.path.join(previous["path"], RETIRED), "w") as fh:
+                fh.write("%f\n" % time.time())
+        except OSError:
+            pass
+    try:
+        os.unlink(os.path.join(dest, RETIRED))
+    except OSError:
+        pass
+    link, tmp_link = runtime_dir(LINK), runtime_dir(LINK + ".new")
+    try:
+        os.unlink(tmp_link)
+    except OSError:
+        pass
+    os.symlink(sid, tmp_link)
+    os.replace(tmp_link, link)
+    record = {"id": sid, "source": REPO, "rev": git_head(REPO), "describe": git_describe(),
+              "version": plugin_version(), "made": time.time()}
+    paths.write_json(runtime_dir(CURRENT), record, mode=0o644)
+    return dict(record, path=dest)
+
+
+def _epoch(lstart: str | None) -> float | None:
+    try:
+        return time.mktime(time.strptime(lstart, "%a %b %d %H:%M:%S %Y"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _live_session_starts() -> list:
+    """When each live session started: those xsm registered, and every Claude
+    session its homes' own sessions/ folder lists (one whose hook has not run is
+    in no xsm record, and its hooks are the ones a snapshot may still serve)."""
+    from . import identity, registry
+    stamps = [rec.get("lstart") for rec in registry.cheap_records()]
+    for home in config.homes():
+        if home.get("runtime") != "claude":
+            continue
+        for p in glob.glob(os.path.join(home["path"], "sessions", "*.json")):
+            pid = (paths.read_json(p, {}) or {}).get("pid")
+            if pid and identity.pid_alive(pid):
+                stamps.append(identity.lstart(pid))
+    return [_epoch(s) or 0.0 for s in stamps]       # one whose start is unknown counts as old
+
+
+def _snapshot_ids(text: str) -> set:
+    """The snapshot ids a text names as a folder of the runtime directory."""
+    found = set()
+    for folder in {runtime_dir(), os.path.realpath(runtime_dir())}:
+        found |= set(re.findall(re.escape(folder) + r"/([0-9a-f]{12})/", text))
+    return found
+
+
+def _running_from() -> set:
+    """The ids of the snapshots a running process was started from: an MCP
+    server or a worker has the folder in its command line. All of them when the
+    process table cannot be read."""
+    try:
+        out = subprocess.run(["ps", "-axo", "args="], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        try:
+            return {n for n in os.listdir(runtime_dir()) if _ID.fullmatch(n)}
+        except OSError:
+            return set()
+    return _snapshot_ids(out)
+
+
+def _configured_for() -> set:
+    """The ids of the snapshots a config file or the PATH link names: the
+    settings, hooks and MCP entries of every home xsm knows, ~/.claude.json,
+    and ~/.local/bin/xsm. A home `xsm install` did not touch this time keeps
+    the snapshot it was given."""
+    files = [os.path.expanduser("~/.claude.json")]
+    for home in config.homes():
+        files += [os.path.join(home["path"], name)
+                  for name in ("settings.json", "hooks.json", "config.toml", ".claude.json")]
+    texts = [_read_text(f) or "" for f in files]
+    link = os.path.expanduser("~/.local/bin/xsm")
+    texts.append(os.readlink(link) + "/" if os.path.islink(link) else "")
+    found = set()
+    for text in texts:
+        found |= _snapshot_ids(text)
+    return found
+
+
+def prune_snapshots(now: float | None = None) -> list:
+    """Remove the snapshots nothing needs; the ids removed. One stays while it is
+    the installed one, a config file names it (_configured_for), a process runs
+    from it (_running_from), or a session that started before a newer one
+    replaced it is still alive (it read its hooks when it started, and never
+    reads them again). User decision, 2026-10-01: keep the previous one until no
+    running session uses it."""
+    now = time.time() if now is None else now
+    current = (runtime_current() or {}).get("id")
+    try:
+        names = sorted(os.listdir(runtime_dir()))
+    except OSError:
+        return []
+    for name in names:                  # a copy that was never finished
+        full = runtime_dir(name)
+        if name.endswith(".new") and os.path.isdir(full) and now - os.path.getmtime(full) > 600:
+            shutil.rmtree(full, ignore_errors=True)
+    old = [n for n in names if _ID.fullmatch(n) and n != current
+           and os.path.isdir(runtime_dir(n)) and not os.path.islink(runtime_dir(n))]
+    if not old:
+        return []
+    held = _configured_for() | _running_from()
+    starts = None
+    removed = []
+    for name in old:
+        if name in held:
+            continue
+        try:
+            with open(runtime_dir(name, RETIRED)) as fh:
+                retired = float(fh.read().strip())
+        except (OSError, ValueError):
+            retired = now               # unknown: any live session may be using it
+        starts = _live_session_starts() if starts is None else starts
+        if any(start < retired for start in starts):
+            continue
+        shutil.rmtree(runtime_dir(name), ignore_errors=True)
+        removed.append(name)
+    return removed
+
+
+def runtime_status() -> dict:
+    """For doctor: the installed snapshot, and whether the checkout it was made
+    from has moved on since."""
+    current = runtime_current()
+    status = {"mode": policy.get("runtime"), "running_from": REPO, "in_place": runtime_in_place(),
+              "snapshot": None, "checkout": None}
+    if not current:
+        return status
+    status["snapshot"] = {k: current.get(k) for k in
+                          ("id", "path", "source", "rev", "describe", "version", "made")}
+    source = current.get("source")
+    if not source or os.path.realpath(source) == os.path.realpath(current["path"]):
+        return status
+    if not os.path.isdir(source):
+        status["checkout"] = {"path": source, "gone": True}
+        return status
+    digest = runtime_digest(source, SNAPSHOT_FILES)
+    info = {"path": source, "same": bool(digest) and digest[:12] == current["id"], "ahead": None}
+    head, rev = git_head(source), current.get("rev")
+    if not info["same"] and head and isinstance(rev, str) and _REV.fullmatch(rev) and head != rev:
+        count = _git(source, "rev-list", "--count", "%s..%s" % (rev, head))
+        n = count.stdout.strip() if count is not None and count.returncode == 0 else ""
+        info["ahead"] = int(n) if n.isdigit() else None
+    status["checkout"] = info
+    return status
 
 
 def codex_plugin(home: str) -> dict | None:
@@ -521,11 +846,34 @@ def stale_copies(home: str, runtime: str = "claude") -> list:
     return [detail] if state in ("copy-stale", "link-stale") else []
 
 
+def skill_source() -> str:
+    """The skill folder a link points at or a copy is made from: the installed
+    runtime's, since a session that macOS keeps out of the checkout's folder
+    could not read a skill that lives there either (2026-10-01)."""
+    return os.path.join(runtime_root(), "skills", "xsm")
+
+
+def _own_skill_link(real: str) -> bool:
+    """Whether a link (its real path) was made by an earlier `xsm install`: into a
+    snapshot, or to the skill of this checkout or of the one the snapshot was
+    copied from. Not from a plugin copy, which must not take a link off a
+    working copy."""
+    if _under_runtime(real):
+        return True
+    if runtime_in_place():
+        return False
+    mine = [os.path.realpath(os.path.join(REPO, "skills", "xsm"))]
+    source = (runtime_current() or {}).get("source")
+    if source:
+        mine.append(os.path.realpath(os.path.join(source, "skills", "xsm")))
+    return real in mine
+
+
 def _skill_tree() -> dict:
     """{path relative to skills/xsm: text} for every file the skill ships.
     SKILL.md alone is not the skill any more: it points at references/, and a
     copy without them sends the model to a file that is not there."""
-    source = os.path.join(REPO, "skills", "xsm")
+    source = skill_source()
     out = {}
     for root, dirs, files in os.walk(source):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -540,8 +888,9 @@ def _skill_tree() -> dict:
 def skill_state(home: str) -> tuple:
     """(state, detail) for the skill in this home.
 
-    linked        our symlink, in step with the repo
-    link-stale    a link into another version of the xsm plugin
+    linked        our symlink, in step with the runtime
+    link-stale    a link into another version of the xsm plugin, or into an earlier
+                  snapshot or the checkout (the runtime moved: refresh relinks it)
     copy-current  a copied skill directory whose files all match ours
     copy-stale    a copied skill directory that has fallen behind
     nested-link   a link made *inside* an existing directory (ln -sfn into a dir)
@@ -549,11 +898,12 @@ def skill_state(home: str) -> tuple:
     absent        nothing there yet
     """
     target = os.path.join(home, "skills", "xsm")
-    source = os.path.join(REPO, "skills", "xsm")
+    source = skill_source()
     if os.path.islink(target):
-        if os.path.realpath(target) == os.path.realpath(source):
+        real = os.path.realpath(target)
+        if real == os.path.realpath(source):
             return "linked", target
-        if not re.search(PLUGIN_CACHE + "skills/xsm$", os.path.realpath(target)):
+        if not _own_skill_link(real) and not re.search(PLUGIN_CACHE + "skills/xsm$", real):
             return "foreign", target
         header = (_read_text(os.path.join(target, "SKILL.md")) or "").splitlines()[:20]
         return ("link-stale" if not os.path.exists(target) or "name: xsm" in header
@@ -561,7 +911,8 @@ def skill_state(home: str) -> tuple:
     if not os.path.exists(target):
         return "absent", target
     nested = os.path.join(target, "xsm")
-    if os.path.islink(nested) and os.path.realpath(nested) == os.path.realpath(source):
+    if os.path.islink(nested) and (os.path.realpath(nested) == os.path.realpath(source)
+                                   or _own_skill_link(os.path.realpath(nested))):
         return "nested-link", nested
     if os.path.isfile(os.path.join(target, "SKILL.md")):
         # Files the copy has and we do not are left out of the comparison: they
@@ -595,7 +946,7 @@ def install_skill(home: str, refresh: bool = False) -> tuple:
         return state, detail
     target = os.path.join(home, "skills", "xsm")
     os.makedirs(os.path.dirname(target), exist_ok=True)
-    os.symlink(os.path.join(REPO, "skills", "xsm"), target)
+    os.symlink(skill_source(), target)
     return "linked", target
 
 
@@ -824,6 +1175,26 @@ def install_statusline(home: str) -> str:
     return outcome
 
 
+def refresh_statusline(home: str) -> bool:
+    """Point xsm's own statusLine at the launcher of the runtime that is installed
+    now. Its command names a path, and the snapshot it named is pruned once
+    nothing runs from it: a statusLine left on it would stop drawing, a person's
+    own composed under it with it. True when it was rewritten."""
+    target = _settings_file(home, "claude")
+    data = paths.read_json(target)
+    current = data.get("statusLine") if isinstance(data, dict) else None
+    command = current.get("command") if isinstance(current, dict) else None
+    if not isinstance(command, str) or MARKER not in command:
+        return False
+    want = statusline_command(target if " --base " in command else None)
+    if command == want:
+        return False
+    _backup(target)
+    current["command"] = want
+    paths.write_json(target, data, mode=0o644)
+    return True
+
+
 def remove_statusline(home: str) -> bool:
     """Take xsm's line out, and give back the statusLine it was composed onto."""
     target = _settings_file(home, "claude")
@@ -872,12 +1243,55 @@ NOTE_VERSION = 2              # a note without it predates counting the rules al
 # wrote these exact strings, so a home whose note is missing or old loses them.
 STALE_RULES = ("Bash(xsm spawn:*)", "Bash(xsm post:*)", "Bash(xsm doc add:*)")
 
+# Messaging itself, which the lists above left to Claude's classifier: auto mode
+# refused `xsm send` as it would any command it cannot tell the person wants,
+# and default mode asks, so a message the person wanted between their own
+# sessions could stop on a permission. User decision, 2026-10-01 ("a conversation
+# the user wants must never be blocked by permissions"): the commands that only
+# send, read, list or report are allowed, by the name `xsm` and by the absolute
+# path of the runtime (what the receive context and the guide hand an agent
+# where `xsm` is not on PATH), and so are the MCP tools that message. This
+# reverses the narrowing of 2026-10-01 (review) for messaging only: spawn, `xsm
+# post` and `doc add` stay with the classifier. Policy allow_messaging=false
+# takes them out again on the next refresh.
+MESSAGING_COMMANDS = ("send", "inbox", "list", "who", "held", "ledger", "status", "doctor",
+                      "--version")
+MESSAGING_TOOLS = ("xsm_send", "xsm_inbox", "xsm_post", "xsm_channel")
+
 
 def mcp_tool_names() -> list:
     """The MCP form tools in the allow list: all 0.4.13 and 0.4.14 wrote. Only
     xsm's own tools carry these names, so they are xsm's whatever the note says
     (2026-10-01: an old install after an uninstall adds them with no note)."""
     return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in FORM_TOOLS]
+
+
+def messaging_mcp_names() -> list:
+    """The MCP messaging tools in the allow list; xsm's own names, like the form tools."""
+    return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in MESSAGING_TOOLS]
+
+
+def rule_roots(home: str) -> list:
+    """The runtimes whose `<root>/bin/xsm` an agent in this home may be handed: the
+    one installed, and the plugin's copy when the home has the plugin."""
+    roots = [runtime_root()]
+    plugin = plugin_root(home)
+    if plugin and plugin not in roots:
+        roots.append(plugin)
+    return roots
+
+
+def messaging_rules(home: str) -> list:
+    rules = ["Bash(xsm %s:*)" % c for c in MESSAGING_COMMANDS]
+    for root in rule_roots(home):
+        rules += ["Bash(%s %s:*)" % (os.path.join(root, "bin", "xsm"), c)
+                  for c in MESSAGING_COMMANDS]
+    return rules + messaging_mcp_names()
+
+
+def wanted_rules(home: str) -> list:
+    """What `allow_form_tools` keeps in this home's allow list."""
+    return form_tool_names() + (messaging_rules(home) if policy.get("allow_messaging") else [])
 
 
 def form_tool_names() -> list:
@@ -907,7 +1321,7 @@ def missing_form_tools(home: str) -> list:
     if settings_invalid(home):
         return []
     allow = _allow_list(paths.read_json(_settings_file(home, "claude")))
-    return [n for n in form_tool_names() if n not in allow]
+    return [n for n in wanted_rules(home) if n not in allow]
 
 
 def _xsm_rules(note, allow: list) -> list:
@@ -920,8 +1334,8 @@ def _xsm_rules(note, allow: list) -> list:
     about 24 rules behind after uninstall)."""
     held = list(note["added"]) if isinstance(note, dict) and isinstance(note.get("added"), list) \
         else []
-    known = mcp_tool_names() if isinstance(note, dict) and note.get("v") == NOTE_VERSION \
-        else form_tool_names()
+    known = (mcp_tool_names() if isinstance(note, dict) and note.get("v") == NOTE_VERSION
+             else form_tool_names()) + messaging_mcp_names()
     return held + [n for n in known if n in allow and n not in held]
 
 
@@ -946,8 +1360,13 @@ def allow_form_tools(home: str) -> str:
     note = paths.read_json(note_path)
     current = isinstance(note, dict) and note.get("v") == NOTE_VERSION
     added = _xsm_rules(note, allow)
-    stale = [] if current else [n for n in STALE_RULES if n in allow]
-    missing = [n for n in form_tool_names() if n not in allow]
+    wanted = wanted_rules(home)
+    # What xsm added and this list no longer wants: the absolute path of a runtime
+    # a refresh replaced, messaging rules the person switched off. Only a rule
+    # xsm added is ever taken out.
+    stale = ([] if current else [n for n in STALE_RULES if n in allow]) + \
+        [n for n in added if n in allow and n not in wanted and n not in STALE_RULES]
+    missing = [n for n in wanted if n not in allow]
     created = note.get("created") if isinstance(note, dict) and \
         isinstance(note.get("created"), list) else None
     made = [k for k, there in (("permissions", isinstance(data.get("permissions"), dict)),
@@ -962,9 +1381,10 @@ def allow_form_tools(home: str) -> str:
         perms["allow"] = [n for n in allow if n not in stale] + missing
         data["permissions"] = perms
         paths.write_json(target, data, mode=0o644)
-        added += [n for n in missing if n not in added]
+        added = [n for n in added if n not in stale] + [n for n in missing if n not in added]
     if missing or stale or not current:
-        record = {"file": target, "added": added, "v": NOTE_VERSION}
+        record = dict(note) if isinstance(note, dict) else {}
+        record.update(file=target, added=added, v=NOTE_VERSION)
         if created is not None:
             record["created"] = created
         paths.write_json(note_path, record)
@@ -1008,6 +1428,72 @@ def remove_form_tools(home: str) -> bool:
     return len(kept) != len(allow)
 
 
+# Claude holds a message from another session for its person when the two
+# sessions' permission modes differ (a bypass session writing to one that asks),
+# so the sender's "delivered" is "held for a person who may be away". The
+# documented answer is the setting `crossSessionInbound` (Claude Code 2.1.224 and
+# later; code.claude.com/docs/en/settings-reference#crosssessioninbound):
+# "accept" delivers whatever the modes are. User decision, 2026-10-01: install
+# sets it, in each Claude home, unless the home already says something: a
+# "hold" or "refuse" there is the person's own choice and stays.
+INBOUND_KEY = "crossSessionInbound"
+
+
+def set_inbound(home: str) -> str:
+    """Set crossSessionInbound to "accept" in this Claude home's settings, and note
+    that xsm did, so uninstall takes out only that: set | already | off (policy
+    claude_inbound=leave) | invalid (settings xsm cannot read: untouched) |
+    kept:<value> (the home says another value, which is left as it is)."""
+    if policy.get("claude_inbound") != "accept":
+        return "off"
+    if settings_invalid(home):
+        return "invalid"
+    target = _settings_file(home, "claude")
+    data = paths.read_json(target, {}) or {}
+    have = data.get(INBOUND_KEY)
+    if have is not None:
+        return "already" if have == "accept" else "kept:%s" % have
+    if os.path.exists(target):
+        _backup(target)
+    data[INBOUND_KEY] = "accept"
+    paths.write_json(target, data, mode=0o644)
+    note_path = _state_file(ALLOWED, target)
+    note = paths.read_json(note_path)
+    # No `v` in a note made here: allow_form_tools reads one without it as an old
+    # home and claims the rules an earlier version put there.
+    record = dict(note) if isinstance(note, dict) else {"file": target}
+    record["inbound"] = "accept"
+    paths.write_json(note_path, record)
+    return "set"
+
+
+def remove_inbound(home: str) -> bool:
+    """Take out the crossSessionInbound xsm set, and only that one: not a value the
+    person has since changed, and not one that was there before xsm."""
+    target = _settings_file(home, "claude")
+    data = paths.read_json(target)
+    note_path = _state_file(ALLOWED, target)
+    note = paths.read_json(note_path)
+    if not isinstance(data, dict) or not isinstance(note, dict) or not note.get("inbound"):
+        return False
+    done = data.get(INBOUND_KEY) == note["inbound"]
+    if done:
+        _backup(target)
+        del data[INBOUND_KEY]
+        paths.write_json(target, data, mode=0o644)
+    note.pop("inbound")
+    paths.write_json(note_path, note)
+    return done
+
+
+def inbound_state(home: str) -> str | None:
+    """What this Claude home's settings say about crossSessionInbound, for doctor:
+    the value, or None when it says nothing."""
+    data = paths.read_json(_settings_file(home, "claude"))
+    value = data.get(INBOUND_KEY) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def retired_commands(home: str) -> list:
     """The per-command files earlier versions wrote: `commands/xsm-*.md` in a
     Claude home, `skills/xsm-*/` in a Codex one. The commands became arguments
@@ -1045,8 +1531,8 @@ def remove_retired(home: str) -> list:
 
 def remove_skill(home: str) -> bool:
     target = os.path.join(home, "skills", "xsm")
-    source = os.path.join(REPO, "skills", "xsm")
-    if os.path.islink(target) and os.path.realpath(target) == os.path.realpath(source):
+    if os.path.islink(target) and (os.path.realpath(target) == os.path.realpath(skill_source())
+                                   or _own_skill_link(os.path.realpath(target))):
         os.unlink(target)
         return True
     # A copy of our skill (made by hand where a link would not do; install_skill
@@ -1068,8 +1554,15 @@ def _read_text(p: str):
         return None
 
 
-def plan(home: str, runtime: str) -> dict:
-    """What install would change. Used by --dry-run and by doctor."""
+def _command_script(command: str | None) -> str | None:
+    """The hook file a marked command runs (the launcher or xsm-hook.py), or None."""
+    found = re.search(r"(/[^\s\"']*/hooks/xsm-hook(?:\.py)?)", command or "")
+    return found.group(1) if found else None
+
+
+def plan(home: str, runtime: str, root: str | None = None) -> dict:
+    """What install would change. Used by --dry-run and by doctor. `root` is
+    the runtime the hooks would run from (default runtime_root())."""
     home = os.path.realpath(os.path.expanduser(home))
     target = _settings_file(home, runtime)
     data = paths.read_json(target)
@@ -1082,15 +1575,24 @@ def plan(home: str, runtime: str) -> dict:
     for event in events:
         groups = hooks.get(event, [])
         ours = [g for g in groups if _is_ours(g)]
-        want = hook_command(runtime, event)
+        theirs = ours[0]["hooks"][0].get("command") if len(ours) == 1 else None
+        want = hook_command(runtime, event, root=root, existing=theirs)
         # "keep" means exactly one marked group with exactly the right command:
         # a duplicate or a stale path still needs replacing.
-        have = len(ours) == 1 and _same_command(ours[0]["hooks"][0].get("command"), want) and \
+        have = len(ours) == 1 and _same_command(theirs, want) and \
             ours[0]["hooks"][0].get("timeout", 10) == TIMEOUTS.get(event, 10) and \
             ours[0].get("matcher") == MATCHERS.get(event)
-        actions.append({"event": event, "others": len(groups) - len(ours),
-                        "action": "keep" if have else ("replace" if ours else "add"),
-                        "command": want})
+        action = {"event": event, "others": len(groups) - len(ours),
+                  "action": "keep" if have else ("replace" if ours else "add"),
+                  "command": want}
+        if ours:
+            # What is there now, for doctor: the form (hook_form) and whether the
+            # file it runs is still on disk.
+            now = [h.get("command") for g in ours for h in g.get("hooks", [])]
+            action["forms"] = sorted({hook_form(c) or "other" for c in now})
+            action["gone"] = [s for s in {_command_script(c) for c in now}
+                              if s and not os.path.exists(s)]
+        actions.append(action)
     # Our groups on events we no longer install (an earlier version's) go.
     for event, groups in hooks.items():
         if event not in events and any(_is_ours(g) for g in groups):
@@ -1159,8 +1661,8 @@ def remove(home: str, runtime: str) -> dict:
     return {"home": home, "file": target, "backup": backup, "removed": removed}
 
 
-def diff(home: str, runtime: str) -> str:
-    result = plan(home, runtime)
+def diff(home: str, runtime: str, root: str | None = None) -> str:
+    result = plan(home, runtime, root)
     if result.get("error"):
         return "%s: %s" % (result["file"], result["error"])
     lines = ["%s (%s)" % (result["file"], "exists" if result["exists"] else "will be created")]
@@ -1265,6 +1767,10 @@ def doctor() -> dict:
     revisions = {home: plugin_revision(root) for home, root in roots.items()}
     report = {
         "xsm_home": paths.HOME,
+        "runtime": runtime_status(),
+        "policy": policy.report(),
+        "inbound": {h["path"]: inbound_state(h["path"]) for h in homes
+                    if h.get("runtime") == "claude"},
         "interpreter": pinned_python(),
         "interpreter_pinned": paths.read_json(paths.path(INTERPRETER)) is not None,
         "interpreter_ok": version >= (3, 9),
@@ -1333,7 +1839,10 @@ def plugin_version() -> str:
 
 
 def mcp_command() -> list:
-    return [pinned_python(), os.path.join(REPO, "hooks", "xsm-mcp.py")]
+    """What the MCP server is registered to run: the sh launcher of the runtime,
+    which finds an interpreter itself (a pinned python that went away, a brew
+    upgrade, no longer leaves the xsm tools gone), like the plugin's."""
+    return [os.path.join(runtime_root(), "hooks", "xsm-mcp")]
 
 
 def _runtime_env(home: str, runtime: str) -> dict:

@@ -78,8 +78,11 @@ class PolicyTest(TempState):
 
     def test_doctor_shows_each_value_and_names_what_is_not_the_default(self):
         line = next(l for l in self._doctor() if l.startswith("policy "))
-        self.assertEqual(line, "policy     fail_open=true remote_native=pass stale_sender=pass "
-                               "reply_from_request=true reply_flag=true")
+        for part in ("fail_open=true", "remote_native=pass", "stale_sender=pass",
+                     "reply_from_request=true", "reply_flag=true", "runtime=snapshot",
+                     "claude_inbound=accept", "allow_messaging=true", "human_send_connects=true"):
+            self.assertIn(part, line)
+        self.assertNotIn("not the default", line)
         with mock.patch.dict(os.environ, {"XSM_STALE_SENDER": "hold", "XSM_FAIL_OPEN": "0"}):
             lines = self._doctor()
         line = next(l for l in lines if l.startswith("policy "))

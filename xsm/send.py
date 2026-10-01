@@ -38,6 +38,18 @@ class SendResult:
                                  for c in self.candidates]
         return out
 
+    def lines(self) -> list:
+        """What the CLI prints and the MCP tool returns: the notes of a one-yes
+        send, the status and reason, and the candidates when naming them helps
+        the caller find the right one."""
+        out = list(self.notes) + ["%s: %s" % (self.status, self.reason or self.msg_id or "")]
+        if self.candidates and "resume it with" not in (self.reason or "") \
+                and "has not registered" not in (self.reason or ""):
+            out.append("registered sessions right now:" if "no session" in (self.reason or "")
+                       else "candidates:")
+            out.append(resolve.describe(self.candidates))
+        return out
+
 
 # A held message has left once the receiving side has taken it, even to hold it.
 LEFT = ("delivered", "sent-unconfirmed", "held", "blocked")
@@ -64,9 +76,18 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
                              kind="PRODUCER") if telemetry else nullcontext()
     with span_cm as span:
         ctx = {"notes": [], "held": None}
-        result = _send(target_spec, body, sender=sender, kind=kind, reply_to=reply_to,
-                       priority=priority, wait=wait, msg_id=msg_id, outcome=outcome,
-                       resend=resend, span=span, held=held, ctx=ctx)
+        try:
+            result = _send(target_spec, body, sender=sender, kind=kind, reply_to=reply_to,
+                           priority=priority, wait=wait, msg_id=msg_id, outcome=outcome,
+                           resend=resend, span=span, held=held, ctx=ctx)
+        except OSError as err:
+            # A sandboxed or read-only shell cannot write the ledger, and the send
+            # crashed with a traceback (found in the audit of 2026-10-01). The
+            # ledger is written before anything is delivered, so this is a send
+            # that did not go; say what to do instead.
+            if not paths.blocked_write(err):
+                raise
+            result = SendResult("error", paths.sandbox_blocked(err))
         result.notes = ctx["notes"]
         if ctx["held"] and result.status in LEFT:
             outbox.drop(ctx["held"])        # it went: the held copy must not send it twice
@@ -303,12 +324,16 @@ def native_forecast(sender: dict, target: dict) -> tuple:
     if setting == "accept":
         return "accept", "receiver's user settings say crossSessionInbound=accept"
     if setting in ("hold", "refuse"):
-        return setting, "receiver's settings say crossSessionInbound=%s" % setting
+        return setting, ("receiver's settings say crossSessionInbound=%s (its user's own "
+                         "choice: xsm install leaves a value that is set)" % setting)
     mine, theirs = registry.mode_class(sender), registry.mode_class(target)
     if mine is None or theirs is None:
         return "unknown", "one of the two permission modes is not known yet"
     if mine == theirs:
         return "accept", "both sessions run in %s mode" % theirs
     return "hold", ("sender is %s and receiver is %s, so Claude holds the message for its "
-                    "user; set crossSessionInbound to \"accept\" on the receiver, or match "
-                    "the permission modes" % (mine, theirs))
+                    "user. `xsm install --refresh` (your agent can run it) sets "
+                    "crossSessionInbound to \"accept\" in the receiver's Claude home, %s, after "
+                    "which a message goes through whatever the modes are (user decision, "
+                    "2026-10-01); or match the permission modes" % (
+                        mine, theirs, target.get("home") or "wherever it is installed"))

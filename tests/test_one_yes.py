@@ -252,12 +252,52 @@ class FailOpenTest(_Sessions):
         self.assertEqual(self._held_files(), [])
         self.assertEqual(config.links(), [])
 
-    def test_a_person_at_a_terminal_gets_the_refusal_not_a_held_message(self):
-        from xsm import workers
+    def test_a_person_who_types_the_send_is_the_yes_and_it_connects_and_goes(self):
+        """The one send still refused (e82243c: "a person's own typed send is
+        refused as before") is now the person's own consent: connect as the
+        one-yes flow would, deliver, and print what was connected (user
+        decision, 2026-10-01). Nothing is held: it goes at once."""
+        from xsm import config, ledger, workers
         with mock.patch.object(workers, "human_terminal", return_value=True):
             code, text = self._send()
-        self.assertIn("xsm link", text)
+        self.assertEqual(code, 3, text)                 # sent, unconfirmed: queued to Codex
+        self.assertIn("you typed this send yourself, so xsm is connecting", text)
+        self.assertIn("linked: the sessions in", text)
+        self.assertIn("sent-unconfirmed", text)
+        self.assertNotIn("NOT sent", text)
         self.assertEqual(self._held_files(), [])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(config.links()), 1)
+        self.assertEqual(len(ledger.recent()), 1)
+        from xsm import paths
+        record = [d for d in paths.read_jsonl("decisions.jsonl") if d.get("event") == "consent"]
+        self.assertEqual(len(record), 1)
+        self.assertEqual(record[0]["verdict"], "typed `xsm send` themselves")
+
+    def test_the_same_connection_the_one_yes_flow_would_pick(self):
+        """A named project the target is in that the sender is not in: a join."""
+        from xsm import config, workers
+        config.join("demo", self.b)
+        with mock.patch.object(workers, "human_terminal", return_value=True):
+            code, text = self._send()
+        self.assertEqual(code, 3, text)
+        self.assertIn("joined project demo", text)
+        self.assertEqual(config.links(), [])
+
+    def test_a_person_who_turned_it_off_gets_the_refusal_not_a_held_message(self):
+        from xsm import config, paths, workers
+        for how in ("env", "file"):
+            with self.subTest(how):
+                env = {"XSM_HUMAN_SEND_CONNECTS": "0"} if how == "env" else {}
+                if how == "file":
+                    paths.write_json(paths.path(config.CONFIG), {"human_send_connects": False})
+                with mock.patch.dict(os.environ, env), \
+                        mock.patch.object(workers, "human_terminal", return_value=True):
+                    code, text = self._send()
+                self.assertEqual(code, 2, text)
+                self.assertIn("xsm link", text)
+                self.assertEqual(self._held_files(), [])
+                self.assertEqual(config.links(), [])
 
     def test_a_message_that_cannot_be_kept_is_refused_as_before(self):
         from xsm import outbox

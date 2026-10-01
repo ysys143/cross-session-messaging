@@ -24,7 +24,11 @@ Each row reads `name@home [ref] runtime state mode cwd`. A session marked
 `unregistered` has no hook and cannot be addressed. If xsm says *this*
 session is not registered (yet), its hooks have not run here since they were
 installed or trusted; they register it at its next prompt, so have your user
-send any message and try again before suspecting the install. A Codex TUI that
+send any message and try again before suspecting the install. A session that
+started before xsm was installed (or its plugin enabled) registers itself the
+first time it runs any `xsm` command or tool, so this should be rare; and when
+you name such a session, the refusal says it is open but unregistered and how it
+gets registered, instead of "no such session". A Codex TUI that
 just opened a thread shows up as `codex-<6 chars>@codex [ref]` before anyone
 has typed there, and can be sent to like any session. Only a row with `[-]`
 (`…no prompt yet; Codex has not logged its id…`) has no address yet; tell
@@ -227,11 +231,20 @@ the target `would-be-held`), the message waits in the receiving session until
 its person presses Deliver; the reason names what differs (permission modes,
 or a `crossSessionInbound` setting). Tell your user exactly that, with the
 reason, rather than "sent". `xsm ledger` shows such a message as
-`awaiting-approval` until it arrives.
+`awaiting-approval` until it arrives. Install sets `crossSessionInbound` to
+`"accept"` in each Claude home that has no value, so a hold for differing modes
+means that home was installed before this, or says its own value (a `hold` or
+`refuse` is your user's and is left alone): ask your user, then run
+`xsm install --refresh` yourself.
 
 From a sandboxed shell (a background worker, a Codex workspace-write
 session) `xsm send` to a Codex peer refuses at once and says to use the
 `xsm_send` MCP tool: `codex queue` cannot run inside the sandbox. Use the tool.
+Any xsm command that cannot write its state folder (a sandbox, a read-only
+folder) answers `sandbox-blocked: …` with the file and the cause, never a
+traceback: send with `xsm_send`, and use `xsm_inbox`, `xsm_post`, `xsm_channel`
+for the rest. A send your user typed themselves, out of scope, connects the
+folders it needs and delivers, and prints what it connected.
 
 Waiting for a peer? `xsm inbox --wait 60` blocks until one arrives and returns
 the moment it does. **Do not sleep-poll** — a loop that never ends your turn is
@@ -497,8 +510,10 @@ wait for a new session to get the new command.
   ~/.claude*/plugins/cache/xsm/xsm/*/bin/xsm`, where the `installPath` of
   `xsm@xsm` in a home's `plugins/installed_plugins.json` is the current one
   (one pattern per command: zsh refuses the whole command when one matches
-  nothing). A direct install: the checkout the `~/.local/bin/xsm` link points
-  to, or the folder in the `#xsm-hook` commands of the home's `settings.json`.
+  nothing). A direct install: the `runtime` line of `xsm doctor` names the copy
+  under `~/.xsm/runtime/<id>/` the hooks, the MCP server and `~/.local/bin/xsm`
+  run from (the same folder as in the `#xsm-hook` commands of the home's
+  `settings.json`), and the checkout it was copied from.
 
 Then run `<that folder>/bin/xsm <command>`. That fixes an old or missing `xsm`
 on the PATH, old instructions from an MCP tool, and old instructions in a
@@ -516,7 +531,14 @@ command:
 
 **Updating.** Ask your user whether to update, naming the copy and its home;
 on a yes you run it, never they. A direct install updates by its checkout:
-`git -C <checkout> pull --ff-only`, then `<checkout>/bin/xsm install --refresh`. Pull only
+`git -C <checkout> pull --ff-only`, then `<checkout>/bin/xsm install --refresh`
+(run by the checkout's own path: it copies the checkout to a new runtime under
+`~/.xsm/runtime`, points every hook, MCP registration, statusLine and
+`~/.local/bin/xsm` at it and prunes copies nothing runs from; doctor's `runtime`
+line says when the checkout is ahead of the copy; `--dev` runs from the checkout
+itself, for developing xsm). `xsm doctor` also names a hook command of the old
+`python <script>` form as one that can block a prompt: replace it the same way,
+with `xsm install --refresh`. Pull only
 when `git -C <checkout> status --short --branch` shows no changed files and a
 branch (not `HEAD (no branch)`); otherwise stop and tell your user what is in
 the way. A Codex plugin, for each Codex home: `CODEX_HOME=<home> codex plugin

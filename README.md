@@ -88,6 +88,31 @@ A directly installed copy does not follow changes to the repository. When `xsm d
 update it with `xsm install --refresh`. After a plugin update, run `install --refresh` with the new
 version's `bin/xsm`.
 
+What a direct install runs from: `xsm install` copies the runtime of this checkout (`xsm/`, `hooks/`,
+`skills/`, `bin/`, the plugin manifests) to `~/.xsm/runtime/<id>/` and points everything at that copy: the
+Claude hook command (the `hooks/xsm-hook` launcher, which finds a working python itself and turns a script it
+cannot open into an error, never a blocked prompt), the MCP server registration (the `hooks/xsm-mcp`
+launcher), and `~/.local/bin/xsm`. macOS can deny a session's app the folder a checkout lives in
+(`~/Documents`), and a hook that cannot run must not stop a prompt. The copy before the current one stays
+until no live session started before it, and is then pruned. `xsm doctor`'s `runtime` line names the copy and
+says when the checkout has moved on; the agent then runs `<checkout>/bin/xsm install --refresh`. `--dev`
+(or `"runtime": "checkout"` in `config.json`) keeps everything pointing at the checkout, for developing xsm.
+A Codex direct install keeps the hook command it has, because Codex's trust covers its text; a new one names
+`~/.xsm/runtime/current`, which stays the same across refreshes. Only `codex plugin add xsm@xsm` moves an
+existing Codex install off its checkout.
+
+For each Claude home, install also sets `crossSessionInbound` to `"accept"` (Claude Code 2.1.224 and later;
+a value the home already has stays), so Claude delivers a message from another of your sessions whatever the
+two permission modes are, and allows the messaging commands (`xsm send`, `inbox`, `list`, `who`, `held`,
+`ledger`, `status`, `doctor`, `--version`, by name and by the runtime's absolute path) and MCP tools
+(`xsm_send`, `xsm_inbox`, `xsm_post`, `xsm_channel`) in `permissions.allow`, so auto and default modes never
+stop a message. `xsm uninstall` takes out exactly what install added. Each of these defaults is open and can
+be closed in `~/.xsm/config.json` or by an environment variable (which wins): `runtime` (`snapshot` |
+`checkout`, `XSM_RUNTIME`), `claude_inbound` (`accept` | `leave`, `XSM_CLAUDE_INBOUND`), `allow_messaging`
+(`XSM_ALLOW_MESSAGING`), and `human_send_connects` (`XSM_HUMAN_SEND_CONNECTS`: an out-of-scope `xsm send` a
+person typed themselves connects the folders it needs and delivers). `xsm doctor` shows any that is not at its
+default on one `policy` line.
+
 </details>
 
 <details>
@@ -95,9 +120,12 @@ version's `bin/xsm`.
 
 - If a home (Claude or Codex) has both the plugin and a direct install, its hooks run twice, which is
   dangerous. `xsm install` refuses such a home unless you pass `--force`.
-- `install --codex-home` links `bin/xsm` at `~/.local/bin/xsm` for you, so make sure `~/.local/bin` is on
-  your PATH. With only `--claude-home` and no plugin, link `bin/xsm` onto your PATH yourself. The Claude
-  plugin sets PATH inside sessions, and the Codex plugin keeps the link described above.
+- `xsm install` links the installed runtime's `bin/xsm` at `~/.local/bin/xsm` for you (a link to something else
+  is left alone), so make sure `~/.local/bin` is on your PATH. The Claude plugin sets PATH inside sessions,
+  and the Codex plugin keeps the link described above.
+- A session that started before xsm was installed (or before its plugin was enabled) has not run a hook yet.
+  It registers itself the first time it runs an xsm command or tool, and a sender that names it is told it is
+  open but unregistered, and how it gets registered.
 - On Linux, X.Org's session manager is also called `xsm` (package x11-session-utils). If it is installed,
   run `command -v xsm` to check that this one comes first.
 

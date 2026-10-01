@@ -29,14 +29,24 @@ def _run_cli(argv: list) -> str:
     return out.getvalue()
 
 
-RUNTIME_IDENTITY = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CODEX_THREAD_ID",
-                    "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "XSM_SANDBOXED")
+RUNTIME_IDENTITY = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_PID",
+                    "CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
+                    "XSM_SANDBOXED", "XSM_RUNTIME", "XSM_CLAUDE_INBOUND", "XSM_ALLOW_MESSAGING",
+                    "XSM_HUMAN_SEND_CONNECTS")
 
 
 class TempState(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="xsm-test-")
         os.environ["XSM_HOME"] = self.tmp
+        # An install links `xsm` into ~/.local/bin and reads ~/.claude.json: a test
+        # must never reach the real ones.
+        self.addCleanup(lambda v=os.environ.get("HOME"):
+                        os.environ.__setitem__("HOME", v) if v is not None
+                        else os.environ.pop("HOME", None))
+        self.user_home = tempfile.mkdtemp(prefix="xsm-test-home-")
+        self.addCleanup(shutil.rmtree, self.user_home, ignore_errors=True)
+        os.environ["HOME"] = self.user_home
         # The suite runs inside a Claude or Codex shell, whose ids and sandbox
         # markers decide who `me` is: a test setting a Claude id kept the real
         # CODEX_THREAD_ID beside it (review, 2026-09-28). Tests set their own.
@@ -658,7 +668,10 @@ class InterpreterPinTest(TempState):
         from xsm import install
         install.pin_python(sys.executable)
         self.assertEqual(install.pinned_python(), sys.executable)
-        self.assertIn(sys.executable, install.hook_command("claude", "SessionStart"))
+        # A Codex hook names the python; a Claude hook runs the launcher, which
+        # reads the pin (hooks/xsm-hook) and falls back when it is gone.
+        self.assertIn(sys.executable, install.hook_command("codex", "SessionStart"))
+        self.assertNotIn(sys.executable, install.hook_command("claude", "SessionStart"))
         self.assertTrue(install.hook_command("claude", "SessionStart").endswith(install.MARKER))
 
 class IdempotenceTest(TempState):
@@ -1066,7 +1079,7 @@ class FormToolPermissionTest(TempState):
         home = os.path.join(self.tmp, "only-stale")
         os.makedirs(home)
         target = os.path.join(home, "settings.json")
-        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] + install.form_tool_names()
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] + install.wanted_rules(home)
                                                   + list(install.STALE_RULES)}})
         self.assertEqual(install.allow_form_tools(home), "updated")
         allow = paths.read_json(target)["permissions"]["allow"]
@@ -1114,7 +1127,7 @@ class FormToolPermissionTest(TempState):
         os.makedirs(home)
         install.allow_form_tools(home)
         self.assertEqual(sorted(paths.read_json(os.path.join(home, "settings.json"))
-                                ["permissions"]["allow"]), sorted(install.form_tool_names()))
+                                ["permissions"]["allow"]), sorted(install.wanted_rules(home)))
 
     def test_only_the_commands_that_ask_are_allowed(self):
         """Review, 2026-10-01: spawn, post and doc add mostly ask no one, so
@@ -1160,9 +1173,9 @@ class FormToolPermissionTest(TempState):
         target = os.path.join(home, "settings.json")
         paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] +
                                                   install.form_tool_names()}})
-        self.assertEqual(install.allow_form_tools(home), "already")
+        self.assertEqual(install.allow_form_tools(home), "added", "the messaging rules are new")
         note = paths.read_json(install._state_file(install.ALLOWED, target))
-        self.assertEqual(sorted(note["added"]), sorted(install.form_tool_names()))
+        self.assertEqual(sorted(note["added"]), sorted(install.wanted_rules(home)))
         self.assertEqual(note["v"], install.NOTE_VERSION)
         self.assertTrue(install.remove_form_tools(home))
         self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
@@ -1179,7 +1192,8 @@ class FormToolPermissionTest(TempState):
                                                   "deny": ["X"]}})
         self.assertEqual(install.allow_form_tools(home), "added")     # one was missing
         note = paths.read_json(install._state_file(install.ALLOWED, target))
-        self.assertEqual(sorted(note["added"]), sorted(names), "what was there is noted too")
+        self.assertEqual(sorted(note["added"]), sorted(install.wanted_rules(home)),
+                         "what was there is noted too, and the messaging rules this build adds")
         self.assertTrue(install.remove_form_tools(home))
         self.assertEqual(paths.read_json(target)["permissions"],
                          {"allow": ["Bash(ls:*)"], "deny": ["X"]})
@@ -1192,13 +1206,16 @@ class FormToolPermissionTest(TempState):
         home = os.path.join(self.tmp, "c4852bc")
         os.makedirs(home)
         target = os.path.join(home, "settings.json")
-        paths.write_json(target, {"permissions": {"allow": install.form_tool_names() +
+        paths.write_json(target, {"permissions": {"allow": install.wanted_rules(home) +
                                                   ["Bash(ls:*)"]}})
         note_path = install._state_file(install.ALLOWED, target)
         paths.write_json(note_path, {"file": target, "added": ["Skill(xsm:xsm)"]})
         self.assertEqual(install.allow_form_tools(home), "already")
         note = paths.read_json(note_path)
-        self.assertEqual(sorted(note["added"]), sorted(install.form_tool_names()))
+        # The messaging commands are not claimed: an earlier version never wrote
+        # them, so one already there is the person's (the MCP tools are xsm's names).
+        self.assertEqual(sorted(note["added"]),
+                         sorted(install.form_tool_names() + install.messaging_mcp_names()))
         self.assertEqual(note["v"], install.NOTE_VERSION)
         # Once: what the user writes after that is theirs, a stale-looking name too.
         user = paths.read_json(target)
@@ -1207,8 +1224,10 @@ class FormToolPermissionTest(TempState):
         self.assertEqual(install.allow_form_tools(home), "already")
         self.assertIn("Bash(xsm spawn:*)", paths.read_json(target)["permissions"]["allow"])
         self.assertTrue(install.remove_form_tools(home))
-        self.assertEqual(paths.read_json(target)["permissions"]["allow"],
-                         ["Bash(ls:*)", "Bash(xsm spawn:*)"])
+        theirs = [r for r in install.messaging_rules(home)
+                  if r not in install.messaging_mcp_names()]
+        self.assertEqual(sorted(paths.read_json(target)["permissions"]["allow"]),
+                         sorted(["Bash(ls:*)", "Bash(xsm spawn:*)"] + theirs))
 
     def test_an_old_note_is_completed_by_uninstall_too(self):
         from xsm import install, paths
@@ -3761,10 +3780,12 @@ class SkillLayoutTest(unittest.TestCase):
         head = self.skill.split("\n---\n", 1)[0]
         self.assertIn("name: xsm\n", head)
         allowed = [line for line in head.splitlines() if line.startswith("allowed-tools:")][0]
-        self.assertNotIn("send", allowed)
         # Exact commands, not prefixes: `xsm held:*` would also approve
-        # `xsm held drop`, and `xsm list:*` would approve `xsm list clear`.
-        self.assertNotIn(":*", allowed)
+        # `xsm held drop`, and `xsm list:*` would approve `xsm list clear`. The one
+        # prefix is `send`, a person's own wish to message a session (user
+        # decision, 2026-10-01: messaging is never stopped by a permission).
+        self.assertIn("Bash(xsm send:*)", allowed)
+        self.assertEqual(allowed.count(":*"), 1, allowed)
         for command in ("list --table", "who --table", "projects --table", "doctor --table",
                         "ledger --table --mine --last 5", "held list --table"):
             self.assertIn("Bash(xsm %s)" % command, allowed)
