@@ -654,6 +654,57 @@ def remove_statusline(home: str) -> bool:
     return True
 
 
+# The tools that put a choice in front of the person: each one shows an
+# approval form (or uses the command the person typed) and changes nothing
+# without a yes. Claude's auto mode refused the call itself as widening scope,
+# so the agent never got to ask and told the person to type /xsm link instead
+# (issue #8, measured with Claude Code 2.1.286, 2026-10-01). Allowing the call
+# lets the form ask; the form is the consent (user decision, 2026-10-01).
+FORM_TOOLS = ("xsm_link", "xsm_reach", "xsm_join", "xsm_approve", "xsm_grant", "xsm_decide",
+              "xsm_doc_endorse")
+# A direct install registers the server as "xsm"; the plugin's is "xsm" in plugin "xsm".
+FORM_TOOL_PREFIXES = ("mcp__xsm__", "mcp__plugin_xsm_xsm__")
+
+
+def form_tool_names() -> list:
+    return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in FORM_TOOLS]
+
+
+def allow_form_tools(home: str) -> str:
+    """Add the form tools to this Claude home's permissions.allow: added | already."""
+    target = _settings_file(home, "claude")
+    data = paths.read_json(target, {}) or {}
+    perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
+    allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
+    missing = [n for n in form_tool_names() if n not in allow]
+    if not missing:
+        return "already"
+    if os.path.exists(target):
+        _backup(target)
+    perms["allow"] = allow + missing
+    data["permissions"] = perms
+    paths.write_json(target, data, mode=0o644)
+    return "added"
+
+
+def remove_form_tools(home: str) -> bool:
+    """Take out exactly the entries allow_form_tools put in."""
+    target = _settings_file(home, "claude")
+    data = paths.read_json(target)
+    perms = (data or {}).get("permissions")
+    allow = perms.get("allow") if isinstance(perms, dict) else None
+    if not isinstance(allow, list):
+        return False
+    names = set(form_tool_names())
+    kept = [n for n in allow if n not in names]
+    if len(kept) == len(allow):
+        return False
+    _backup(target)
+    perms["allow"] = kept
+    paths.write_json(target, data, mode=0o644)
+    return True
+
+
 def retired_commands(home: str) -> list:
     """The per-command files earlier versions wrote: `commands/xsm-*.md` in a
     Claude home, `skills/xsm-*/` in a Codex one. The commands became arguments

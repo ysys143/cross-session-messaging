@@ -845,6 +845,101 @@ class NativeClaudeMessageTest(TempState):
         self.assertEqual(self._check("uds:/tmp/cc-socks/1.sock", me, [sender])[0], "pass")
 
 
+class NativeBounceTest(TempState):
+    """Issue #8: a native SendMessage held out of scope used to leave its
+    sender believing it was delivered. The sender now sees a note once."""
+
+    def setUp(self):
+        super().setUp()
+        self.here = os.path.join(self.tmp, "repo-a")
+        self.there = os.path.join(self.tmp, "repo-b")
+        for d in (self.here, self.there):
+            os.makedirs(d)
+        self.sender = {"runtime": "claude", "socket": "/tmp/cc-socks/11.sock", "state": "live",
+                       "ref": "aaaaaa", "name": "cc-main", "alias": "claude",
+                       "session_id": "s-sender", "cwd": self.here}
+        self.me = {"runtime": "claude", "ref": "bbbbbb", "name": "journey-qa", "alias": "claude",
+                   "session_id": "s-recv", "cwd": self.there}
+
+    def _native(self, where="uds:/tmp/cc-socks/11.sock"):
+        from xsm import envelope
+        return envelope.parse('<cross-session-message from="%s" from-name="cc-main" '
+                              'from-mode="bypass">\nplease review the diff\n'
+                              '</cross-session-message>' % where)
+
+    def _gate(self, parsed, records):
+        from unittest import mock
+        from xsm import receive
+        with mock.patch.object(receive.registry, "records", return_value=records), \
+                mock.patch.object(receive.config, "scope_for",
+                                  return_value=(None, "different git repositories")):
+            return receive._gate({"prompt": "x"}, "claude", self.me, parsed)
+
+    def test_the_sender_sees_once_that_it_was_held_and_how_to_connect(self):
+        from xsm import config, receive
+        out = self._gate(self._native(), [self.sender])
+        self.assertEqual(out["decision"], "block", "the receiver still holds it")
+        shown = receive._with_bounces("claude", self.sender, None)
+        context = shown["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("journey-qa@claude", context)
+        self.assertIn("NOT delivered", context)
+        self.assertIn("xsm_link", context)
+        self.assertIn("dir=%s" % config.project_root(self.there), context)
+        self.assertIn("approval form", context)
+        self.assertIsNone(receive._with_bounces("claude", self.sender, None), "shown once")
+
+    def test_no_note_for_a_sender_that_cannot_be_named(self):
+        from xsm import bounce
+        self._gate(self._native("bridge:remote-control"), [])
+        self._gate(self._native(), [self.sender, dict(self.sender, ref="cccccc",
+                                                      session_id="s-other")])
+        self.assertEqual(bounce.take("s-sender") + bounce.take("s-other"), [])
+
+    def test_an_xsm_message_gets_a_receipt_not_a_note(self):
+        from xsm import bounce, envelope
+        parsed = envelope.parse(envelope.build("hi", msg_id="m1", sender=self.sender,
+                                               scope="project:x"))
+        self._gate(parsed, [self.sender])
+        self.assertEqual(bounce.take("s-sender"), [])
+
+    def test_a_refused_prompt_keeps_the_note_for_the_next_one(self):
+        from xsm import receive
+        self._gate(self._native(), [self.sender])
+        blocked = {"decision": "block", "reason": "x"}
+        self.assertIs(receive._with_bounces("claude", self.sender, blocked), blocked)
+        self.assertIsNotNone(receive._with_bounces("claude", self.sender, None))
+
+
+class FormToolPermissionTest(TempState):
+    """Issue #8: Claude's auto mode refused the xsm_link call itself, so the
+    approval form never showed. The installer allows the form tools."""
+
+    def test_allowed_once_kept_beside_the_users_own_and_removed_exactly(self):
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "claude-home")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"], "deny": ["X"]}})
+        self.assertEqual(install.allow_form_tools(home), "added")
+        self.assertEqual(install.allow_form_tools(home), "already")
+        allow = paths.read_json(target)["permissions"]["allow"]
+        self.assertEqual(allow[0], "Bash(ls:*)")
+        self.assertIn("mcp__xsm__xsm_link", allow)
+        self.assertIn("mcp__plugin_xsm_xsm__xsm_join", allow)
+        self.assertEqual(paths.read_json(target)["permissions"]["deny"], ["X"])
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
+        self.assertFalse(install.remove_form_tools(home))
+
+    def test_a_home_without_settings_gets_them(self):
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "fresh")
+        os.makedirs(home)
+        install.allow_form_tools(home)
+        self.assertEqual(sorted(paths.read_json(os.path.join(home, "settings.json"))
+                                ["permissions"]["allow"]), sorted(install.form_tool_names()))
+
+
 class PluginPackagingTest(TempState):
     """The repository is also a Claude Code plugin (user decision, 2026-09-23:
     support both the plugin and `xsm install`). These pin what the manifests

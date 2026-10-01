@@ -100,6 +100,11 @@ xsm 헤더 없이 들어오는 Claude 자체의 피어 메시지(`SendMessage`)�
   - 실측: 이 세션이 네이티브 `SendMessage` 본문에 다른 세션(ref `5ac896`)을 사칭하는 헤더를 넣어 보냈더니 "which is not the socket of" 사유로 보류됐다. 곧이어 보낸 정상 `xsm send`는 `delivered`였다.
   - 적합성 벡터: `a-header-claiming-another-session-than-the-socket-is-held`, `a-header-sent-through-its-own-socket-passes`.
 
+
+**보완(2026-10-01, 이슈 #8, 사용자 결정).** 보관 판정은 그대로 두고, 보낸 쪽이 알 수 있게 한다.
+- 소켓으로 발신 세션 하나가 식별된 네이티브 메시지를 보관하면, 그 세션 앞으로 반송 쪽지(`~/.xsm/bounces/<session-id>/`)를 남긴다. 보낸 세션의 다음 프롬프트와 xsm CLI·MCP 결과가 한 번 보여 준다. 식별되지 않은 발신자에게는 남기지 않는다.
+- 사용자에게 명령을 치게 하지 않는다. 쪽지와 범위 밖 거부 문구는 보낸 에이전트에게 `xsm_link` MCP 도구를 부르라고 한다. 이 도구가 사용자에게 승인 양식을 띄우고, 승인되면 연결한다. 사용자 결정: "사용자가 커맨드를 치는게 아니라 승인을 요청해야지. … 치는건 에이전트가 해야지."
+- Claude auto 모드 분류기는 `xsm_link` 호출 자체를 범위 확대로 보고 막았다(Claude Code 2.1.286 실측). 그래서 설치기가 승인 양식을 띄우는 도구들(link, reach, join, approve, grant, decide, doc_endorse)을 Claude `permissions.allow`에 넣는다. 이 도구들은 승인 없이 아무것도 바꾸지 않으므로, 허용해도 동의 절차를 건너뛰지 않는다. 실측: 허용 뒤 같은 호출에 "Allow it?" 양식이 떴고, 승인하자 연결과 재전송이 됐다.
 기각:
 - A는 네이티브 메시징을 조용히 끄고, 사람이 승인한 메시지도 다시 막는다.
 - B는 범위 밖이나 발신자를 모르는 메시지를 통과시킨다. `accept` 환경에서는 검사하는 층이 하나도 남지 않는다.

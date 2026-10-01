@@ -152,12 +152,13 @@ def allow_with_context(runtime: str, context: str) -> dict:
                                    "additionalContext": context}}
 
 
-def hold(runtime: str, reason: str, data: dict, me: dict | None, parsed) -> bool:
+def hold(runtime: str, reason: str, data: dict, me: dict | None, parsed) -> str | None:
     """Keep the body before refusing it. A Codex hook block consumes the queue
     item and leaves no trace in the transcript (S6), so if we do not store it
     the message is simply gone. If storing fails we do not block at all."""
+    name = "%d" % int(time.time() * 1000)
     try:
-        paths.write_json(paths.path(paths.HELD, "%d.json" % int(time.time() * 1000)), {
+        paths.write_json(paths.path(paths.HELD, "%s.json" % name), {
             "t": time.time(), "reason": reason, "runtime": runtime,
             "receiver": me and me.get("name"), "id": parsed.header.get("id"),
             # Whatever the sender revealed, in order of usefulness: our own
@@ -167,9 +168,9 @@ def hold(runtime: str, reason: str, data: dict, me: dict | None, parsed) -> bool
             "from": (parsed.header.get("from") or parsed.attrs.get("from-name")
                      or parsed.attrs.get("from") or "unknown"),
             "scope": parsed.header.get("scope"), "body": parsed.body[:4000]})
-        return True
+        return name
     except OSError:
-        return False
+        return None
 
 
 def block(runtime: str, reason: str) -> dict:
@@ -252,7 +253,7 @@ def _handle(data: dict) -> dict | None:
         # Ordinary human input: say nothing. A Codex `$xsm link <folder>` (and
         # join, leave, reach) is kept as the person's consent (consent.py).
         _record_consent(me, data)
-        return None
+        return _with_bounces(runtime, me, None)
     try:
         from . import telemetry
     except ImportError:
@@ -269,7 +270,27 @@ def _handle(data: dict) -> dict | None:
         if telemetry and span is not None:
             telemetry.counter("xsm.receive.count", 1,
                               {"xsm.receive.decision": span.attributes.get("xsm.receive.decision")})
+        return _with_bounces(runtime, me, out)
+
+
+def _with_bounces(runtime: str, me: dict | None, out: dict | None) -> dict | None:
+    """Add, once, the notes left for this session about its held SendMessages
+    (issue #8). A refused prompt cannot carry context, so they wait for the
+    next one that goes through."""
+    if not me or (out is not None and "decision" in out):
         return out
+    try:
+        from . import bounce
+        notes = bounce.notice(me.get("session_id"))
+    except Exception:                   # noqa: BLE001 - a note must not cost the prompt
+        return out
+    if not notes:
+        return out
+    if out is None:
+        return allow_with_context(runtime, notes)
+    spec = out.setdefault("hookSpecificOutput", {"hookEventName": "UserPromptSubmit"})
+    spec["additionalContext"] = ((spec.get("additionalContext") or "") + "\n\n" + notes).strip()
+    return out
 
 
 def _record_consent(me: dict | None, data: dict) -> None:
@@ -312,6 +333,8 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
             "receiver": me and me.get("name"), "from": _claimed_sender(parsed)})
         if msg_id:
             ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
+        elif stored and not parsed.header:
+            _bounce_native(parsed, me, reason, stored)
         if not stored:
             # Refusing without a copy would destroy the message; warn instead.
             return allow_with_context(runtime, envelope.sender_context(parsed, runtime) +
@@ -426,6 +449,37 @@ def _check_sender(sender: dict, me: dict, cfg: dict, claimed) -> tuple:
     return "pass", "", scope
 
 
+def _native_owners(parsed) -> list:
+    """The running Claude sessions that own the envelope's uds: socket. /clear
+    and --resume keep the process and its socket under a new session id; the
+    old record reads as ended (superseded), and must not make the socket look
+    shared (measured 2026-09-29)."""
+    where = parsed.attrs.get("from") or ""
+    socket = where[len("uds:"):] if where.startswith("uds:") else ""
+    if not socket:
+        return []
+    return [rec for rec in registry.records()
+            if rec.get("runtime") == "claude" and rec.get("socket") == socket
+            and rec.get("state") in ("live", "unknown")]
+
+
+def _bounce_native(parsed, me: dict | None, reason: str, held: str) -> None:
+    """Leave the sender of a held native message a note it will see (issue
+    #8). Only a sender named by exactly one running session; never ourselves.
+    A note must not cost the gate its answer, so a failure is only logged."""
+    try:
+        owners = _native_owners(parsed)
+        if len(owners) != 1 or (me and owners[0].get("session_id") == me.get("session_id")):
+            return
+        from . import bounce
+        connect = config.project_root(me["cwd"]) \
+            if me and me.get("cwd") and reason.startswith("out of scope") else None
+        bounce.record(owners[0], me, reason, held, parsed.body, connect)
+    except Exception as err:            # noqa: BLE001 - the hold already happened
+        paths.append_jsonl("decisions.jsonl", {"event": "bounce", "decision": "pass",
+                                               "reason": "note not left: %s" % type(err).__name__})
+
+
 def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
     """A peer message with Claude's envelope and no xsm header: Claude's own
     SendMessage. Claude's gate has already let it in (it decides before this
@@ -451,12 +505,7 @@ def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
         return "block", "peer message without an xsm header"
     where = parsed.attrs.get("from") or ""
     socket = where[len("uds:"):] if where.startswith("uds:") else ""
-    owners = [rec for rec in registry.records()
-              if socket and rec.get("runtime") == "claude" and rec.get("socket") == socket]
-    # /clear and --resume keep the process and its socket under a new session
-    # id; the old record reads as ended (superseded), and must not make the
-    # socket look shared (measured 2026-09-29).
-    running = [rec for rec in owners if rec.get("state") in ("live", "unknown")]
+    running = _native_owners(parsed)
     if not socket:
         # Not a socket on this machine: Remote Control, a cloud session or
         # another machine. Past the uid boundary, so still held (user

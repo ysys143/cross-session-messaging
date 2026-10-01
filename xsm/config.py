@@ -160,8 +160,12 @@ def _link_hint(a: dict, b: dict) -> str:
     if not (a.get("cwd") and b.get("cwd")):
         return ""
     there = project_root(b["cwd"])
-    return ("; to connect the two folders, your user types /xsm link %s (Codex: $xsm link %s) "
-            "in the session at %s" % (there, there, project_root(a["cwd"])))
+    # Asking is the agent's job, deciding is the person's: the tool shows them
+    # an approval form and connects on yes (user decision, 2026-10-01).
+    return ("; to connect the two folders, the session at %s asks its user with the xsm_link "
+            "MCP tool (dir=%s; an approval form, connects on yes), or the user types "
+            "/xsm link %s there (Codex: $xsm link %s)" % (project_root(a["cwd"]), there, there,
+                                                           there))
 
 
 def _reach_link(a: dict, b: dict, cfg: dict) -> str | None:

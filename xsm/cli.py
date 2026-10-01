@@ -300,9 +300,12 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None) -> s
     if typed and consent.take(registry.me(), *typed):
         return None
     if typed:
-        return ("%s is your user's decision: they type `/xsm %s %s` in this session (Codex: "
-                "`$xsm %s %s`), or run it in a terminal; or ask them with the %s MCP tool" % (
-                    what, typed[0], typed[1], typed[0], typed[1], mcp_tool))
+        # Asking is the agent's job (user decision, 2026-10-01): the tool shows
+        # the person an approval form and does it on yes.
+        return ("%s is your user's decision: ask them with the %s MCP tool (it shows them an "
+                "approval form and does it on yes); or they type `/xsm %s %s` in this session "
+                "(Codex: `$xsm %s %s`), or run it in a terminal" % (
+                    what, mcp_tool, typed[0], typed[1], typed[0], typed[1]))
     return ("%s is your user's decision: ask them with the %s MCP tool (it shows them a form), "
             "or they run it in a terminal" % (what, mcp_tool))
 
@@ -825,6 +828,8 @@ def cmd_install(args) -> int:
                 _home_tilde(home), plugin, install.plugin_outdated_note(missing) if missing
                 else "keeps it up to date"))
             _print_retired(home, install.remove_retired(home))
+            if runtime == "claude" and install.allow_form_tools(home) == "added":
+                print("  allowed the xsm approval-form tools so auto mode lets them ask")
             if runtime == "codex":
                 cleared = install.clear_codex_leftovers(home)
                 if cleared:
@@ -881,6 +886,9 @@ def _install(args, targets) -> int:
         else:
             print("installed into %s (backup: %s)" % (result["file"], result.get("backup", "none")))
         _print_retired(home, install.remove_retired(home))
+        if runtime == "claude":
+            print("  approval forms: %s (link, reach, join and the other tools that ask you; "
+                  "allowed so auto mode lets them ask)" % install.allow_form_tools(home))
         if runtime == "codex":
             cli_state = install.install_cli()
             if cli_state == "foreign":
@@ -949,6 +957,8 @@ def cmd_uninstall(args) -> int:
         if runtime == "claude":
             if install.remove_statusline(home):
                 print("%s: removed the xsm statusLine" % home)
+            if install.remove_form_tools(home):
+                print("%s: removed the xsm approval-form tools from permissions.allow" % home)
         print("%s: removed %s xsm hook group(s)%s" % (
             result.get("file"), result.get("removed", 0),
             "" if not result.get("error") else " (%s)" % result["error"]))
@@ -1897,12 +1907,17 @@ def main(argv=None) -> int:
 def _inbox_notice(command: str) -> None:
     """A Codex session mid-turn does not know anything arrived; every xsm
     command it runs tells it. On stderr, so `--json` output stays parseable."""
-    thread = os.environ.get("CODEX_THREAD_ID")
-    if not thread or command in ("hook", "mcp", "statusline", "inbox", "worker-finish"):
+    if command in ("hook", "mcp", "statusline", "worker-finish"):
         return
-    text = inbox.notice(thread)
-    if text:
-        print(text, file=sys.stderr)
+    thread = os.environ.get("CODEX_THREAD_ID")
+    text = inbox.notice(thread) if thread and command != "inbox" else ""
+    # Either runtime's session: a Claude session learns here that a
+    # SendMessage it sent was held on the other side (issue #8).
+    from . import bounce
+    held = bounce.notice(thread or os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    for line in (text, held):
+        if line:
+            print(line, file=sys.stderr)
 
 
 class _StderrTail:

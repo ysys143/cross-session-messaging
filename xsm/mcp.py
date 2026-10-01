@@ -318,6 +318,10 @@ class Server:
             waiting = inbox.notice(me.get("session_id"))
             if waiting:
                 text += "\n\n" + waiting
+        from . import bounce
+        held = bounce.notice(me.get("session_id"))     # issue #8
+        if held:
+            text += "\n\n" + held
         return text
 
     def _call(self, name: str, args: dict, me: dict, where: tuple, author: dict) -> str:

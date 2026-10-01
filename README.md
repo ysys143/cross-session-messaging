@@ -202,7 +202,9 @@ message directly into the session's prompt. A rejected message is held, not drop
 cross-session messages (`SendMessage`, no xsm header) pass the same scope check: they arrive untouched when the
 sending session shares a scope with this one, or is a session on this machine xsm does not know (a profile
 without xsm); they are held when xsm knows the sender and it is out of scope, or when they come from off this
-machine (Remote Control, cloud). Set `"strict_peers": true` in
+machine (Remote Control, cloud). When xsm holds a `SendMessage` from a session it can name, that sender sees once,
+on its next prompt or xsm command, that the message was not delivered and why; for an out-of-scope hold its agent is
+told to ask you with the `xsm_link` tool (an approval form that connects the folders on yes) and send it again. Set `"strict_peers": true` in
 `~/.xsm/config.json` to hold every message without an xsm header instead (ADR-0013). Claude's own gate still
 decides first: a message it holds for a permission-mode mismatch never reaches xsm.
 

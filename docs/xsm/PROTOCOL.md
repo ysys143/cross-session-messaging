@@ -111,6 +111,7 @@ CODEX_HOME=<대상 홈> codex queue --thread <thread-uuid> --message <봉투 전
 | 경로 | 스키마 |
 |---|---|
 | `mcp/<pid>.json` | `{"pid", "ppid", "lstart", "started", "cwd"}`: 실행 중인 xsm MCP 서버의 비콘(§4.3). 서버가 끝나면 지우고, 죽은 pid의 비콘은 읽을 때 정리한다 |
+| `bounces/<session-id>/<ms>.json` | `{"t", "reason", "held", "to": {name, alias, ref, runtime, cwd}, "connect_dir"?, "preview"}`: 받는 쪽 게이트가 보관한 네이티브 메시지를, 소켓으로 식별된 보낸 세션에 알리는 쪽지(이슈 #8). 보낸 세션의 다음 `UserPromptSubmit`(막히지 않은 것)과 xsm CLI·MCP 결과가 한 번 보여 주고 지운다. 메시지가 아니므로 게이트를 지나지 않고 다시 반송되지 않는다 |
 | `inbox/<thread-uuid>/<id>.json` | `{"id", "t", "content", "queued_id"?, "codex_home"?}`: Codex 대상 메시지의 봉투 사본(§2.2). 어느 경로로든 넘겨지면 지우고, 읽히지 않은 사본은 세션 포인터 보존 기간이 지나면 정리한다 |
 | `config.json` | `{"strict_peers": bool, "same_repo_scope": bool, "retention_days": number, "ledger_retention_days": number, "telemetry_retention_days": number, "scopes": [{"id": str, "members": [{"runtime": str?, "home": str?, "cwd": glob?, "root": path?}]}], "reaches": [{"ref": str, "root": path, "t": number, "by": str, "runtime": str, "home": path, "session_id": str, "pid": number, "lstart": str?}], "links": [{"a": path, "b": path, "t": number, "by": str}]}`. `root`는 `xsm join`이 쓰는 구성원으로, 그 폴더와 그 아래 전부와 맞는다. `links`는 `xsm link`가 쓴다(§5.3.1) |
 | `asked/<ref>.json` | `{"verb": "link"\|"join"\|"leave"\|"reach", "args": str, "cwd", "t", "session_id", "runtime"}`, 모드 0600. 사람이 세션에 직접 입력한 xsm 명령으로, 그 세션의 동의다(§5.3.3). 한 번 쓰면 지운다 |
@@ -226,7 +227,7 @@ refused: only stopped sessions match 'life-b'
 `UserPromptSubmit`에서 순서대로 본다. `SessionStart`는 등록만 하고 절대 차단하지 않는다.
 
 1. 봉투도 헤더도 없다 → **아무것도 출력하지 않는다**(사람 입력).
-2. 헤더가 없다(Claude 자체의 피어 메시지) → `strict_peers`가 참이면 **차단**한다. 거짓(기본값)이면 수신 세션이 Claude이고, 봉투의 `from="uds:<socket>"`가 레지스트리에서 살아 있는(`live`·`unknown`) Claude 세션 **정확히 하나**의 소켓일 때만 그 세션을 발신자로 삼는다. 그 발신자에게 3·5·6·7번을 적용하고, 통과하면 **아무것도 출력하지 않는다**(Claude 자신의 안내가 그대로 보인다). `uds:` 소켓이지만 살아 있는 세션 하나로 정해지지 않으면(xsm이 없는 프로필, 낡은 기록, 여러 기록) 같은 기계·같은 사용자이므로 **통과**시키고 역시 아무것도 출력하지 않는다. `from`이 이 기계의 `uds:` 소켓이 아니면(Remote Control, 클라우드, 다른 기계) **차단**한다. Claude의 네이티브 봉투에는 세션 id가 없다(ADR-0013, 2026-09-30 개정).
+2. 헤더가 없다(Claude 자체의 피어 메시지) → `strict_peers`가 참이면 **차단**한다. 거짓(기본값)이면 수신 세션이 Claude이고, 봉투의 `from="uds:<socket>"`가 레지스트리에서 살아 있는(`live`·`unknown`) Claude 세션 **정확히 하나**의 소켓일 때만 그 세션을 발신자로 삼는다. 그 발신자에게 3·5·6·7번을 적용하고, 통과하면 **아무것도 출력하지 않는다**(Claude 자신의 안내가 그대로 보인다). `uds:` 소켓이지만 살아 있는 세션 하나로 정해지지 않으면(xsm이 없는 프로필, 낡은 기록, 여러 기록) 같은 기계·같은 사용자이므로 **통과**시키고 역시 아무것도 출력하지 않는다. `from`이 이 기계의 `uds:` 소켓이 아니면(Remote Control, 클라우드, 다른 기계) **차단**한다. Claude의 네이티브 봉투에는 세션 id가 없다(ADR-0013, 2026-09-30 개정). 이 경로에서 보관한 메시지의 발신자가 살아 있는 세션 하나로 식별되면, 그 세션 앞으로 `bounces/`에 쪽지를 남긴다. 범위 밖이면 쪽지에 받는 쪽 폴더(`connect_dir`)를 적어, 보낸 에이전트가 `xsm_link`로 사용자 승인을 받아 연결한 뒤 다시 보내게 한다(이슈 #8).
 3. 수신 세션이 자기 자신을 식별하지 못한다(세션 환경변수가 없고 기존 포인터도 없다) → **차단**. 범위를 검사할 수 없는 상태에서 통과시키면 그 세션이 열린 문이 된다.
 4. 발신자 `ref`가 레지스트리에 없다 → **차단**. 봉투의 `from`이 `uds:<socket>`인데 헤더의 발신자가 Claude 세션이 아니거나, 그 세션의 소켓이 봉투의 소켓과 다르다 → **차단**. Claude가 채우는 봉투가 실제 경로이고 헤더는 발신자가 쓰는 글이기 때문이다(ADR-0013). 어느 한쪽에 소켓이 없으면 비교하지 않는다.
 5. 발신자가 살아 있지 않다(`live`나 `unknown`이 아니다) → **차단**. 멈춘 세션의 포인터는 며칠 남으므로, 그 이름이 지금 메시지를 실어 나르지 못하게 한다(ADR-0009).
