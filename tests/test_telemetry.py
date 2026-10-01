@@ -255,7 +255,9 @@ class SendInstrumentationTest(TempState):
 class ReceiveInstrumentationTest(TempState):
     def _gate(self, prompt):
         from xsm import receive
-        receive.register = lambda data, runtime: None        # identity unknown: blocks
+        receive.register = lambda data, runtime: {           # identified; the sender is not known
+            "runtime": "claude", "session_id": "r1", "ref": "bbbbbb", "name": "recv",
+            "alias": "claude-4", "cwd": self.tmp}
         return receive.handle({"hook_event_name": "UserPromptSubmit", "session_id": "r1",
                                "cwd": self.tmp, "prompt": prompt, "session_title": "recv"})
 
@@ -275,6 +277,8 @@ class ReceiveInstrumentationTest(TempState):
 
     def test_a_blocked_message_is_marked_and_counted(self):
         from xsm import envelope, paths, telemetry
+        # An unknown sender passes noted unless fail_open is off (2026-10-02).
+        paths.write_json(paths.path("config.json"), {"fail_open": False})
         sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa", "session_id": "s1"}
         out = self._gate(envelope.build("hi", msg_id="m1", sender=sender, scope="dir:x"))
         assert out is not None, "a peer message always gets a decision"
@@ -282,7 +286,7 @@ class ReceiveInstrumentationTest(TempState):
         gate = [r for r in paths.read_jsonl(telemetry.SPANS) if r["name"] == "xsm.receive.gate"][0]
         self.assertEqual(gate["status"], "ERROR")
         self.assertEqual(gate["attributes"]["xsm.receive.decision"], "held")
-        self.assertIn("cannot identify this session", gate["message"])
+        self.assertIn("is not registered", gate["message"])
         point = [r for r in paths.read_jsonl(telemetry.METRICS)
                  if r["name"] == "xsm.receive.count"][0]
         self.assertEqual(point["attributes"], {"xsm.receive.decision": "held"})

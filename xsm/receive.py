@@ -4,16 +4,23 @@ Two rules shape this file.
 
 1. A hook that dies stops gating. Claude reports a crashed hook as a
    non-blocking error and runs the prompt anyway, so a broken gate is an open
-   gate (S8-g2). Everything here runs under a catch-all, and the fallback
-   decision depends on what arrived: a message carrying a peer envelope or an
-   xsm header is refused, anything that looks like the user typing is passed.
-   A person must never be locked out of their own session by our bug.
+   gate (S8-g2). Everything here runs under a catch-all. Until 2026-10-01 its
+   fallback refused what looked like a peer message; a person pasting an xsm
+   log was refused with it, and a conversation they wanted was lost to our
+   bug. User decision, 2026-10-01: a gate that breaks steps aside. The prompt
+   goes through with a note that it was not checked (policy `fail_open`;
+   false brings the refusal back), and nothing here ever blocks a person's own
+   prompt. A write that fails (a state folder that cannot be written) decides
+   nothing either. With `fail_open` false all of that is the way it was: a session
+   that cannot be identified, a sender nobody registered and a failed write each
+   block again (2026-10-02: the switch had restored only the catch-all).
 2. The runtime is decided from the hook input's own fields, not from path
    strings (ADR-0001 draft A'), because CODEX_HOME and CLAUDE_CONFIG_DIR can
    live anywhere.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -114,14 +121,41 @@ def register(data: dict, runtime: str) -> dict | None:
             "reason": "missing %s" % ", ".join(
                 n for n, v in (("session_id", session_id), ("home", home), ("pid", pid)) if not v)})
         return None
-    return registry.upsert(runtime, home, session_id, pid, session_folder(runtime, data),
-                           permission_mode=data.get("permission_mode"),
-                           name=data.get("session_title"),
-                           mcp_pid=registry.beacon_for(pid) if runtime == "codex" else None,
-                           socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-                           if runtime == "claude" else None,
-                           inside=os.environ.get("CODEX_THREAD_ID" if runtime == "claude"
-                                                 else "CLAUDE_CODE_SESSION_ID") or None)
+    try:
+        return registry.upsert(runtime, home, session_id, pid, session_folder(runtime, data),
+                               permission_mode=data.get("permission_mode"),
+                               name=data.get("session_title"),
+                               mcp_pid=registry.beacon_for(pid) if runtime == "codex" else None,
+                               socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+                               if runtime == "claude" else None,
+                               inside=os.environ.get("CODEX_THREAD_ID" if runtime == "claude"
+                                                     else "CLAUDE_CODE_SESSION_ID") or None)
+    except OSError as err:
+        # A state folder that cannot be written must not make a session
+        # unknown to the gate, which then could not check anything (2026-10-01).
+        if _fail_closed():
+            raise
+        _write_failed("registry.upsert", err)
+        return registry.by_session(runtime, session_id)
+
+
+def _write_failed(what: str, err: OSError) -> None:
+    paths.append_jsonl("decisions.jsonl", {"event": "write-failed", "decision": "pass",
+                                           "reason": "%s: %s" % (what, type(err).__name__)})
+
+
+def _safely(fn, *args, **kwargs):
+    """Run a write the verdict does not depend on. The check has decided; a
+    ledger or inbox that cannot be written must not turn that into a block, or
+    into an error that blocks (2026-10-01). With fail_open false it is the error
+    again, which the catch-all in main() turns into a refusal, as it was."""
+    try:
+        return fn(*args, **kwargs)
+    except OSError as err:
+        if _fail_closed():
+            raise
+        _write_failed(getattr(fn, "__name__", "write"), err)
+        return None
 
 
 def _emit(runtime: str, payload: dict | None) -> None:
@@ -167,7 +201,12 @@ def hold(runtime: str, reason: str, data: dict, me: dict | None, parsed) -> str 
             # socket path is then the only trace of where it came from.
             "from": (parsed.header.get("from") or parsed.attrs.get("from-name")
                      or parsed.attrs.get("from") or "unknown"),
-            "scope": parsed.header.get("scope"), "body": parsed.body[:4000]})
+            "scope": parsed.header.get("scope"), "body": parsed.body[:4000],
+            "truncated": len(parsed.body) > 4000,
+            # What `xsm held deliver` needs to show it as it would have been:
+            # who it was for, and the header and envelope it came with.
+            "receiver_ref": me and me.get("ref"), "header": parsed.header,
+            "attrs": parsed.attrs})
         return name
     except OSError:
         return None
@@ -312,6 +351,56 @@ def _record_consent(me: dict | None, data: dict) -> None:
             "reason": "consent not recorded: %s" % type(err).__name__})
 
 
+# A second hook run for the same message, within this long, is a second
+# registration of the one hook (a plugin and a direct install in one home), not
+# a second copy of the message (2026-10-01).
+REPEAT_WINDOW = 60.0
+# What `xsm inbox` writes as the reason of its receipt; the hook's are empty or
+# say "unchecked".
+VIA_INBOX = "read with xsm inbox"
+
+
+def _context(decision: str, reason: str, parsed, runtime: str, **kw) -> str:
+    """What the agent reads above a message that passed: the sender's, and
+    for one xsm could not check the line that says so first."""
+    if decision == "unchecked":
+        return envelope.unchecked_context(reason, parsed, runtime, **kw)
+    return envelope.sender_context(parsed, runtime, **kw)
+
+
+def _body_sha(parsed) -> str:
+    return hashlib.sha256((parsed.body or "").encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _repeat(runtime: str, me: dict | None, parsed, msg_id: str) -> dict | None:
+    """The same context again, for the second run of a hook this message already
+    passed through (2026-10-01). Refusing it as "already received" refused the
+    whole prompt, and the person's session got nothing. Only the same receiver
+    within REPEAT_WINDOW, and only a delivery the hook itself recorded: the
+    queue copy that arrives after `xsm inbox` read the message stays refused (it
+    is what drops it from Codex's queue). And only the same message: the receipt
+    keeps the sender's ref and a hash of the body, because a header that reuses a
+    just-delivered id is otherwise a free pass for any text (2026-10-02). A
+    receipt without them (an older hook's) is not a repeat."""
+    rec = ledger.receipt_of(msg_id)
+    if not rec or rec.get("decision") != "delivered" or \
+            (rec.get("reason") or "").startswith(VIA_INBOX):
+        return None
+    if rec.get("from_ref") != parsed.header.get("ref") or rec.get("body_sha") != _body_sha(parsed):
+        return None
+    # A session xsm could not identify has no ref, on either run: the same hook
+    # twice for it is still the same hook twice.
+    if (rec.get("receiver") or {}).get("ref") != (me or {}).get("ref") or \
+            time.time() - float(rec.get("t") or 0) > REPEAT_WINDOW:
+        return None
+    reason = rec.get("reason") or ""
+    unchecked = reason.startswith("unchecked: ")
+    worker = workers.load(os.environ["XSM_WORKER"]) if os.environ.get("XSM_WORKER") else None
+    return allow_with_context(runtime, _context(
+        "unchecked" if unchecked else "pass", reason[len("unchecked: "):] if unchecked else "",
+        parsed, runtime, worker=bool(worker), cwd=(me or {}).get("cwd")))
+
+
 def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict | None:
     msg_id = parsed.header.get("id")
     if msg_id and ledger.received(msg_id):
@@ -319,6 +408,15 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
         # turn was still running; this is the queue's own copy arriving late.
         # Not held: the session has it. Refusing is what drops it from Codex.
         inbox.drop((me or {}).get("session_id"), msg_id)
+        again = _repeat(runtime, me, parsed, msg_id)
+        if again is not None:
+            if span is not None:
+                span.set_attribute("xsm.receive.decision", "repeat")
+            paths.append_jsonl("decisions.jsonl", {
+                "event": "UserPromptSubmit", "runtime": runtime, "decision": "pass",
+                "reason": "the same hook ran twice for this message", "id": msg_id,
+                "receiver": me and me.get("name")})
+            return again
         if span is not None:
             span.set_attribute("xsm.receive.decision", "duplicate")
         paths.append_jsonl("decisions.jsonl", {
@@ -339,45 +437,64 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
             "reason": reason, "held": stored, "id": msg_id,
             "receiver": me and me.get("name"), "from": _claimed_sender(parsed)})
         if msg_id:
-            ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
-        elif stored and not parsed.header:
-            _bounce_native(parsed, me, reason, stored)
+            _safely(ledger.receipt, msg_id, "held" if stored else "blocked", me, reason)
+        if stored:
+            _tell_held(parsed, me, reason, stored)
         if not stored:
             # Refusing without a copy would destroy the message; warn instead.
             return allow_with_context(runtime, envelope.sender_context(parsed, runtime) +
                                       "\n[xsm] This message failed a check (%s) but could not "
                                       "be stored, so it was delivered with this warning." % reason)
-        return block(runtime, reason + " (kept: xsm held list)")
+        return block(runtime, "%s (kept as %s; your agent delivers it on your yes: "
+                              "xsm held deliver %s)" % (reason, stored, stored))
 
     if span is not None:
-        span.set_attribute("xsm.receive.decision", "pass")
+        span.set_attribute("xsm.receive.decision", decision)
     paths.append_jsonl("decisions.jsonl", {
         "event": "UserPromptSubmit", "runtime": runtime, "decision": "pass", "reason": reason,
-        "id": msg_id, "receiver": me and me.get("name"), "from": _claimed_sender(parsed)})
-    if not parsed.header:
+        "unchecked": decision == "unchecked", "id": msg_id, "receiver": me and me.get("name"),
+        "from": _claimed_sender(parsed)})
+    if not parsed.header and decision != "unchecked":
         return None                     # Claude's own framing stands (ADR-0013)
     outcome = _outcome(parsed)
     if msg_id:
-        ledger.receipt(msg_id, "delivered", me, outcome=outcome)
+        _safely(ledger.receipt, msg_id, "delivered", me,
+                "unchecked: %s" % reason if decision == "unchecked" else "", outcome=outcome,
+                from_ref=parsed.header.get("ref"), body_sha=_body_sha(parsed))
     if parsed.header.get("kind") == "reply":
-        _close_task(parsed, outcome)
-        workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"), me, outcome)
+        _safely(_close_task, parsed, outcome)
+        _safely(workers.on_reply, parsed.header.get("ref"), parsed.header.get("reply-to"), me,
+                outcome)
     worker = workers.load(os.environ.get("XSM_WORKER") or "") if os.environ.get("XSM_WORKER") else None
-    return allow_with_context(runtime, envelope.sender_context(
-        parsed, runtime, worker=bool(worker), cwd=(me or {}).get("cwd")))
+    return allow_with_context(runtime, _context(decision, reason, parsed, runtime,
+                                                worker=bool(worker), cwd=(me or {}).get("cwd")))
+
+
+def _tell_held(parsed, me: dict | None, reason: str, held: str) -> None:
+    """Both sides learn of a hold (issue #8; 2026-10-01 for xsm's own messages
+    and for the receiver's agent): the sender in its next prompt or command, the
+    receiver's agent so it can offer the person `xsm held deliver`. A note must
+    not cost the gate its answer, so a failure is only logged."""
+    try:
+        _bounce_sender(parsed, me, reason, held)
+        from . import bounce
+        bounce.record_held_here(me, _claimed_sender(parsed) or "an unknown sender", reason, held)
+    except Exception as err:            # noqa: BLE001 - the hold already happened
+        paths.append_jsonl("decisions.jsonl", {"event": "bounce", "decision": "pass",
+                                               "reason": "note not left: %s" % type(err).__name__})
 
 
 def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
     """(decision, reason) for a peer message: the same checks whether it came
-    in through the hook or was taken with `xsm inbox`."""
+    in through the hook or was taken with `xsm inbox`. The decision is "pass",
+    "block", or "unchecked": passed, but xsm could not tell who it is from or
+    whether the scope holds, and the agent is told so (2026-10-01)."""
     cfg = cfg if cfg is not None else config.load()
     decision, reason = "pass", ""
     if not parsed.header:
         decision, reason = _check_native(parsed, me, cfg)
     elif not me:
-        # Without knowing which session we are, scope cannot be checked at all.
-        # Passing here would turn an unidentifiable session into an open door.
-        decision, reason = "block", "cannot identify this session, so scope was not checked"
+        decision, reason = _unidentified(cfg)
     elif parsed.header.get("origin"):
         # From a paired machine (ADR-0007): trusted only if this machine's own
         # receiver recorded the id for that peer, and only into its project.
@@ -399,14 +516,46 @@ def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
         sender, why_not = _sender_record(parsed)
         mismatch = _socket_mismatch(parsed, sender) if sender is not None else None
         if sender is None:
-            decision, reason = "block", why_not
+            decision, reason = _unknown_sender(parsed, why_not, me, cfg)
         elif mismatch:
             decision, reason = "block", mismatch
         else:
-            decision, reason, scope = _check_sender(sender, me, cfg, parsed.header.get("from"))
-            if decision == "pass" and scope != parsed.header.get("scope"):
+            decision, reason, scope = _check_sender(sender, me, cfg, parsed)
+            if decision != "block" and scope != parsed.header.get("scope"):
                 decision, reason = "block", "scope changed since the message was sent"
     return decision, reason
+
+
+def _unidentified(cfg: dict) -> tuple:
+    """(decision, reason) for a session xsm cannot identify. Without knowing which
+    session we are, scope cannot be checked at all. That is our own gap, and a
+    conversation the person wants is not held for it: the message goes through and
+    says it was not checked. fail_open = false is the old refusal."""
+    if config.policy("fail_open", cfg=cfg):
+        return "unchecked", "this session could not be identified, so scope was not checked"
+    return "block", "cannot identify this session, so scope was not checked"
+
+
+def _unknown_sender(parsed, why_not: str, me: dict, cfg: dict) -> tuple:
+    """(decision, reason) for a header whose ref no registered session has. A person
+    who pastes an xsm log into their own prompt writes exactly that, and was refused
+    for it (2026-10-02). It passes, unchecked, unless this machine's ledger shows
+    that ref sent this very id (then it only lost its registry record, and it passes
+    as checked); a session a person blocked stays blocked. A ref that is ambiguous,
+    and fail_open = false, are the refusal as it was."""
+    claimed, ref = parsed.header.get("from"), parsed.header.get("ref")
+    if "is not registered" not in why_not or not config.policy("fail_open", cfg=cfg):
+        return "block", why_not
+    if ref in config.blocked() or me.get("ref") in config.blocked():
+        return "block", "a blocked session is on this message"
+    if ledger.sent_by(parsed.header.get("id"), ref):
+        return "pass", "sender %r is no longer registered; this machine's ledger shows it sent " \
+                       "this message" % claimed
+    return "unchecked", "sender %r is not a session this machine knows, and it has no record of " \
+                        "that message being sent%s" % (
+                            claimed, "" if parsed.attrs else " (it has an xsm header but no Claude "
+                                                             "envelope: it may be text your user "
+                                                             "pasted)")
 
 
 def _socket_mismatch(parsed, sender: dict) -> str | None:
@@ -440,20 +589,42 @@ def _claimed_sender(parsed) -> str | None:
     return " ".join(x for x in (name, where and "(%s)" % where) if x) or None
 
 
-def _check_sender(sender: dict, me: dict, cfg: dict, claimed) -> tuple:
-    """(decision, reason, scope) for a sender the registry knows: running, not
-    blocked, and in a scope with this session. The same for an xsm message and
-    for Claude's own (ADR-0013)."""
-    if sender.get("state") not in ("live", "unknown"):
-        # A stopped session's pointer stays for days; its name must not
-        # carry a message now (S8-e, ADR-0009).
+def _check_sender(sender: dict, me: dict, cfg: dict, parsed) -> tuple:
+    """(decision, reason, scope) for a sender the registry knows: not blocked,
+    and in a scope with this session; running too, unless it exited after
+    sending. An xsm message only (Claude's own never gets here).
+
+    A stopped session's pointer stays for days, and until 2026-10-01 its name
+    could carry nothing (S8-e, ADR-0009), which also lost every message a
+    session sent just before it exited. Now a sender that has exited passes when
+    this machine's ledger shows that it queued this very message (provenance:
+    `xsm send` wrote that entry after its own scope check), and passes noted as
+    unchecked when there is no such record. `stale_sender` = hold brings the
+    old refusal back.
+
+    The scope is judged from the receiver's side, so a refusal tells this
+    session's agent what to ask of its own user, not the sender's."""
+    claimed = parsed.header.get("from")
+    exited = sender.get("state") not in ("live", "unknown")
+    if exited and config.policy("stale_sender", cfg=cfg) == "hold":
         return "block", "sender %r is not running (%s)" % (claimed, sender.get("state")), None
     if sender.get("ref") in config.blocked() or (me.get("ref") in config.blocked()):
         return "block", "a blocked session is on this message", None
-    scope, why = config.scope_for(sender, me, cfg)
+    scope, why = config.scope_for(me, sender, cfg)
+    if not exited:
+        return ("pass", "", scope) if scope else ("block", "out of scope: %s" % why, None)
+    proven = ledger.sent_by(parsed.header.get("id"), sender.get("ref"))
+    if not scope and proven and (parsed.header.get("scope") or "").startswith("reach:"):
+        # A reach ends with the session that holds it, by design; the send was
+        # allowed while it stood.
+        scope = parsed.header["scope"]
     if not scope:
         return "block", "out of scope: %s" % why, None
-    return "pass", "", scope
+    if proven:
+        return "pass", "sender %r had exited (%s); this machine's ledger shows it sent this " \
+                       "message" % (claimed, sender.get("state")), scope
+    return "unchecked", "sender %r is not running (%s) and this machine has no record of it " \
+                        "sending this message" % (claimed, sender.get("state")), scope
 
 
 def _native_owners(parsed) -> list:
@@ -470,21 +641,26 @@ def _native_owners(parsed) -> list:
             and rec.get("state") in ("live", "unknown")]
 
 
-def _bounce_native(parsed, me: dict | None, reason: str, held: str) -> None:
-    """Leave the sender of a held native message a note it will see (issue
-    #8). Only a sender named by exactly one running session; never ourselves.
-    A note must not cost the gate its answer, so a failure is only logged."""
-    try:
-        owners = _native_owners(parsed)
-        if len(owners) != 1 or (me and owners[0].get("session_id") == me.get("session_id")):
+def _bounce_sender(parsed, me: dict | None, reason: str, held: str) -> None:
+    """Leave the sender of a held message a note it will see (issue #8).
+
+    A native message's sender is the one running session that owns its socket.
+    An xsm message's is the one its header's ref names, and only when this
+    machine's ledger shows that session queued this id: a header is text the
+    sender writes, and a forged one must not put a note in someone else's
+    session. A message from another machine has no sender here. Never ourselves."""
+    if parsed.header:
+        if parsed.header.get("origin"):
             return
-        from . import bounce
-        connect = config.project_root(me["cwd"]) \
-            if me and me.get("cwd") and reason.startswith("out of scope") else None
-        bounce.record(owners[0], me, reason, held, parsed.body, connect)
-    except Exception as err:            # noqa: BLE001 - the hold already happened
-        paths.append_jsonl("decisions.jsonl", {"event": "bounce", "decision": "pass",
-                                               "reason": "note not left: %s" % type(err).__name__})
+        sender, _ = _sender_record(parsed)
+        owners = [sender] if sender and ledger.sent_by(parsed.header.get("id"),
+                                                       sender.get("ref")) else []
+    else:
+        owners = _native_owners(parsed)
+    if len(owners) != 1 or (me and owners[0].get("session_id") == me.get("session_id")):
+        return
+    from . import bounce
+    bounce.record(owners[0], me, reason, held, parsed.body)
 
 
 def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
@@ -497,8 +673,14 @@ def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
     sessions xsm knew while letting unknown ones through (user decision,
     2026-10-01, amending ADR-0013 again). Scope still governs xsm's own
     messages, which `xsm send` refuses before sending. A session a person
-    blocked with `xsm block` stays blocked. A sender that is not a socket on
-    this machine (Remote Control, a cloud session) is held.
+    blocked with `xsm block` stays blocked.
+
+    A sender that is not a socket on this machine (Remote Control, a cloud
+    session, another machine) was held, as past the uid boundary (2026-09-30).
+    It passes now, with a note naming where it came from (user decision,
+    2026-10-01, amending ADR-0013: a person who connected their own phone or
+    cloud session to talk to this one is not to be refused by a rule they
+    cannot see). `remote_native` = hold brings the hold back.
 
     Claude's envelope carries from="uds:<socket>", from-name and from-mode,
     and no session id (measured with Claude 2.1.284, 2026-09-29). The socket
@@ -507,7 +689,7 @@ def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
     if cfg.get("strict_peers", False):
         return "block", "peer message without an xsm header (strict_peers)"
     if not me:
-        return "block", "cannot identify this session, so scope was not checked"
+        return _unidentified(cfg)
     if me.get("runtime") != "claude":
         # Claude sessions are the only ones Claude's messaging reaches; the same
         # text arriving through a Codex queue came some other way.
@@ -515,15 +697,17 @@ def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
     where = parsed.attrs.get("from") or ""
     socket = where[len("uds:"):] if where.startswith("uds:") else ""
     running = _native_owners(parsed)
-    if not socket:
-        # Not a socket on this machine: Remote Control, a cloud session or
-        # another machine. Past the uid boundary, so still held (user
-        # decision, 2026-09-30).
-        return "block", "Claude peer message from %s, which is not a session on this machine" % (
-            where or "an unnamed sender")
     blocked = config.blocked()
     if me.get("ref") in blocked or (len(running) == 1 and running[0].get("ref") in blocked):
         return "block", "a blocked session is on this message"
+    if not socket:
+        origin = "Claude peer message from %s, which is not a session on this machine" % (
+            where or "an unnamed sender")
+        if config.policy("remote_native", cfg=cfg) == "hold":
+            return "block", origin
+        return "unchecked", "it came from %s, which is not a session on this machine (Remote " \
+                            "Control, a cloud session or another machine)" % (
+                                where or "an unnamed sender")
     if len(running) == 1:
         return "pass", "local Claude peer message from %s@%s" % (
             running[0].get("name"), running[0].get("alias"))
@@ -564,22 +748,27 @@ def take_inbox(me: dict) -> list:
             decision, reason = check(parsed, me)
             if decision == "block":
                 stored = hold(runtime, reason, {}, me, parsed)
-                ledger.receipt(msg_id, "held" if stored else "blocked", me, reason)
+                _safely(ledger.receipt, msg_id, "held" if stored else "blocked", me, reason)
+                if stored:
+                    _tell_held(parsed, me, reason, stored)
                 out.append("[xsm] Message %s from %s was refused (%s)%s." % (
                     msg_id, parsed.header.get("from") or "unknown", reason,
-                    "; kept in the held list" if stored else ""))
+                    "; kept as %s: if your user wants it, ask them, and after they answer run "
+                    "`xsm held deliver %s`" % (stored, stored) if stored else ""))
             else:
                 outcome = _outcome(parsed)
-                ledger.receipt(msg_id, "delivered", me, "read with xsm inbox", outcome=outcome)
+                _safely(ledger.receipt, msg_id, "delivered", me,
+                        "%s; unchecked: %s" % (VIA_INBOX, reason) if decision == "unchecked"
+                        else VIA_INBOX, outcome=outcome)
                 if parsed.header.get("kind") == "reply":
-                    _close_task(parsed, outcome)
-                    workers.on_reply(parsed.header.get("ref"), parsed.header.get("reply-to"),
-                                     me, outcome)
-                out.append(envelope.sender_context(parsed, runtime, worker=worker,
-                                                   cwd=me.get("cwd")) + "\n\n" + parsed.body)
+                    _safely(_close_task, parsed, outcome)
+                    _safely(workers.on_reply, parsed.header.get("ref"),
+                            parsed.header.get("reply-to"), me, outcome)
+                out.append(_context(decision, reason, parsed, runtime, worker=worker,
+                                    cwd=me.get("cwd")) + "\n\n" + parsed.body)
             if span is not None:
                 span.set_attribute("xsm.receive.decision",
-                                   "pass" if decision != "block" else "held")
+                                   decision if decision != "block" else "held")
             paths.append_jsonl("decisions.jsonl", {
                 "event": "inbox", "runtime": runtime, "decision": decision, "reason": reason,
                 "id": msg_id, "receiver": me.get("name"), "from": parsed.header.get("from")})
@@ -616,6 +805,16 @@ def _sender_record(parsed) -> tuple:
     return None, "sender %r is ambiguous: %d sessions share ref %s" % (name, len(matches), ref)
 
 
+def _fail_closed() -> bool:
+    """Whether a broken gate refuses what looks like a peer message (policy
+    `fail_open` = false). Asked from the catch-all, so it must not fail: when it
+    cannot say, the gate is open."""
+    try:
+        return not config.policy("fail_open")
+    except Exception:                                  # noqa: BLE001 - see module docstring
+        return False
+
+
 def main(argv=None) -> int:
     raw = sys.stdin.read()
     data = {}
@@ -628,16 +827,18 @@ def main(argv=None) -> int:
         _emit(detect_runtime(data), handle(data))
         return 0
     except BaseException as err:                       # noqa: BLE001 - see module docstring
-        prompt = (data.get("prompt") or "") if isinstance(data, dict) else ""
+        if not isinstance(data, dict):
+            data = {}
+        prompt = data.get("prompt") or ""
         # The raw text matters too: if json parsing is what failed, the prompt
         # field was never extracted, and a peer message would look like a human's.
-        looks_like_peer = envelope.looks_like_peer(prompt) or envelope.looks_like_peer(raw)
-        event = (data or {}).get("hook_event_name")
+        looks_like_peer = envelope.looks_like_peer(str(prompt)) or envelope.looks_like_peer(raw)
+        event = data.get("hook_event_name")
         # A tool result has already happened and nothing here can hold it back:
         # it never was a block, whatever text it carried (2026-10-01).
+        refuse = looks_like_peer and event in ("UserPromptSubmit", None) and _fail_closed()
         paths.append_jsonl("decisions.jsonl", {
-            "event": event, "decision":
-                "block" if looks_like_peer and event != "PostToolUse" else "pass",
+            "event": event, "decision": "block" if refuse else "pass",
             "reason": "xsm internal error: %s" % type(err).__name__,
             "detail": str(err)[:300], "peer_like": looks_like_peer})
         if event in ("PermissionRequest", "UserPromptExpansion", "PostToolUse"):
@@ -646,11 +847,18 @@ def main(argv=None) -> int:
             # expansion is the person's own slash command: nothing to refuse.
             # A tool result has already happened, whatever text it carries.
             return 0
-        if looks_like_peer:
+        if refuse:
             print(json.dumps({
                 "decision": "block",
                 "reason": "xsm: internal error while checking this peer message; "
-                          "it was not delivered. Run `xsm doctor`.",
+                          "it was not delivered (fail_open is off). Run `xsm doctor`.",
                 "hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                        "suppressOriginalPrompt": True}}))
+        elif looks_like_peer and event in ("UserPromptSubmit", None):
+            # The gate broke, and the person's conversation goes on (user
+            # decision, 2026-10-01): through, with a note that nothing checked
+            # it. A person's own prompt that quotes an xsm log gets the same
+            # note, which says only what holds either way.
+            print(json.dumps(allow_with_context("claude", envelope.unchecked_context(
+                "xsm hit an internal error (%s)" % type(err).__name__))))
         return 0

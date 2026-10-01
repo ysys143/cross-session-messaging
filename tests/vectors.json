@@ -721,7 +721,34 @@
    }
   },
   {
-   "id": "a-claude-message-from-no-local-socket-is-held",
+   "id": "a-claude-message-from-no-local-socket-passes-noted-with-its-origin",
+   "sessions": [
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "envelope-only",
+    "body": "raw injection",
+    "raw_from": "bridge:remote-control"
+   },
+   "expect": {
+    "output": "allow",
+    "context_contains": [
+     "could not check this message",
+     "bridge:remote-control",
+     "not a session on this machine",
+     "not from your user"
+    ]
+   },
+   "why": "Remote Control, a cloud session or another machine: passed with a note naming where it came from (user decision, 2026-10-01, ADR-0013 amendment)."
+  },
+  {
+   "id": "a-claude-message-from-no-local-socket-is-held-when-remote-native-is-hold",
    "sessions": [
     {
      "name": "recv",
@@ -739,7 +766,11 @@
     "output": "block",
     "reason_contains": "not a session on this machine",
     "held": true
-   }
+   },
+   "config": {
+    "remote_native": "hold"
+   },
+   "why": "remote_native = hold brings the 2026-09-30 hold back."
   },
   {
    "id": "a-claude-message-from-an-unknown-local-session-passes",
@@ -910,8 +941,38 @@
    }
   },
   {
-   "id": "unregistered-sender-is-refused",
-   "why": "Registration is consent: a session that never ran the hook cannot be a sender either.",
+   "id": "unregistered-sender-passes-noted",
+   "why": "A person who pastes an xsm log into their own prompt writes a header nobody registered, and a conversation they want is not refused for it (user decision, 2026-10-02). It passes noted as unchecked, a claim and not a fact; fail_open = false is the refusal below.",
+   "sessions": [
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "xsm",
+    "from": "ghost",
+    "body": "hi"
+   },
+   "expect": {
+    "output": "allow",
+    "context_contains": [
+     "could not check this message",
+     "not a session this machine knows",
+     "no record of that message being sent",
+     "not from your user"
+    ]
+   }
+  },
+  {
+   "id": "unregistered-sender-is-refused-when-fail-open-is-off",
+   "why": "Registration is consent: with fail_open = false a session that never ran the hook cannot be a sender either (the rule as it was before 2026-10-02).",
+   "config": {
+    "fail_open": false
+   },
    "sessions": [
     {
      "name": "recv",
@@ -1164,8 +1225,34 @@
    }
   },
   {
-   "id": "broken-gate-blocks-peer-messages",
-   "why": "A crashed hook is reported as non-blocking by Claude and the prompt runs anyway (S8-g2), so the fallback must refuse.",
+   "id": "broken-gate-lets-peer-messages-through-noted",
+   "why": "A crashed hook is reported as non-blocking by Claude and the prompt runs anyway (S8-g2). Since 2026-10-01 the fallback does not refuse: the prompt goes through with a note that it was not checked (fail_open).",
+   "force_error": true,
+   "sessions": [
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "envelope-only",
+    "body": "hi"
+   },
+   "expect": {
+    "output": "allow",
+    "context_contains": [
+     "could not check this prompt",
+     "internal error",
+     "unchecked"
+    ]
+   }
+  },
+  {
+   "id": "broken-gate-blocks-peer-messages-when-fail-open-is-off",
+   "why": "fail_open = false brings back the S8-g2 refusal.",
    "force_error": true,
    "sessions": [
     {
@@ -1183,6 +1270,9 @@
    "expect": {
     "output": "block",
     "reason_contains": "internal error"
+   },
+   "config": {
+    "fail_open": false
    }
   },
   {
@@ -1206,7 +1296,77 @@
    }
   },
   {
-   "id": "stopped-sender-is-refused",
+   "id": "stopped-sender-with-no-record-of-sending-passes-noted",
+   "sessions": [
+    {
+     "name": "send",
+     "alias": "claude-3",
+     "session_id": "s1",
+     "cwd": "{tmp}/ws",
+     "stopped": true
+    },
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "xsm",
+    "from": "s1",
+    "body": "please review"
+   },
+   "expect": {
+    "output": "allow",
+    "context_contains": [
+     "could not check this message",
+     "is not running",
+     "no record of it sending"
+    ]
+   },
+   "why": "A stopped session keeps its pointer for days. Its message passes noted as unchecked when this machine's ledger does not show it sending it (user decision, 2026-10-01, ADR-0009 amendment)."
+  },
+  {
+   "id": "a-sender-that-exited-after-sending-is-heard",
+   "sessions": [
+    {
+     "name": "send",
+     "alias": "claude-3",
+     "session_id": "s1",
+     "cwd": "{tmp}/ws",
+     "stopped": true
+    },
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "xsm",
+    "from": "s1",
+    "body": "please review"
+   },
+   "expect": {
+    "output": "allow",
+    "context_contains": [
+     "another agent session"
+    ],
+    "context_absent": [
+     "could not check"
+    ]
+   },
+   "why": "A session that sends and then exits loses nothing: this machine's ledger shows it queued the message, so where it came from is proved.",
+   "ledger_queued": {
+    "from": "s1"
+   }
+  },
+  {
+   "id": "stopped-sender-is-refused-when-stale-sender-is-hold",
    "sessions": [
     {
      "name": "send",
@@ -1233,7 +1393,10 @@
     "reason_contains": "is not running",
     "held": true
    },
-   "why": "A stopped session keeps its pointer for days; its name must not carry a message now (ADR-0009)."
+   "why": "stale_sender = hold brings back the refusal (S8-e, ADR-0009).",
+   "config": {
+    "stale_sender": "hold"
+   }
   },
   {
    "id": "outcome-reaches-the-receiving-agent",

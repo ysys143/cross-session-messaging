@@ -246,12 +246,7 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
         if verdict is not None and not go:
             raise WorkerError(consent.shown_refusal(verdict, what, kept))
         if verdict is not None:
-            record = {"event": "consent", "verb": "grant", "target": target, "verdict": verdict,
-                      "by": (caller or {}).get("name")}
-            if isinstance(kept, str):
-                record["old_hooks"] = True      # an older hook kept this reply
-            paths.append_jsonl("decisions.jsonl", record)
-            print(consent.approved_line(verdict, kept))
+            print(consent.approved("grant", target, verdict, kept, (caller or {}).get("name")))
             grant = create_grant((caller or {}).get("ref"), runtime, cwd, options,
                                  "verdict: " + verdict)
             p = paths.path(GRANTS, grant["id"] + ".json")
@@ -747,7 +742,7 @@ def _ask_trust(worker: dict) -> dict:
 def _finish_detached(worker: dict) -> None:
     env = dict(os.environ)
     env["PYTHONPATH"] = install.REPO
-    subprocess.Popen([install.pinned_python(), "-m", "xsm", "worker-finish", worker["name"]],
+    subprocess.Popen(install.cli_argv("worker-finish", worker["name"]),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, env=env, start_new_session=True)
 
@@ -1133,7 +1128,7 @@ def reap_detached(ending: dict | None = None) -> None:
     `ending` is a session saying goodbye. Its SessionEnd hook runs while its
     process is still alive, so it still reads as live; the reaper waits for
     that process to exit before it looks."""
-    argv = [install.pinned_python(), "-m", "xsm", "reap"]
+    argv = install.cli_argv("reap")
     if ending:
         if not any(w.get("parent_ref") == ending.get("ref") for w in all_workers()):
             return
@@ -1171,8 +1166,8 @@ def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None
             # process so the reply's context still reaches the parent in time.
             env = dict(os.environ)
             env["PYTHONPATH"] = install.REPO
-            subprocess.Popen([install.pinned_python(), "-m", "xsm", "stop", "--internal",
-                              worker["name"]], stdin=subprocess.DEVNULL,
+            subprocess.Popen(install.cli_argv("stop", "--internal", worker["name"]),
+                             stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
                              start_new_session=True)
 

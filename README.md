@@ -88,6 +88,31 @@ A directly installed copy does not follow changes to the repository. When `xsm d
 update it with `xsm install --refresh`. After a plugin update, run `install --refresh` with the new
 version's `bin/xsm`.
 
+What a direct install runs from: `xsm install` copies the runtime of this checkout (`xsm/`, `hooks/`,
+`skills/`, `bin/`, the plugin manifests) to `~/.xsm/runtime/<id>/` and points everything at that copy: the
+Claude hook command (the `hooks/xsm-hook` launcher, which finds a working python itself and turns a script it
+cannot open into an error, never a blocked prompt), the MCP server registration (the `hooks/xsm-mcp`
+launcher), and `~/.local/bin/xsm`. macOS can deny a session's app the folder a checkout lives in
+(`~/Documents`), and a hook that cannot run must not stop a prompt. The copy before the current one stays
+until no live session started before it, and is then pruned when the next `xsm install` finishes (not before: the pruning reads the process table, which a hook has no time for). `xsm doctor`'s `runtime` line names the copy and
+says when the checkout has moved on; the agent then runs `<checkout>/bin/xsm install --refresh`. `--dev`
+(or `"runtime": "checkout"` in `config.json`) keeps everything pointing at the checkout, for developing xsm; `--dev` saves that line itself, so a later `install --refresh` or `doctor` keeps it (delete the line to go back to a copy).
+A Codex direct install keeps the hook command it has, because Codex's trust covers its text; a new one names
+`~/.xsm/runtime/current`, which stays the same across refreshes. Only `codex plugin add xsm@xsm` moves an
+existing Codex install off its checkout.
+
+For each Claude home, install also sets `crossSessionInbound` to `"accept"` (Claude Code 2.1.224 and later;
+a value the home already has stays), so Claude delivers a message from another of your sessions whatever the
+two permission modes are, and allows the messaging commands (`xsm send`, `inbox`, `list`, `who`, `held`,
+`ledger`, `status`, `doctor`, `--version`, by name and by the runtime's absolute path) and MCP tools
+(`xsm_send`, `xsm_inbox`, `xsm_post`, `xsm_channel`) in `permissions.allow`, so auto and default modes never
+stop a message. `xsm uninstall` takes out the hooks, MCP entry, skill link, statusLine and settings entries install added, and the `~/.local/bin/xsm` link when it points into the runtime copy and no other home keeps xsm; the copies under `~/.xsm/runtime` stay, and that folder can be deleted once no session runs from it. Each of these defaults is open and can
+be closed in `~/.xsm/config.json` or by an environment variable (which wins): `runtime` (`snapshot` |
+`checkout`, `XSM_RUNTIME`), `claude_inbound` (`accept` | `leave`, `XSM_CLAUDE_INBOUND`), `allow_messaging`
+(`XSM_ALLOW_MESSAGING`), and `human_send_connects` (`XSM_HUMAN_SEND_CONNECTS`: an out-of-scope `xsm send` a
+person typed themselves connects the folders it needs and delivers). `xsm doctor` shows any that is not at its
+default on one `policy` line.
+
 </details>
 
 <details>
@@ -95,9 +120,12 @@ version's `bin/xsm`.
 
 - If a home (Claude or Codex) has both the plugin and a direct install, its hooks run twice, which is
   dangerous. `xsm install` refuses such a home unless you pass `--force`.
-- `install --codex-home` links `bin/xsm` at `~/.local/bin/xsm` for you, so make sure `~/.local/bin` is on
-  your PATH. With only `--claude-home` and no plugin, link `bin/xsm` onto your PATH yourself. The Claude
-  plugin sets PATH inside sessions, and the Codex plugin keeps the link described above.
+- `xsm install` links the installed runtime's `bin/xsm` at `~/.local/bin/xsm` for you (a link to something else
+  is left alone), so make sure `~/.local/bin` is on your PATH. The Claude plugin sets PATH inside sessions,
+  and the Codex plugin keeps the link described above.
+- A session that started before xsm was installed (or before its plugin was enabled) has not run a hook yet.
+  It registers itself the first time it runs an xsm command or tool, and a sender that names it is told it is
+  open but unregistered, and how it gets registered.
 - On Linux, X.Org's session manager is also called `xsm` (package x11-session-utils). If it is installed,
   run `command -v xsm` to check that this one comes first.
 
@@ -205,12 +233,20 @@ The receiving side runs nothing. A hook acts as the gate: it checks the scope an
 message directly into the session's prompt. A rejected message is held, not dropped. Claude's own
 cross-session messages (`SendMessage`, no xsm header) from a session on this machine arrive untouched, whatever
 the scope: Claude's own gate has already decided, and the sender is you on the same machine. Ones from off this
-machine (Remote Control, cloud) are held. Scope governs xsm's own messages, and `xsm send` refuses an out-of-scope
+machine (Remote Control, cloud) pass with a note naming where they came from (`"remote_native": "hold"` holds them, as before). Scope governs xsm's own messages, and `xsm send` refuses an out-of-scope
 target before sending. A linked worktree (Orca, `claude --worktree`) and its main checkout are one repository. To
 connect two folders the agent asks you in plain words and runs `xsm link <folder>` itself; your reply is kept as
 the verdict (or the `xsm_link` tool asks with a form). Set `"strict_peers": true` in
 `~/.xsm/config.json` to hold every message without an xsm header instead (ADR-0013). Claude's own gate still
 decides first: a message it holds for a permission-mode mismatch never reaches xsm.
+
+A conversation you want between your own sessions is never stopped by a hold you cannot see. If the gate
+breaks, or cannot check a message (its sender exited, it came from off this machine), the message goes
+through with a `[xsm] could not check this message` note instead of being held; what is still held (a
+session you blocked, out of scope) is kept, both sides are told, and your agent delivers it on your yes
+(`xsm held deliver <id>`). Each opened hold can be closed again: `fail_open`, `remote_native`,
+`stale_sender`, `reply_from_request`, `reply_flag` in `~/.xsm/config.json`, or `XSM_<KEY>` in the
+environment; `xsm doctor` shows them on its `policy` line.
 
 ```bash
 xsm ledger                           # recent messages and their delivery state
@@ -292,7 +328,7 @@ Principles:
 ├── hooks/hooks.json, .mcp.json   # hooks and MCP server the plugin provides
 ├── .codex-plugin/, .agents/plugins/   # the same for Codex
 ├── hooks/codex-hooks.json, codex-mcp.json   # hooks and MCP server of the Codex plugin
-├── bin/xsm                       # launcher (sets PYTHONPATH, then python3 -m xsm)
+├── bin/xsm                       # launcher (runs xsm.cli from its own folder, whatever the current directory holds)
 ├── xsm/                          # the whole implementation (Python, stdlib only)
 │   ├── cli.py                   # every subcommand
 │   ├── registry.py              # session registry (written by hooks, enriched from the runtime on lookup)

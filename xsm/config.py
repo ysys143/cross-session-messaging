@@ -16,10 +16,9 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import time
 
-from . import paths
+from . import paths, probe
 
 CONFIG = "config.json"
 HOMES = "homes.json"
@@ -44,6 +43,58 @@ def load() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(paths.read_json(paths.path(CONFIG), {}) or {})
     return cfg
+
+
+# What a hold that was opened (user decision, 2026-10-01: a conversation the
+# person wants between their own sessions is never blocked by a rule or a
+# failure they cannot see) does by default, and how to close it again. Each
+# is a key of config.json, and XSM_<NAME in capitals> overrides it, so a
+# machine can be put back the way it was without editing a file.
+POLICY_DEFAULTS = {
+    "fail_open": True,             # false: a peer message is blocked when the hook breaks (S8-g2)
+    "remote_native": "pass",       # "hold": Claude messages from off this machine are held
+    "stale_sender": "pass",        # "hold": a message whose sender has exited is held
+    "reply_from_request": True,    # false: the person's own request is not read as their yes
+    "reply_flag": True,            # false: `--reply "<their words>"` is not accepted
+}
+POLICY_CHOICES = {"remote_native": ("pass", "hold"), "stale_sender": ("pass", "hold")}
+_FALSE = ("0", "false", "no", "off")
+_TRUE = ("1", "true", "yes", "on")
+
+
+def policy(name: str, default=None, cfg: dict | None = None, choices: tuple | None = None):
+    """The value of one policy switch: the environment (XSM_<NAME>), then
+    config.json, then `default` (POLICY_DEFAULTS' when none is given). The default's
+    kind says how a value is read: a bool takes 1/true/yes/on and 0/false/no/off, any
+    other takes a lowercased string, and one of `choices` when given. A value of the
+    wrong kind is ignored, and then the next source is asked, so a typo in the
+    environment falls through to the file and never past it to the default
+    (2026-10-02: policy.py and this read bad values differently). The one reader for
+    every switch, policy.get included. Never raises: a hook asks."""
+    if default is None:
+        default = POLICY_DEFAULTS.get(name)
+    choices = choices or POLICY_CHOICES.get(name)
+    sources = [os.environ.get("XSM_" + name.upper())]
+    try:
+        sources.append((cfg if cfg is not None else load()).get(name))
+    except Exception:                              # noqa: BLE001 - a broken file is no policy
+        pass
+    for raw in sources:
+        if isinstance(default, bool):
+            if isinstance(raw, bool):
+                return raw
+            text = str(raw).strip().lower() if raw is not None else ""
+            if text in _TRUE or text in _FALSE:
+                return text in _TRUE
+        elif isinstance(raw, str) and raw.strip() and \
+                (choices is None or raw.strip().lower() in choices):
+            return raw.strip().lower()
+    return default
+
+
+def policy_report() -> dict:
+    """Every switch as it stands now, for `xsm doctor`."""
+    return {name: policy(name) for name in POLICY_DEFAULTS}
 
 
 def config_hash() -> str:
@@ -97,17 +148,17 @@ def git_repo(cwd: str) -> tuple:
     repositories", so the default same-repository scope failed for the very
     sessions it was for (issue #8 follow-up, 2026-10-01). Separate clones of
     one remote keep separate common dirs and stay apart."""
-    try:
-        out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel",
-                              "--git-common-dir"], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return None, None
-    lines = out.stdout.strip().splitlines()
-    if out.returncode != 0 or len(lines) != 2 or not lines[0]:
-        return None, None
-    # An older git prints the common dir relative to `cwd`.
-    common = lines[1] if os.path.isabs(lines[1]) else os.path.join(cwd, lines[1])
-    return os.path.realpath(lines[0]), os.path.realpath(common)
+    def ask():
+        out = probe.git(cwd, "rev-parse", "--show-toplevel", "--git-common-dir")
+        lines = (out or "").strip().splitlines()
+        if len(lines) != 2 or not lines[0]:
+            return None, None
+        # An older git prints the common dir relative to `cwd`.
+        common = lines[1] if os.path.isabs(lines[1]) else os.path.join(cwd, lines[1])
+        return os.path.realpath(lines[0]), os.path.realpath(common)
+    # Asked once per folder inside `xsm list` (probe.quick), and never waited on for
+    # long: a folder that does not answer is unknown (2026-10-02).
+    return probe.remember(("git_repo", cwd), ask)
 
 
 def repo_name(common_dir: str) -> str:
@@ -265,13 +316,17 @@ def _worker_link(a: dict, b: dict) -> str | None:
     return None
 
 
+def joined_projects(session: dict, cfg: dict | None = None) -> set:
+    """The ids of the named projects the session's folder has joined."""
+    cfg = cfg or load()
+    return {s.get("id") for s in cfg.get("scopes", [])
+            if any(m.get("root") and member_matches(m, session) for m in s.get("members", []))}
+
+
 def _half_joined(a: dict, b: dict, cfg: dict) -> str:
     """When one side has joined a project the other has not, say which and what
     would open it — otherwise the refusal reads as if joining had no effect."""
-    def joined(session):
-        return {s.get("id") for s in cfg.get("scopes", [])
-                if any(m.get("root") and member_matches(m, session) for m in s.get("members", []))}
-    ja, jb = joined(a), joined(b)
+    ja, jb = joined_projects(a, cfg), joined_projects(b, cfg)
     notes = []
     for mine, other in ((ja - jb, b), (jb - ja, a)):
         for name in sorted(mine):
@@ -340,6 +395,16 @@ def _raw() -> dict:
 
 def _save(raw: dict) -> None:
     paths.write_json(paths.path(CONFIG), raw, mode=0o644)
+
+
+def set_value(name: str, value) -> bool:
+    """Write one top-level key of config.json; False when it already says that."""
+    raw = _raw()
+    if raw.get(name) == value:
+        return False
+    raw[name] = value
+    _save(raw)
+    return True
 
 
 def projects() -> list:

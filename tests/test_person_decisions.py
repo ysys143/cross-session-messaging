@@ -15,7 +15,11 @@ from tests import test_xsm  # noqa: E402
 TempState = test_xsm.TempState
 
 
-class PersonDecisionTest(TempState):
+class AskHelpers:
+    """What a test needs to play an agent that asks, a person who answers, and the
+    hook that keeps the answer. A mixin: another test file uses it, and a TestCase
+    imported by name would run its tests twice."""
+
     def setUp(self):
         super().setUp()
         self.me = {"ref": "abc123", "session_id": "s-agent", "runtime": "claude",
@@ -45,7 +49,7 @@ class PersonDecisionTest(TempState):
         """The agent reads what it was shown before it runs the command again:
         the second run passes no sooner than consent.SHOW_DELAY after the first."""
         from xsm import consent, paths
-        p = consent._pending_path(self.me["ref"])
+        p = self._pending_file()
         entry = paths.read_json(p)
         entry["shown_t"] = entry["shown_t"] - consent.SHOW_DELAY - 1
         paths.write_json(p, entry)
@@ -58,6 +62,32 @@ class PersonDecisionTest(TempState):
         self._waited()
         return text
 
+    def _pending_file(self):
+        """The ask file the last ask made: each thing asked about has its own, and
+        the newest is the one a test just made."""
+        from xsm import consent, paths
+        files = consent.pending_files(self.me["ref"])
+        self.assertTrue(files, "no ask on record")
+        return max(files, key=lambda f: (paths.read_json(f) or {}).get("t") or 0)
+
+    def _pending(self):
+        from xsm import paths
+        return paths.read_json(self._pending_file())
+
+    def _taken(self, verb, target, here=None):
+        """What a rerun gets of the reply: (reply, go)."""
+        from xsm import consent
+        return consent.take_or_request(self.me, verb, target, here)[:2]
+
+    def _asked_files(self, recent=False):
+        """What asks left in the state folder. The person's last prompts
+        (`<ref>.recent.json`, kept for `consent.from_request`) are not an ask's."""
+        folder = os.path.join(self.tmp, "asked")
+        return sorted(n for n in os.listdir(folder) if recent or not n.endswith(".recent.json")) \
+            if os.path.isdir(folder) else []
+
+
+class PersonDecisionTest(AskHelpers, TempState):
     def _answered(self, answers, annotations=None, me=None, tool="AskUserQuestion",
                   event="PostToolUse", response=None):
         """The hook input Claude Code gives for an answered AskUserQuestion. The
@@ -71,19 +101,6 @@ class PersonDecisionTest(TempState):
             "tool_input": {"questions": questions},
             "tool_response": response if response is not None else {
                 "questions": questions, "answers": answers, "annotations": annotations or {}}})
-
-    def _pending(self):
-        from xsm import consent, paths
-        return paths.read_json(consent._pending_path(self.me["ref"]))
-
-    def _taken(self, verb, target, here=None):
-        """What a rerun gets of the reply: (reply, go)."""
-        from xsm import consent
-        return consent.take_or_request(self.me, verb, target, here)[:2]
-
-    def _asked_files(self):
-        folder = os.path.join(self.tmp, "asked")
-        return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
 
     def test_approving_a_workers_request(self):
         from xsm import paths, workers
@@ -339,13 +356,13 @@ class PersonDecisionTest(TempState):
         import time
         from xsm import consent, paths
         self._asks(["unblock", "abcabc"])
-        pending = consent._pending_path(self.me["ref"])
+        pending = self._pending_file()
         entry = paths.read_json(pending)
-        entry["t"] = time.time() - consent.TTL - 60            # asked long ago, unanswered
+        entry["t"] = time.time() - consent.ASK_MAX - 60        # asked long ago, unanswered
         paths.write_json(pending, entry)
         self._reply("응")
         self.assertFalse(os.path.exists(pending), "an expired ask keeps nothing, not even a file")
-        entry["t"] = time.time() - consent.TTL + 5             # asked just inside the window
+        entry["t"] = time.time() - consent.ASK_MAX + 5         # asked just inside the window
         paths.write_json(pending, entry)
         self._reply("응")
         entry = paths.read_json(pending)
@@ -368,7 +385,7 @@ class PersonDecisionTest(TempState):
         config.block("abc999")
         self._asks(["unblock", "abc999"])
         self._reply("응")
-        pending = consent._pending_path(self.me["ref"])
+        pending = self._pending_file()
         entry = paths.read_json(pending)
         entry["t"] = time.time() - consent.ASK_MAX + 60           # nearly half an hour old
         entry["verdict_t"] = time.time() - 5
@@ -409,7 +426,7 @@ class PersonDecisionTest(TempState):
         config.block("abc777")
         self._asks(["unblock", "abc777"])
         self._reply("응")
-        pending = consent._pending_path(self.me["ref"])
+        pending = self._pending_file()
         entry = paths.read_json(pending)
         entry.update({"shown": True})
         entry.pop("shown_t", None)
@@ -424,7 +441,7 @@ class PersonDecisionTest(TempState):
         from xsm import consent, paths
         self._asks(["unblock", "abc666"])
         self._reply("응")
-        pending = consent._pending_path(self.me["ref"])
+        pending = self._pending_file()
         late = threading.Thread(target=self._reply, args=("아니 잠깐",))
         real, state = paths.write_json, {"first": True}
 
@@ -459,10 +476,10 @@ class PersonDecisionTest(TempState):
         for t in threads:
             t.join(10)
         self.assertEqual(results, [("응", False)] * 8, "shown by all, passed by none")
-        self.assertTrue(os.path.exists(consent._pending_path(self.me["ref"])))
-        entry = paths.read_json(consent._pending_path(self.me["ref"]))
+        self.assertTrue(os.path.exists(self._pending_file()))
+        entry = paths.read_json(self._pending_file())
         entry["shown_t"] -= consent.SHOW_DELAY + 1               # read, a moment later
-        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        paths.write_json(self._pending_file(), entry)
         results.clear()
         gate = threading.Barrier(8)
         threads = [threading.Thread(target=rerun) for _ in range(8)]
@@ -480,7 +497,8 @@ class PersonDecisionTest(TempState):
         self._reply("hello")
         self.assertFalse(consent.note_verdict(self.me, "hello"))
         asked = os.path.join(self.tmp, consent.ASKED)
-        self.assertEqual(os.listdir(asked) if os.path.isdir(asked) else [], [])
+        self.assertEqual(self._asked_files(), [], "no ask, no lock")
+        self.assertEqual(os.listdir(asked), ["abc123.recent.json"], "only the prompts it keeps")
 
     def test_a_ref_prefix_names_the_same_session(self):
         """`xsm block ref:abcdef` stored "ref:abcdef" and the gate compares bare
@@ -611,7 +629,7 @@ class PersonDecisionTest(TempState):
                 self.assertEqual(code, 2, text)
                 self.assertIn("cannot keep their reply", text)
                 self.assertNotIn("Traceback", text)
-                os.unlink(consent._pending_path(self.me["ref"]))
+                os.unlink(self._pending_file())
 
     def test_a_read_only_state_folder_is_a_refusal_not_a_crash(self):
         import stat
@@ -626,10 +644,10 @@ class PersonDecisionTest(TempState):
             code, text = self._cli(["unblock", "abc112"])             # the show
             self.assertEqual(code, 2, text)
             self.assertIn("cannot keep their reply", text)
-            entry = paths.read_json(consent._pending_path(self.me["ref"]))
+            entry = paths.read_json(self._pending_file())
             entry.update({"shown": True, "shown_t": 0})
             os.chmod(folder, stat.S_IRWXU)
-            paths.write_json(consent._pending_path(self.me["ref"]), entry)
+            paths.write_json(self._pending_file(), entry)
             os.chmod(folder, stat.S_IRUSR | stat.S_IXUSR)
             code, text = self._cli(["unblock", "abc112"])             # the pass
             self.assertEqual(code, 2, text)
@@ -687,9 +705,9 @@ class PersonDecisionTest(TempState):
         self.assertEqual(self._asked_files(), [], "no ask, no file")
         self._asks(["unblock", "aaa444"])
         entry = self._pending()
-        entry["t"] = entry["t"] - consent.TTL - 60               # asked long ago, unanswered
+        entry["t"] = entry["t"] - consent.ASK_MAX - 60           # asked long ago, unanswered
         from xsm import paths
-        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        paths.write_json(self._pending_file(), entry)
         self._answered({"Lift it?": "Yes"})
         self.assertEqual(self._asked_files(), [], "an expired ask keeps nothing")
         other = dict(self.me, session_id="s-other")               # a session sharing the ref
@@ -751,26 +769,31 @@ class PersonDecisionTest(TempState):
     # -- what an ask leaves behind (adversarial check, 2026-10-01) -----------------------
 
     def test_a_used_ask_leaves_no_file(self):
+        from xsm import consent
         self._asks(["unblock", "bbb111"])
-        self.assertEqual(self._asked_files(), ["abc123.pending.json", "abc123.pending.json.lock"])
+        key = consent.digest("unblock", "bbb111")
+        self.assertEqual(self._asked_files(), ["abc123.%s.pending.json" % key,
+                                               "abc123.%s.pending.json.lock" % key])
         self._reply("응")
         self._shows(["unblock", "bbb111"], "응")
         self.assertEqual(self._cli(["unblock", "bbb111"])[0], 0)
-        self.assertEqual(self._asked_files(), [], "neither the words nor the lock stay")
+        self.assertEqual(self._asked_files(), [], "neither the ask nor the lock stay")
+        self.assertEqual(self._asked_files(recent=True), ["abc123.recent.json"],
+                         "the person's last prompts are kept for ASK_MAX, and pruned after")
 
     def test_an_expired_ask_goes_the_next_time_anyone_looks(self):
         import time
         from xsm import consent, paths
         self._asks(["unblock", "bbb222"])
         entry = self._pending()
-        entry["t"] = time.time() - consent.TTL - 60
-        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        entry["t"] = time.time() - consent.ASK_MAX - 60
+        paths.write_json(self._pending_file(), entry)
         self._reply("잊혀질 말")
         self.assertEqual(self._asked_files(), [], "not the words, not the lock")
         self._asks(["unblock", "bbb222"])
         entry = self._pending()
         entry["t"] = time.time() - consent.ASK_MAX - 60
-        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        paths.write_json(self._pending_file(), entry)
         self.assertFalse(consent.note_verdict(self.me, "too late"))
         self.assertEqual(self._asked_files(), [])
 
@@ -854,7 +877,7 @@ class PersonDecisionTest(TempState):
         import time
         from xsm import consent
         self._asks(["unblock", "ccc111"])
-        held = consent._lock(consent._pending_path(self.me["ref"]) + ".lock")
+        held = consent._lock(self._pending_file() + ".lock")
         try:
             with mock.patch.object(consent, "LOCK_WAIT", 0.3):
                 began = time.monotonic()
@@ -1077,14 +1100,45 @@ class PersonDecisionTest(TempState):
         self.assertEqual(mcp.person_answer({"result": {"action": "decline"}}, client="claude-code"),
                          (None, mcp.DECLINED))
 
-    def test_the_ask_replaces_an_unrelated_one_and_the_yes_lands_on_the_new_one(self):
+    def test_an_ask_about_another_thing_keeps_the_first_and_the_yes_reaches_both(self):
+        """A session had one slot, so asking about a reach erased the reply to a
+        link (2026-10-01). Each thing asked about has its own request, and a reply
+        is written to every one the session has open: the show step puts the words
+        in front of the agent, which judges them against what it asked."""
+        from xsm import consent
         self._asks(["unblock", "zzz111"])
         self._form("xsm_join", {"project": "demo"})
+        self.assertEqual(len(consent.pending_files(self.me["ref"])), 2)
         entry = self._pending()
         self.assertEqual((entry["verb"], entry["target"], entry["verdict"]),
                          ("join", "demo", None))
         self._reply("응")
         self._shows(["join", "demo"], "응")
+        self._shows(["unblock", "zzz111"], "응")
+
+    def test_a_reply_already_given_survives_an_ask_about_something_else(self):
+        self._asks(["unblock", "yyy111"])
+        self._reply("응")
+        self._asks(["join", "demo"])                  # the agent asks about another thing
+        code, text = self._cli(["unblock", "yyy111"])
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "응"', text, "the reply to the first is still there")
+
+    def test_an_unanswered_ask_lives_past_the_reply_window(self):
+        """A person may be away a quarter of an hour; an ask gone after TTL had
+        them answer into nothing and be asked again (2026-10-01)."""
+        import time
+        from xsm import consent, paths
+        self._asks(["unblock", "xxx111"])
+        entry = self._pending()
+        entry["t"] = time.time() - consent.TTL - 300
+        paths.write_json(self._pending_file(), entry)
+        self._reply("응")
+        self.assertEqual(self._pending()["verdict"], "응", "still open: ASK_MAX, not TTL")
+        entry = self._pending()
+        entry["verdict_t"] = time.time() - consent.TTL - 5
+        paths.write_json(self._pending_file(), entry)
+        self._asks(["unblock", "xxx111"])             # the reply itself is good for TTL
 
     def test_running_again_before_asking_keeps_the_time_the_ask_was_made(self):
         """Each run before the person was asked made a new ask and pushed
@@ -1093,7 +1147,7 @@ class PersonDecisionTest(TempState):
         self._asks(["unblock", "ttt111"])
         entry = self._pending()
         entry["t"] -= 100
-        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        paths.write_json(self._pending_file(), entry)
         self._asks(["unblock", "ttt111"])
         self.assertEqual(self._pending()["t"], entry["t"])
         self.assertTrue(consent.ask(self.me, "unblock", "ttt111"))
@@ -1109,7 +1163,7 @@ class PersonDecisionTest(TempState):
         import time
         from xsm import consent, paths
         now = time.time()
-        paths.write_json(consent._pending_path(self.me["ref"]), {
+        paths.write_json(consent._pending_path(self.me["ref"]), {   # the single slot 0.4.14 wrote
             "verb": "unblock", "target": target, "here": None, "cwd": self.tmp, "t": now - 20,
             "session_id": "s-agent", "verdict": "응", "verdict_t": now - 10})
 
@@ -1193,7 +1247,7 @@ class PersonDecisionTest(TempState):
                 self.assertIn("--dir", str(cm.exception))
                 self.assertEqual(self._pending()["verdict"], "응", "the approval was not spent")
                 self.assertTrue(self._pending()["shown"])
-                os.unlink(consent._pending_path(self.me["ref"]))
+                os.unlink(self._pending_file())
 
     # -- blocked refs (0.4.14 stored the prefix) ------------------------------------------
 
@@ -1359,18 +1413,24 @@ class PersonDecisionTest(TempState):
 
     # -- the log of a broken tool-result hook ----------------------------------------------------
 
-    def test_a_broken_hook_logs_a_block_only_for_what_it_could_hold_back(self):
+    def test_a_broken_hook_logs_a_pass_and_blocks_only_when_fail_open_is_off(self):
         import json
         from xsm import paths, receive
         peer = "<cross-session-message>[xsm v1 id=x]</cross-session-message>"
-        for event, extra, want in (
-                ("PostToolUse", {"tool_name": "AskUserQuestion",
-                                 "tool_response": {"answers": {"q": peer}}}, "pass"),
-                ("UserPromptSubmit", {"prompt": peer}, "block")):
-            with self.subTest(event):
+        for fail_open, event, extra, want in (
+                (None, "PostToolUse", {"tool_name": "AskUserQuestion",
+                                       "tool_response": {"answers": {"q": peer}}}, "pass"),
+                (None, "UserPromptSubmit", {"prompt": peer}, "pass"),
+                ("false", "PostToolUse", {"tool_name": "AskUserQuestion",
+                                          "tool_response": {"answers": {"q": peer}}}, "pass"),
+                ("false", "UserPromptSubmit", {"prompt": peer}, "block")):
+            with self.subTest(event, fail_open=fail_open):
                 raw = json.dumps(dict({"hook_event_name": event}, **extra))
+                env = {"XSM_FORCE_ERROR": "1"}
+                if fail_open:
+                    env["XSM_FAIL_OPEN"] = fail_open
                 with mock.patch.object(sys, "stdin", io.StringIO(raw)), \
-                        mock.patch.dict(os.environ, {"XSM_FORCE_ERROR": "1"}), \
+                        mock.patch.dict(os.environ, env), \
                         contextlib.redirect_stdout(io.StringIO()):
                     receive.main()
                 logged = paths.read_jsonl("decisions.jsonl")[-1]

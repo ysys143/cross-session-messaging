@@ -17,7 +17,7 @@ import os
 import sqlite3
 import time
 
-from . import config, identity, paths
+from . import config, identity, paths, probe
 
 
 def _record_path(runtime: str, session_id: str) -> str:
@@ -465,17 +465,51 @@ def claude_home_here() -> str:
     return os.path.realpath(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"))
 
 
+def claude_homes_here() -> list:
+    """Claude homes a session running here may belong to, likeliest first: the one
+    this shell names, the declared ones, then the default."""
+    found = []
+    for h in [claude_home_here()] + [h.get("path") for h in config.homes()
+                                     if h.get("runtime") == "claude"] + ["~/.claude"]:
+        if h:
+            h = os.path.realpath(os.path.expanduser(h))
+            if h not in found:
+                found.append(h)
+    return found
+
+
+def codex_homes(codex_rows=()) -> list:
+    """Candidate CODEX_HOMEs for a thread with no record, likeliest first: this
+    process's own env, the homes of records sharing the daemon, the declared Codex
+    homes, then the default. The caller keeps the first one whose state DB knows
+    the thread."""
+    found = []
+    for h in ([os.environ.get("CODEX_HOME")] + [r.get("home") for r in codex_rows]
+              + [h.get("path") for h in config.homes() if h.get("runtime") == "codex"]
+              + ["~/.codex"]):
+        if h:
+            h = os.path.realpath(os.path.expanduser(h))
+            if h not in found:
+                found.append(h)
+    return found
+
+
 def self_consent(home: str) -> str | None:
     """Why the calling Claude session cannot be adopted, or None if it can.
 
     The consent test is the one adopt_open_codex applies to Codex: xsm is
-    installed in that home. Only declared homes count, so an XSM_HOME that
-    never installed anything (a test's, a spike's) adopts nothing.
+    installed in that home. The plugin counts: it brings the hooks itself, so a
+    home on it has none in settings.json and every session started before the
+    plugin was enabled stayed unregistered and unable to send (audit,
+    2026-10-01). Otherwise only declared homes count, so an XSM_HOME that never
+    installed anything (a test's, a spike's) adopts nothing.
     """
+    from . import install                          # lazy: keeps hook imports small
+    if install.plugin_installed(home) and not install.plugin_disabled(home):
+        return None
     if not any(h.get("runtime") == "claude" and os.path.realpath(h.get("path", "")) == home
                for h in config.homes()):
         return "xsm is not installed in %s; run: xsm install --claude-home %s" % (home, home)
-    from . import install                          # lazy: keeps hook imports small
     plan = install.plan(home, "claude")
     ours = [a for a in plan.get("actions", []) if a["event"] == "UserPromptSubmit"]
     if plan.get("error") or not ours or ours[0]["action"] == "add":
@@ -495,7 +529,12 @@ def adopt_self() -> dict | None:
     Registration is consent (ADR-0001), and here it was already given: the
     xsm hook is in this session's own settings (see self_consent). The next
     prompt's hook re-registers the session properly and clears "adopted".
-    """
+
+    Claude's own record of the session (`<home>/sessions/<pid>.json`) says which
+    process it is. Without it (a shell that cannot read the home, another Claude
+    version) the shell's own environment does: the inbox socket is named after
+    the pid, and Claude exports CLAUDE_PID (measured with Claude Code 2.1.286,
+    2026-10-01), so a session whose hooks never ran can still send."""
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     home = claude_home_here()
     if not sid or self_consent(home):
@@ -503,13 +542,65 @@ def adopt_self() -> dict | None:
     native = next((d for d in (paths.read_json(p, {}) or {}
                                for p in glob.glob(os.path.join(home, "sessions", "*.json")))
                    if str(d.get("sessionId")) == sid), None)
-    if not native or not identity.pid_alive(native.get("pid")):
+    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or ""
+    if native:
+        pid = native.get("pid")
+    else:
+        try:
+            pid = identity.pid_from_socket(sock) or int(os.environ.get("CLAUDE_PID") or 0)
+        except ValueError:
+            pid = None
+        if sock and identity.socket_live(sock) is False:
+            return None                 # the socket this shell names is gone: not a live session
+    if not pid or not identity.pid_alive(pid):
         return None
-    rec = upsert("claude", home, sid, native["pid"], native.get("cwd") or os.getcwd(),
-                 socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET"))
-    rec["adopted"] = True
-    paths.write_json(_record_path("claude", sid), rec)
+    return _adopt_claude(home, sid, pid, (native or {}).get("cwd") or os.getcwd(), sock or None)
+
+
+def _adopt_claude(home: str, sid: str, pid, cwd: str, socket: str | None) -> dict | None:
+    try:
+        rec = upsert("claude", home, sid, pid, cwd, socket=socket)
+        rec["adopted"] = True
+        paths.write_json(_record_path("claude", sid), rec)
+    except OSError:
+        return None                     # a state folder this shell cannot write: not registered
     return by_session("claude", sid) or rec
+
+
+def adopt_claude_process(pid: int) -> dict | None:
+    """Register the Claude session whose process is `pid`, from Claude's own record
+    of it (`<home>/sessions/<pid>.json`), for the xsm MCP server: a server's
+    parent is the session, and the server has no session id in its environment.
+    The same consent and the same record as adopt_self."""
+    for home in claude_homes_here():
+        native = paths.read_json(os.path.join(home, "sessions", "%s.json" % pid), {}) or {}
+        sid = native.get("sessionId")
+        if not sid or self_consent(home) or not identity.pid_alive(pid):
+            continue
+        return _adopt_claude(home, str(sid), pid, native.get("cwd") or os.getcwd(),
+                             native.get("messagingSocketPath"))
+    return None
+
+
+def adopt_codex_self() -> dict | None:
+    """Register the Codex thread running this command (CODEX_THREAD_ID) when its
+    hook has not run yet, as the MCP server already does for a thread that calls
+    it. The agent process says where the thread lives when `ps` can run; where it
+    cannot (the Codex sandbox) the process table scan of adopt_open_codex is the
+    other way. Same consent as both: xsm installed there, hooks trusted."""
+    thread = os.environ.get("CODEX_THREAD_ID")
+    if not thread:
+        return None
+    try:
+        pid = identity.ancestor_pid({"codex"})
+        if pid:
+            found = adopt_codex_thread(thread, pid, codex_homes())
+            if found:
+                return found
+        adopt_open_codex()
+    except OSError:
+        return None                     # a state folder this shell cannot write: not registered
+    return by_session("codex", thread)
 
 
 def mcp_beacons() -> list:
@@ -579,13 +670,30 @@ def fresh_codex_threads() -> list:
     return out
 
 
+CLAUDE_UNREGISTERED = ("its xsm hook has not run in it (it started before xsm was installed or "
+                       "its plugin enabled); it registers itself at its next prompt, or the first "
+                       "time that session runs an xsm command or tool: have your user type any "
+                       "message in it, or ask it to run `xsm who`")
+
+
 def unregistered() -> list:
-    """Sessions visible in a declared home that never ran the hook. Shown for
-    diagnosis only — they have no pointer, so they are not addressable."""
+    """Sessions visible in a Claude or Codex home that never ran the hook. Shown
+    for diagnosis only — they have no pointer, so they are not addressable until
+    the session registers itself."""
     known = {(r["runtime"], str(r.get("session_id"))) for r in records()}
     known_pids = {(r["runtime"], str(r.get("pid"))) for r in records()}
     out = []
-    for home in config.homes():
+    declared = config.homes()
+    # A Claude home no hook has reported yet (the plugin was enabled after its
+    # sessions started, so none of them ran a hook) is in no list, and a session
+    # in it was "no such session" to a sender (audit, 2026-10-01). Claude's own
+    # sessions/ folder names them.
+    seen = {os.path.realpath(h.get("path", "")) for h in declared}
+    extra = [{"path": h, "alias": config.alias_of(h), "runtime": "claude"}
+             for h in claude_homes_here()
+             if h not in seen and os.path.isdir(os.path.join(h, "sessions"))
+             and not self_consent(h)]       # only a home xsm is installed in (the plugin)
+    for home in declared + extra:
         if home.get("runtime") == "codex":
             from . import install                         # lazy: keeps hook imports small
             trust = install.codex_trust(home["path"])
@@ -620,6 +728,7 @@ def unregistered() -> list:
                    # time, so the two are not comparable; liveness for a session we
                    # did not register rests on pid plus a live socket.
                    "native_start": data.get("procStart"), "registered": False,
+                   "why": CLAUDE_UNREGISTERED,
                    "ref": identity.ref_of("claude", home["path"], sid)}
             rec["state"] = identity.state_of(rec)
             out.append(rec)
@@ -796,6 +905,13 @@ def _me(session_id: str | None, cwd: str | None) -> tuple:
         for rec in rows:
             if rec.get("runtime") == "codex" and rec.get("session_id") == thread:
                 return rec, "codex_thread_id"
+        # Its hook has not run (a thread started before xsm was trusted, or not
+        # prompted yet): where xsm is installed with its hooks trusted, that is
+        # consent enough to register it now (user decision, 2026-09-30: prefer
+        # connecting over refusing).
+        adopted = adopt_codex_self()
+        if adopted:
+            return adopted, "adopted"
         return None, "none:codex-thread-unregistered"
     own_session = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if runtime == "claude":
@@ -871,13 +987,20 @@ def inbound_setting(home: str, cwd: str | None = None) -> str | None:
     accepted (2026-09-29). A session launched with --settings or
     --setting-sources may still differ, which is why callers treat this as a
     prediction, not a verdict.
+
+    The project's files are in a folder that may not answer (under ~/Documents, on a
+    stalled mount): each is read with a deadline, and one that does not answer tightens
+    nothing, as one that is not there (2026-10-02, probe.py).
     """
     def read(path):
         value = (paths.read_json(path, {}) or {}).get("crossSessionInbound")
         return value if value in INBOUND_LADDER else None
+
+    def read_project(path):
+        return probe.remember(("inbound", path), lambda: probe.bounded(read, path, folder=cwd))
     value = read(os.path.join(home, "settings.json"))
     for name in ("settings.json", "settings.local.json"):
-        stricter = read(os.path.join(cwd, ".claude", name)) if cwd else None
+        stricter = read_project(os.path.join(cwd, ".claude", name)) if cwd else None
         if stricter and (value is None or
                          INBOUND_LADDER.index(stricter) > INBOUND_LADDER.index(value)):
             value = stricter

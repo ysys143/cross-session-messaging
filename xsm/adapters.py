@@ -104,9 +104,10 @@ def _to_claude(socket_path: str, content: str, msg_id: str, priority: str,
             s.connect(socket_path)
             s.sendall(line.encode())
     except PermissionError as err:
-        raise DeliveryError("sandbox-blocked", "%s (a sandboxed session cannot open the "
-                                               "inbox socket; run the sender outside the "
-                                               "sandbox or through a trusted hook)" % err)
+        raise DeliveryError("sandbox-blocked", "%s (a sandboxed shell cannot open the inbox "
+                                               "socket; use the xsm_send MCP tool, same target, "
+                                               "kind and text: its server runs outside the "
+                                               "sandbox)" % err)
     except FileNotFoundError:
         raise DeliveryError("no-inbox", "%s does not exist; the session is gone" % socket_path)
     except OSError as err:

@@ -112,7 +112,10 @@ class DoctorLinesTest(TempState):
     def _doctor(self, describe=None, path=None):
         from xsm import cli, install
         out = io.StringIO()
-        env = {"PATH": path} if path is not None else {}
+        # The developer's own PATH may hold another xsm (~/.local/bin/xsm); the
+        # lines must not depend on it.
+        env = {"PATH": path if path is not None else os.pathsep.join(
+            (os.path.dirname(sys.executable), "/usr/bin", "/bin"))}
         with mock.patch.object(install, "git_describe", return_value=describe), \
                 mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out):
             cli.main(["doctor"])
@@ -174,7 +177,8 @@ class DoctorLinesTest(TempState):
         link_dir = os.path.join(self.tmp, "linkbin")
         os.makedirs(link_dir)
         os.symlink(launcher, os.path.join(link_dir, "xsm"))
-        lines = self._doctor(None, os.pathsep.join([link_dir, os.environ["PATH"]]))
+        lines = self._doctor(None, os.pathsep.join([link_dir, os.path.dirname(sys.executable),
+                                                     "/usr/bin", "/bin"]))
         also = [l for l in lines if "also on PATH" in l]
         self.assertEqual(also, ["cli        also on PATH as %s: xsm 0.4.9 at %s" % (
             os.path.join(link_dir, "xsm"), os.path.realpath(launcher))])

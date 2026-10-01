@@ -75,12 +75,17 @@ def reached(msg_id: str) -> None:
 
 
 def receipt(msg_id: str, decision: str, receiver: dict | None, reason: str = "",
-            outcome: str | None = None) -> None:
-    """Written by the receiving hook. `decision` is delivered | held | blocked."""
+            outcome: str | None = None, from_ref: str | None = None,
+            body_sha: str | None = None) -> None:
+    """Written by the receiving hook. `decision` is delivered | held | blocked.
+    `from_ref` and `body_sha` say whose message and which text was delivered, so a
+    second run of the hook is only passed for the very same one (receive._repeat)."""
     rec = {"id": msg_id, "decision": decision, "reason": reason, "t": time.time(),
            "receiver": {k: (receiver or {}).get(k) for k in ("name", "alias", "ref", "runtime")}}
     if outcome:
         rec["outcome"] = outcome
+    if body_sha:
+        rec.update({"from_ref": from_ref, "body_sha": body_sha})
     paths.write_json(_receipt_path(msg_id), rec)
 
 
@@ -105,6 +110,22 @@ def close(task_id: str, outcome: str, by: dict | None = None) -> None:
 def received(msg_id: str) -> bool:
     """Whether some path already handed this message over (or refused it)."""
     return os.path.exists(_receipt_path(msg_id))
+
+
+def receipt_of(msg_id: str) -> dict | None:
+    """The receiver's own record of what it did with this message, if any."""
+    rec = paths.read_json(_receipt_path(msg_id))
+    return rec if isinstance(rec, dict) else None
+
+
+def sent_by(msg_id: str | None, ref: str | None) -> bool:
+    """Whether this machine's own `xsm send` queued this id from this session.
+    Only the sending side writes the entry, after it checked scope, so it proves
+    where a header came from when the sender itself has since exited."""
+    if not (msg_id and ref):
+        return False
+    entry = paths.read_json(_entry_path(msg_id))
+    return isinstance(entry, dict) and (entry.get("from") or {}).get("ref") == ref
 
 
 def status(msg_id: str) -> dict:

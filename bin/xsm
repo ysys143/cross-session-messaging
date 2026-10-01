@@ -19,4 +19,8 @@ if [ ! -d "$here/xsm" ]; then
 fi
 PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
-exec "${XSM_PYTHON:-python3}" -m xsm "$@"
+# Not `python -m xsm`: that puts the current directory first on sys.path, so run
+# inside another xsm checkout, that checkout's code ran instead of this launcher's
+# (2026-10-02). The text is xsm.install.BOOT; a test keeps the two equal.
+boot='import os, sys; here = sys.argv.pop(1); cwd = os.path.realpath("."); sys.path[:] = [here] + [p for p in sys.path if p and os.path.realpath(p) != cwd]; from xsm.cli import main; sys.exit(main())'
+exec "${XSM_PYTHON:-python3}" -c "$boot" "$here" "$@"

@@ -14,8 +14,8 @@ python3 -m xsm doctor
 
 - 설치는 **병합**이다. 우리가 넣는 훅 명령 끝에는 `#xsm-hook` 표식이 붙고, 설치·제거는 그 표식이 붙은 항목만 건드린다. Orca, cctrace, 사용자 훅은 그대로 남는다.
 - 매번 `<파일>.xsm-backup-<시각>` 백업을 남기고, 쓴 뒤 다시 파싱해 깨졌으면 백업으로 되돌린다.
-- 훅 명령에는 **설치 시점의 파이썬 절대 경로**가 박힌다. 훅이 뜨지 못하면 검문이 통째로 열리기 때문이다(S8-g2).
-- Claude 훅 명령은 `|| exit 1`로 끝난다(표식 앞). 스크립트를 열지 못한 파이썬의 종료 코드 2를 Claude Code가 차단으로 읽어 프롬프트가 막힌 적이 있다(2026-10-01).
+- **설치 시점의 파이썬 절대 경로**를 고정한다(`~/.xsm/interpreter`를 Claude 훅 런처가 읽고, Codex 직접 설치는 훅 명령에도 박힌다). 훅이 뜨지 못하면 검문이 통째로 열리기 때문이다(S8-g2).
+- Claude 훅 명령은 sh 런처 `"<런타임>/hooks/xsm-hook"`이다(표식 앞). 스크립트를 열지 못한 파이썬의 종료 코드 2를 Claude Code가 차단으로 읽어 프롬프트가 막힌 적이 있고(2026-10-01), 런처는 2를 1로 바꾸며 고정한 파이썬이 사라져도 다른 파이썬을 찾는다. 런타임은 체크아웃이 아니라 `~/.xsm/runtime/<id>/`에 복사한 사본이다(`--dev`는 체크아웃, PROTOCOL 3.1).
 - Codex는 첫 세션에서 훅 신뢰를 한 번 승인해야 한다. 승인 전에는 훅이 실행되지 않는다. 설치기는 안내만 하고 우회 옵션을 쓰지 않는다.
 - Codex 훅은 첫 프롬프트부터 돈다. 그래서 훅이 신뢰된 홈에서는 `xsm list`·`xsm send`가 열린 Codex 스레드를 대신 등록한다. `/rename`만 한 세션에도 바로 보낼 수 있고, 그 메시지가 첫 프롬프트가 된다. 프롬프트도 `/rename`도 없는 Codex는 스레드가 없어서 주소가 없다.
 
@@ -205,7 +205,7 @@ xsm status <msg-id>
 xsm inbox                         # Codex 세션: 턴 도중 도착한 메시지를 지금 읽는다
                                   # (샌드박스 셸에서 Codex 상대 send는 바로 거부하고 MCP xsm_send를 안내한다)
 xsm ledger
-xsm held list | xsm held show <id>
+xsm held list | xsm held show <id> | xsm held deliver <id>   # deliver: 사용자의 예에 에이전트가 푼다
 xsm doctor | xsm selftest
 ```
 
@@ -268,7 +268,7 @@ xsm unlink ~/src/other-repo  # 누구나 지울 수 있다
 }
 ```
 
-`"strict_peers": true`를 넣으면 xsm 헤더가 없는 피어 메시지(Claude 자체의 `SendMessage`)를 발신자와 범위에 상관없이 모두 보류한다. 기본값은 거짓이다. 이때는 발신 세션을 소켓으로 찾아 xsm 메시지와 같은 범위 검사를 하고, xsm이 모르는 이 기계의 세션(xsm이 없는 프로필 등)이 보낸 것은 통과시키며, 이 기계 밖(Remote Control, 클라우드)에서 온 것은 보류한다(ADR-0013, 2026-09-30 개정).
+`"strict_peers": true`를 넣으면 xsm 헤더가 없는 피어 메시지(Claude 자체의 `SendMessage`)를 발신자와 범위에 상관없이 모두 보류한다. 기본값은 거짓이다. 이때는 발신 세션을 소켓으로 찾아 xsm 메시지와 같은 범위 검사를 하고, xsm이 모르는 이 기계의 세션(xsm이 없는 프로필 등)이 보낸 것은 통과시키며, 이 기계 밖(Remote Control, 클라우드)에서 온 것은 2026-10-01부터 통과시키되 어디서 왔는지 적은 "확인하지 못했다" 문맥을 붙인다(ADR-0013). `"remote_native": "hold"`가 보류하던 9/30 동작이다. 같은 날 연 다른 보류도 `config.json`의 키나 환경변수 `XSM_<대문자 키>`로 되돌린다: `fail_open`(훅이 고장 나면 피어 메시지를 막는다), `stale_sender`(끝난 세션의 메시지를 막는다), `reply_from_request`, `reply_flag`. 지금 값은 `xsm doctor`의 `policy` 줄이 보여 준다(PROTOCOL §3, §5.1~5.3).
 
 범위는 **보낼 때와 받을 때 두 번** 검사한다. 보낼 때 걸리면 메시지는 아예 나가지 않고, 받을 때 걸리면 본문을 보류 저장소에 남기고 차단한다.
 

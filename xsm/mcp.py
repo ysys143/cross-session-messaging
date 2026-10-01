@@ -30,6 +30,17 @@ from . import channel, consent, identity, paths, registry
 
 PROTOCOL = "2025-06-18"
 
+# MCP tool annotations (spec 2025-06-18, ToolAnnotations). Codex under
+# approval_policy "never" declines an MCP tool that carries none, and a tool
+# that does not say it is read-only, or neither destructive nor open-world, is
+# asked about first: a message a person wants must not wait on that (user
+# decision, 2026-10-01). The tool that only reads says so; the ones that write
+# xsm's own state or hand a message to another local session say they destroy
+# nothing and reach nothing outside. xsm_send to a paired machine travels over
+# the person's own SSH pairing, which is theirs, not an open world.
+READ_ONLY = {"readOnlyHint": True, "openWorldHint": False}
+MESSAGING = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
+
 TOOLS = [
     {"name": "xsm_post",
      "description": ("Post to this project's xsm channel, the record people and sessions share. "
@@ -40,13 +51,15 @@ TOOLS = [
          "tag": {"type": "string", "enum": [t for t in channel.TAGS if t != "decision"]},
          "reply_to": {"type": "string", "description": "id of the post this answers"},
          "channel": {"type": "string", "description": "a named project; default: this project"}},
-         "required": ["text"]}},
+         "required": ["text"]},
+     "annotations": MESSAGING},
     {"name": "xsm_channel",
      "description": "Read this project's xsm channel: threads, or only posts with one tag.",
      "inputSchema": {"type": "object", "properties": {
          "tag": {"type": "string", "enum": list(channel.TAGS)},
          "limit": {"type": "integer", "default": 30},
-         "channel": {"type": "string"}}}},
+         "channel": {"type": "string"}}},
+     "annotations": READ_ONLY},
     {"name": "xsm_grant",
      "description": ("Ask your user for explicit permission to start a worker with dangerous "
                      "options: full_access (no sandbox, no approvals) and/or trust_hooks (Codex: "
@@ -80,7 +93,12 @@ TOOLS = [
                     "description": "the id of an earlier send that ended unknown or error: sends "
                                    "that same message again under its id, which the receiver "
                                    "drops if it already has it. Same target, kind and text only."},
-         "wait": {"type": "number", "default": 15}}, "required": ["target", "text"]}},
+         "held": {"type": "string",
+                  "description": "the id of a message a refused send kept (out of scope: it "
+                                 "waits for your user's yes to connect, then goes with it): "
+                                 "sends it as it was kept, so target and text are not needed."},
+         "wait": {"type": "number", "default": 15}}, "required": []},
+     "annotations": MESSAGING},
     {"name": "xsm_inbox",
      "description": ("Codex sessions: read messages other sessions sent you that are still "
                      "waiting. Codex takes them only between turns; while you are working, call "
@@ -91,7 +109,8 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "wait": {"type": "number", "default": 0,
                   "description": "seconds to block until a message arrives (max 60 here; the "
-                                 "shell `xsm inbox --wait` allows longer)"}}}},
+                                 "shell `xsm inbox --wait` allows longer)"}}},
+     "annotations": MESSAGING},
     {"name": "xsm_link",
      "description": ("Link this session's project folder with another folder, so the sessions "
                      "of both talk both ways until unlinked; one side is enough. The normal way "
@@ -302,7 +321,15 @@ class Server:
         # No thread id (old Codex) or nothing adoptable: the newest live record,
         # as before 0840ee3 (user decision, 2026-09-30: a possibly wrong
         # neighbour is better than a refusal).
-        return max(rows, key=lambda r: r.get("updated", 0)) if rows else None
+        if rows:
+            return max(rows, key=lambda r: r.get("updated", 0))
+        # A Claude session whose hooks never ran (started before xsm, or before
+        # its plugin was enabled) has no record at all: its own process is this
+        # server's parent, and Claude's record of it names the session (audit,
+        # 2026-10-01: such a session could not use any xsm tool). By pid, never by
+        # an environment variable: a Codex started from a Claude shell inherits
+        # that session's id.
+        return registry.adopt_claude_process(pid)
 
     @staticmethod
     def codex_homes(codex_rows: list) -> list:
@@ -310,16 +337,7 @@ class Server:
         this server's own env, the homes of records sharing the daemon, the
         declared Codex homes, then the default. The caller keeps the first one
         whose state DB knows the thread."""
-        from . import config
-        found = []
-        for h in ([os.environ.get("CODEX_HOME")] + [r.get("home") for r in codex_rows]
-                  + [h.get("path") for h in config.homes() if h.get("runtime") == "codex"]
-                  + ["~/.codex"]):
-            if h:
-                h = os.path.realpath(os.path.expanduser(h))
-                if h not in found:
-                    found.append(h)
-        return found
+        return registry.codex_homes(codex_rows)
 
     # -- tools --------------------------------------------------------------------
     def call(self, name: str, args: dict) -> str:
@@ -364,13 +382,14 @@ class Server:
             return self.link(me, args)
         if name == "xsm_send":
             from . import send as send_mod
+            wait = args.get("wait", 15)             # the schema's default
             r = send_mod.send(args.get("target") or "", args.get("text") or "", sender=me,
                               kind=args.get("kind") or "note", reply_to=args.get("reply_to"),
-                              wait=float(args.get("wait") or 0),
+                              wait=float(15 if wait is None else wait),
                               outcome=args.get("outcome") if args.get("kind") == "reply" else None,
                               msg_id=args.get("resend") or None,
-                              resend=bool(args.get("resend")))
-            return "%s: %s" % (r.status, r.reason or "")
+                              resend=bool(args.get("resend")), held=args.get("held") or None)
+            return "\n".join(r.lines())
         if name == "xsm_doc_endorse":
             return self.endorse(me, args)
         if name == "xsm_inbox":
@@ -721,6 +740,11 @@ class Server:
                     # EOFError: the client went away mid-form; the next read
                     # ends the loop.
                     text, error = str(exc), True
+                except OSError as exc:
+                    # A write the state folder or a sandbox refused: one line that
+                    # says so, not "xsm failed: PermissionError".
+                    text, error = (paths.sandbox_blocked(exc) if paths.blocked_write(exc)
+                                   else "xsm failed: %s: %s" % (type(exc).__name__, exc)), True
                 except Exception as exc:
                     # A tool's bug is that call's error, not the end of every
                     # tool in the session: an exception here once went past
@@ -811,9 +835,17 @@ def main() -> int:
     # The MCP server runs outside any sandbox (that is why it exists); a
     # worker's `env` setting must not make it refuse like a sandboxed shell.
     os.environ.pop("XSM_SANDBOXED", None)
+    paths.SANDBOX_HINT = ("the state folder %s must be writable by this server: fix its "
+                          "permissions, or set XSM_HOME to a folder that is" % paths.HOME)
     preload()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    write_beacon()
+    try:
+        write_beacon()
+    except OSError:
+        # Only Codex's liveness check reads the beacon. A state folder that cannot
+        # be written (read-only, a sandbox) died here before `initialize`, so the
+        # session saw no xsm tools at all, not even the ones that explain it.
+        pass
     try:
         return Server().serve()
     finally:

@@ -1,14 +1,17 @@
 #!/bin/sh
-# MCP server entry point for a plugin install.
-# interpreter into the hook command it writes; a plugin is copied as it is, so
-# the interpreter has to be found here.
+# MCP server entry point: a plugin runs it, and so does a direct install
+# (`xsm install` registers this launcher, not a python path, 2026-10-01). It
+# finds the interpreter itself, so a python that went away (a brew upgrade)
+# leaves the server running under another one instead of gone.
 #
-# A hook that cannot start is a gate that is open (S8-g2). If no usable python
-# is found, this still refuses a prompt carrying an xsm envelope, the way
-# xsm.receive's own catch-all does.
+# No usable python is an error on stderr and status 1: the xsm tools are
+# unavailable, nothing else is.
 here=$(cd "$(dirname "$0")/.." && pwd) || exit 0
 state=${XSM_HOME:-$HOME/.xsm}
-pinned=$(sed -n 's/.*"path"[^"]*"\([^"]*\)".*/\1/p' "$state/interpreter.json" 2>/dev/null | head -1)
+# `xsm install` writes the pin as $state/interpreter; interpreter.json is the name
+# an earlier launcher read. Both are looked at, so neither spelling leaves the pin unread.
+pinned=$(cat "$state/interpreter" "$state/interpreter.json" 2>/dev/null |
+    sed -n 's/.*"path"[^"]*"\([^"]*\)".*/\1/p' | head -1)
 # Overridable so the fallback can be tested, and for a machine whose python is
 # somewhere unusual.
 candidates=${XSM_PYTHON_CANDIDATES:-"$XSM_PYTHON:$pinned:python3:python3.14:python3.13:python3.12:/usr/bin/python3"}
