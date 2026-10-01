@@ -442,59 +442,57 @@ class McpTest(_Sessions):
 
 
 class NativeBounceTest(_Sessions):
-    """A Claude SendMessage held out of scope: the sender's note leads to the
-    same one yes (the receiving hook holds the text and asks in the sender's
-    session)."""
+    """What a Claude SendMessage held by the receiver's gate leaves its sender: a plain
+    note. Until 2026-10-02 the note was also meant to lead to one yes (the text kept as a
+    send, the connection asked for in the sender's session, connect.hold_native), for a
+    message held as "out of scope". Traced then, and no native message is ever held for
+    scope: a local one passes whatever the scope (ADR-0013), strict_peers and
+    remote_native=hold hold for other reasons, so that path was never reached, and it was
+    removed."""
 
-    def _bounce(self, text="native hello"):
-        from xsm import bounce
-        bounce.record(self.me, self.you, "out of scope: different repositories", "heldfile",
-                      text, self.b)
-        return bounce.notice(self.me["session_id"])
+    SOCKET = "/tmp/cc-socks/11.sock"
 
-    def test_the_note_names_the_one_command_and_the_ask_is_recorded(self):
+    def setUp(self):
+        super().setUp()
+        self.receiver = {"runtime": "claude", "ref": "bbbbbb", "name": "recv", "alias": "claude-4",
+                         "session_id": "r9", "cwd": self.b}
+        self.wire = ('<cross-session-message from="uds:%s" from-name="sender">\nnative hello'
+                     "\n</cross-session-message>" % self.SOCKET)
+
+    def _gate(self, config=None):
+        from xsm import envelope, paths, receive
+        if config is not None:
+            paths.write_json(paths.path("config.json"), config)
+        sender = dict(self.me, socket=self.SOCKET, state="live")
+        with mock.patch.object(receive.registry, "records", return_value=[sender]):
+            return receive._gate({"prompt": self.wire}, "claude", self.receiver,
+                                 envelope.parse(self.wire))
+
+    def test_a_native_message_from_another_repository_is_not_held_for_scope(self):
         from xsm import config
-        note = self._bounce()
-        msg_id = re.search(r"kept as ([0-9a-f]{16})", note).group(1)
-        self.assertIn("NOT delivered", note)
-        self.assertIn("xsm send --held %s" % msg_id, note)
-        self.assertIn("xsm_send tool with held=%s" % msg_id, note)
-        self.assertIn("ask them once", note)
-        self.assertIn("nothing more to ask", note)
-        self.assertIn("Do not report the message as delivered", note)
-        entry = self._pending()
-        self.assertEqual((entry["verb"], entry["target"], entry["here"], entry["verdict"]),
-                         ("link", self.b, self.a, None))
+        self.assertIsNone(self._gate(), "it passes, Claude's own framing stands")
         self.assertEqual(config.links(), [])
-        self.assertEqual(self._held_files(), ["%s.json" % msg_id])
-
-    def test_one_yes_then_sends_the_native_message_as_an_xsm_note(self):
-        from xsm import config
-        msg_id = re.search(r"kept as ([0-9a-f]{16})", self._bounce("see the diff")).group(1)
-        self.assertIn("run this same command again", self._cli("send", "--held", msg_id)[1])
-        self._reply("응")
-        self.assertIn('your user replied: "응"', self._cli("send", "--held", msg_id)[1])
-        self._waited()
-        code, passed = self._cli("send", "--held", msg_id)
-        self.assertEqual(code, 3, passed)
-        self.assertEqual(len(config.links()), 1)
-        self.assertEqual(len(self.sent), 1)
-        self.assertIn("see the diff", self.sent[0])
-
-    def test_a_note_that_cannot_hold_the_text_is_the_note_it_was(self):
-        from xsm import connect
-        with mock.patch.object(connect, "hold_native", side_effect=OSError("disk")):
-            note = self._bounce()
-        self.assertIn("NOT delivered", note)
-        self.assertIn("xsm link %s" % self.b, note, "today's advice")
-        self.assertNotIn("--held", note)
-
-    def test_a_receiver_that_cannot_keep_the_ask_leaves_the_note_as_it_was(self):
-        with mock.patch.dict(os.environ, {"XSM_WORKER": "w1"}):
-            note = self._bounce()
-        self.assertIn("xsm link %s" % self.b, note)
-        self.assertNotIn("--held", note)
         self.assertEqual(self._held_files(), [])
+
+    def test_a_held_native_message_leaves_a_plain_note_and_nothing_to_connect(self):
+        from xsm import bounce, config, outbox, paths
+        out = self._gate({"strict_peers": True})
+        self.assertEqual(out["decision"], "block")
+        note = bounce.notice(self.me["session_id"])
+        self.assertIn("NOT delivered", note)
+        self.assertIn("Tell your user it was not delivered", note)
+        for word in ("--held", "xsm link", "kept as", "connect"):
+            self.assertNotIn(word, note)
+        self.assertIsNone(self._pending(), "no ask was recorded in the sender's session")
+        self.assertEqual(self._held_files(), [], "and no send was kept")
+        self.assertFalse(os.path.isdir(paths.path(outbox.OUTBOX)))
+        self.assertEqual(config.links(), [])
+
+    def test_the_dead_path_is_gone(self):
+        import inspect
+        from xsm import bounce, connect
+        self.assertFalse(hasattr(connect, "hold_native"))
+        self.assertNotIn("connect_dir", inspect.signature(bounce.record).parameters)
 
 
 class HousekeepingTest(_Sessions):

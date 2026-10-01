@@ -660,10 +660,7 @@ def _bounce_sender(parsed, me: dict | None, reason: str, held: str) -> None:
     if len(owners) != 1 or (me and owners[0].get("session_id") == me.get("session_id")):
         return
     from . import bounce
-    connect = config.project_root(me["cwd"]) \
-        if not parsed.header and me and me.get("cwd") and reason.startswith("out of scope") \
-        else None
-    bounce.record(owners[0], me, reason, held, parsed.body, connect)
+    bounce.record(owners[0], me, reason, held, parsed.body)
 
 
 def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:

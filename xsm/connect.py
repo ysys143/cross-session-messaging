@@ -158,16 +158,3 @@ def offer(sender: dict, target: dict, spec: str, msg: dict, why: str) -> Step | 
                 consent.how(sender.get("runtime")), msg_id)), msg_id)
     return Step(False, consent.shown_refusal(reply, plan["what"], None) + " " + unsent +
                 (" " + kept if isinstance(kept, str) else ""), msg_id)
-
-
-def hold_native(owner: dict, receiver: dict, body: str) -> dict | None:
-    """For the sender of a Claude SendMessage a receiver's gate held as out of
-    scope: keep its text as a send to that receiver and record the ask in the
-    sender's session, so the note it is shown leads to the same one yes
-    (bounce.py). {id, what}, or None to leave the note as it was."""
-    plan = plan_for(owner, receiver)
-    if not plan or not consent.ask(owner, plan["verb"], plan["target"], plan["here"]):
-        return None
-    held = outbox.put(owner, "ref:%s" % receiver.get("ref"), {
-        "body": body, "kind": "note", "reply_to": None, "outcome": None, "priority": "next"})
-    return {"id": held["id"], "what": plan["what"]} if held else None

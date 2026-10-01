@@ -29,27 +29,20 @@ def _dir(session_id: str) -> str:
 
 
 def record(sender: dict, receiver: dict | None, reason: str, held: str | None,
-           body: str, connect_dir: str | None) -> None:
-    """Leave a note for `sender` that its message to `receiver` was held. When
-    the receiver was out of scope the text is kept as a send of its own and the
-    connection is asked for in the sender's session (connect.hold_native), so the
-    note can lead to one yes that connects and sends it (2026-10-01); a failure
-    there leaves the note as it was."""
+           body: str) -> None:
+    """Leave a note for `sender` that its message to `receiver` was held. (Until
+    2026-10-02 an out-of-scope native message was also kept as a send and asked
+    for in the sender's session, so the note led to one yes. No native message is
+    ever held for scope: a local one passes, whatever the scope (ADR-0013), and
+    strict_peers and remote_native=hold name other reasons. It was never reached.)"""
     sid = str(sender.get("session_id") or "")
     if not sid:
         return
     receiver = receiver or {}
-    offer = None
-    if connect_dir:
-        try:
-            from . import connect
-            offer = connect.hold_native(sender, receiver, body)
-        except Exception:               # noqa: BLE001 - the plain note still says it
-            offer = None
     paths.write_json(os.path.join(_dir(sid), "%d.json" % int(time.time() * 1000)), {
         "t": time.time(), "reason": reason, "held": held,
         "to": {k: receiver.get(k) for k in ("name", "alias", "ref", "runtime", "cwd")},
-        "connect_dir": connect_dir, "preview": (body or "")[:200], "offer": offer})
+        "preview": (body or "")[:200]})
 
 
 def record_held_here(receiver: dict | None, who: str, reason: str, held: str) -> None:
@@ -97,11 +90,8 @@ def take(session_id: str | None) -> list:
 
 
 def text(notes: list) -> str:
-    """What the sending agent reads. Connecting the folders is its user's
-    decision, but asking is the agent's job (user decision, 2026-10-01: ask for
-    approval rather than have the user type commands). When the message was
-    kept (`offer`), one yes connects the folders and sends it: the agent asks,
-    runs `xsm send --held <id>` to be shown the reply, and once more on a yes."""
+    """What the agents read: the sender, that its message was not delivered; the
+    receiver, that its gate kept one for its person to decide on."""
     lines = []
     for note in notes:
         if note.get("here"):
@@ -122,24 +112,7 @@ def text(notes: list) -> str:
                      % (who, (note.get("reason") or "").split(";")[0]))
         if note.get("preview"):
             lines.append("  It began: %s" % note["preview"].replace("\n", " ")[:120])
-        if note.get("offer"):
-            kept = note["offer"]
-            lines.append(
-                "  It is kept as %s. It needs your user's yes to %s: ask them once, in plain "
-                "words, whether to go ahead, and wait for their answer. After they answer, run `xsm "
-                "send --held %s` (or the xsm_send tool with held=%s): xsm keeps their answer as "
-                "the verdict and that run shows it without acting. On a yes, run it once more: "
-                "xsm connects and sends the message, so there is nothing more to ask. On a no "
-                "it stays unsent. Do not report the message as delivered." % (
-                    kept.get("id"), kept.get("what"), kept.get("id"), kept.get("id")))
-        elif note.get("connect_dir"):
-            lines.append(
-                "  To reach it, ask your user whether to connect this folder with %s, and do it "
-                "for them: run `xsm link %s` (their reply is kept as the verdict) or call the "
-                "xsm_link MCP tool (an approval form). Then send the message again. Do not "
-                "report the message as delivered." % (note["connect_dir"], note["connect_dir"]))
-        else:
-            lines.append("  Tell your user it was not delivered.")
+        lines.append("  Tell your user it was not delivered.")
     return "\n".join(lines)
 
 
