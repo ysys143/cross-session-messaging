@@ -644,14 +644,7 @@ def cmd_send(args) -> int:
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=False))
     else:
-        for note in result.notes:
-            print(note)
-        print("%s: %s" % (result.status, result.reason or result.msg_id or ""))
-        if result.candidates and "resume it with" not in (result.reason or "") \
-                and "has not registered" not in (result.reason or ""):
-            print("registered sessions right now:" if "no session" in (result.reason or "")
-                  else "candidates:")
-            print(resolve.describe(result.candidates))
+        print("\n".join(result.lines()))
     return {"delivered": OK, "sent-unconfirmed": UNCONFIRMED, "unknown": UNCONFIRMED,
             "held": REFUSED, "blocked": REFUSED, "refused": REFUSED}.get(result.status, USAGE)
 
@@ -2255,7 +2248,14 @@ def main(argv=None) -> int:
     if args.xsm_home:
         os.environ["XSM_HOME"] = os.path.expanduser(args.xsm_home)
         paths.HOME = os.environ["XSM_HOME"]
-    paths.ensure_home()
+    try:
+        paths.ensure_home()
+    except OSError as err:
+        # A sandboxed or read-only shell cannot make the state folder, and every
+        # command died here with a traceback (audit, 2026-10-01). What only
+        # reads still works; what writes says why, below.
+        if not paths.blocked_write(err):
+            raise
     if args.command not in ("hook", "statusline", "prune", "reap", "mcp", "worker-finish"):
         housekeeping.maybe_prune()
     try:
@@ -2266,11 +2266,17 @@ def main(argv=None) -> int:
     # each would be noise, or would never close. And the two that read the
     # telemetry itself: each export would leave a span for the next export to
     # ship, and metrics would count its own calls.
-    if telemetry is None or args.command in ("mcp", "statusline",
-                                             "metrics", "otlp-export"):
-        code = args.func(args)
-    else:
-        code = _traced(telemetry, args)
+    try:
+        if telemetry is None or args.command in ("mcp", "statusline",
+                                                 "metrics", "otlp-export"):
+            code = args.func(args)
+        else:
+            code = _traced(telemetry, args)
+    except OSError as err:
+        if not paths.blocked_write(err):
+            raise
+        print(paths.sandbox_blocked(err), file=sys.stderr)
+        return REFUSED
     _inbox_notice(args.command)
     return code
 

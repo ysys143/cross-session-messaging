@@ -7,6 +7,7 @@ half-written record behind.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import tempfile
@@ -23,6 +24,29 @@ ATTEMPTS = "attempts"       # one file per task lineage: how often it has been t
 
 def path(*parts: str) -> str:
     return os.path.join(HOME, *parts)
+
+
+# What to do when a write is refused. The MCP server runs outside a shell's
+# sandbox, which is why it exists, so from a sandboxed shell it is the way
+# round; the server itself replaces this (mcp.main).
+SANDBOX_HINT = ("use the xsm MCP tools instead (xsm_send for a message, same target, kind and "
+                "text; also xsm_inbox, xsm_post, xsm_channel): their server runs outside the "
+                "sandbox")
+
+
+def blocked_write(err: BaseException) -> bool:
+    """Whether an OSError is the access a sandbox or a read-only folder refuses
+    (EPERM, EACCES, EROFS), as opposed to a bug or a missing file."""
+    return isinstance(err, PermissionError) or getattr(err, "errno", None) in (
+        errno.EPERM, errno.EACCES, errno.EROFS)
+
+
+def sandbox_blocked(err: BaseException) -> str:
+    """The one line a refused write becomes. It starts with `sandbox-blocked`,
+    the name SKILL.md tells an agent to look for, and says what to do next."""
+    where = getattr(err, "filename", None) or HOME
+    why = getattr(err, "strerror", None) or str(err)
+    return "sandbox-blocked: xsm cannot use %s (%s); %s" % (where, why, SANDBOX_HINT)
 
 
 def ensure_home() -> None:
