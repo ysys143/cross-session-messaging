@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from collections import namedtuple
 
-from . import config, consent, envelope, outbox
+from . import config, consent, envelope, outbox, paths, policy
 
 # go: connected, so send now (`notes` say what was done); else `text` is the
 # refusal, for a message held as `id`.
@@ -95,17 +95,39 @@ def run(plan: dict, me: dict, verdict: str) -> str:
         _tilde(entry["root"]))
 
 
+def _typed(plan: dict, me: dict) -> Step | None:
+    """A person typed this `xsm send` themselves (a terminal, not an agent's shell):
+    that is their own yes, so make the connection the one-yes flow would have asked
+    for and send,
+    saying what was connected (user decision, 2026-10-01: the one send still
+    refused was a person's own). None when it cannot be made, and the send is
+    refused with the advice. Policy human_send_connects=false turns it off."""
+    verdict = "typed `xsm send` themselves"
+    try:
+        line = run(plan, me, verdict)
+    except ValueError:
+        return None
+    paths.append_jsonl("decisions.jsonl", {
+        "event": "consent", "verb": plan["verb"], "target": plan["target"], "verdict": verdict,
+        "by": me.get("name")})
+    return Step(True, "", envelope.new_id(), (
+        "you typed this send yourself, so xsm is %s" % plan["what"], line))
+
+
 def offer(sender: dict, target: dict, spec: str, msg: dict, why: str) -> Step | None:
     """The step for a send refused as out of scope (`why` is the reason), or None
     to refuse as before. Every run of the same send lands here: the first holds
     the message and asks, the next shows the person's reply, and the one after a
     yes connects."""
     from . import workers
-    if workers.human_terminal():
+    human = workers.human_terminal()
+    if human and not policy.get("human_send_connects"):
         return None                             # the person running this decides on the spot
     plan = plan_for(sender, target)
     if not plan:
         return None
+    if human:
+        return _typed(plan, sender)
     reply, go, kept = consent.take_or_request(sender, plan["verb"], plan["target"], plan["here"])
     if reply is None and not kept:
         return None                             # no reply can be kept here: promise nothing
