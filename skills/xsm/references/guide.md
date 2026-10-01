@@ -93,10 +93,11 @@ client's automatic reviewer", "declined — by your user, or by Codex without
 showing the form", "came back with no choice", "dismissed" (they closed the form
 without choosing), or "they chose 'deny'". Only "your user declined" and the last
 are certainly your user refusing. For the others, tell your user what the result
-says, ask them in plain words, and if they agree run the shell command it names
-(`xsm link <folder>`, `xsm join <name>`, `xsm reach <folder> --session ref:…`,
-`xsm approve <id>`): it keeps their reply as the verdict. Do not call the tool
-again in a loop, and never edit `~/.xsm/config.json` to get round it.
+says and do what it says: it names the shell command (`xsm link <folder>`,
+`xsm join <name>`, `xsm reach <folder> --session ref:…`, `xsm approve <id>`) and
+the order. Ask first, in plain words. After they answer, run the command: it
+shows you their reply without acting on it. Run it once more on a yes. Do not
+call the tool again in a loop, and never edit `~/.xsm/config.json` to get round it.
 
 **Their reply is the verdict.** A shell command that is your user's decision
 (link, join, leave, reach, unblock, approve, `attempts clear`, `frameworks
@@ -104,8 +105,8 @@ ignore`, a `spawn` or `remote add` that needs a grant, a decision post, an
 endorsement) refuses until they answer, and tells you what to ask. Ask them first, in plain
 words or, in Claude Code, with your question tool (AskUserQuestion), and wait for
 their answer. xsm keeps their latest message in this session, word for word; an
-option they pick in AskUserQuestion is kept the same way, as `"<question>" ->
-"<their answer>"` with any notes they typed. After they answer, run the command
+option they pick in AskUserQuestion is kept the same way, as `<question> ->
+<their answer>` with any notes they typed. After they answer, run the command
 again: it refuses once more and shows you that reply, because xsm does not read
 it. If it is a yes, run the command a third time, in a separate call after you
 have read the reply, and it goes ahead, once. If it is a no or a question, do not: answer them, and what they say
@@ -420,18 +421,37 @@ xsm shows you that is not the latest thing your user said; a `this session's
 xsm hooks are older than this xsm command` note; a command that is missing.
 
 **Check.** `xsm --version` prints the version and the path of the command you
-ran. `xsm doctor` prints the same as its `cli` line, any other `xsm` on the
-PATH, each plugin's version and folder (`plugin … at <folder>`), `older than
-this CLI` (or `may be older`) on a plugin behind it, and `orphaned` for a
-server whose folder an update removed.
+ran. If it fails with `the following arguments are required: command` (exit 2),
+that command is older than this guide, so it is the oldest copy. `xsm doctor`
+prints the same as its `cli` line, any other `xsm` on the PATH, and each
+plugin's version and folder (`plugin … at <folder>`), with `older than this
+CLI (<version>)`, `N commits behind this CLI (<commit>)` or `differs from this
+CLI` on a plugin that is not this CLI's code (no flag: the same code, or nothing
+to compare), and `orphaned` for a server whose folder an update removed.
 
 **First fix: run the newest command by its full path.** You do not need to
-wait for a new session to get the new command. Take the folder from the
-`plugin … at <folder>` line with the highest version (or the checkout of a
-direct install) and run `<folder>/bin/xsm <command>`. That fixes an old or
-missing `xsm` on the PATH, old instructions from an MCP tool, and old
-instructions in a skill loaded before the update. When this guide and a
-refusal from the newest command disagree, follow the refusal.
+wait for a new session to get the new command.
+
+- Prefer the path on the `cli` line, the command you ran. Keep it unless a
+  `plugin` line shows a higher version than the `cli` line or says `differs
+  from this CLI`.
+- Then run `<folder>/bin/xsm --version` for each such folder, and for the CLI.
+  The higher version wins; at the same version, the later git describe (more
+  commits after the tag; a copy with no `.git` shows none). When nothing tells
+  them apart, stay with the CLI.
+- If `xsm --version` itself fails, find the copies yourself and run each with
+  `--version`; one that fails is older still. Codex plugins: `ls -d
+  ~/.codex*/plugins/cache/xsm/xsm/*/bin/xsm`. Claude Code plugins: `ls -d
+  ~/.claude*/plugins/cache/xsm/xsm/*/bin/xsm`, where the `installPath` of
+  `xsm@xsm` in a home's `plugins/installed_plugins.json` is the current one
+  (one pattern per command: zsh refuses the whole command when one matches
+  nothing). A direct install: the checkout the `~/.local/bin/xsm` link points
+  to, or the folder in the `#xsm-hook` commands of the home's `settings.json`.
+
+Then run `<that folder>/bin/xsm <command>`. That fixes an old or missing `xsm`
+on the PATH, old instructions from an MCP tool, and old instructions in a
+skill loaded before the update. When this guide and a refusal from the newest
+command disagree, follow the refusal.
 
 What the full path cannot fix, because it lives in the session, not the
 command:
@@ -442,13 +462,24 @@ command:
 | Claude Code: after an AskUserQuestion answer, xsm still asks for their yes | the session has no hook for that tool yet | Ask in plain words in the chat; the reply is kept |
 | An `xsm_*` tool answers with old text or fails; `orphaned` in doctor | the server is the one the session started with | Use the shell, newest command by full path |
 
-**Updating.** Ask your user whether to update; on a yes you run it. Codex
-plugin: `codex plugin marketplace upgrade xsm` then `codex plugin add
-xsm@xsm`. Direct install: `xsm install --refresh`. A Claude Code plugin updates
-with `/plugin update xsm@xsm`, which only your user can type in their session;
-ask them whether they want it, say what it does, and do not hand them other
-commands. Either way, say that sessions already open keep the old hooks until
-they restart.
+**Updating.** Ask your user whether to update, naming the copy and its home;
+on a yes you run it, never they. A direct install updates by its checkout:
+`git -C <checkout> pull --ff-only`, then `<checkout>/bin/xsm install --refresh`. Pull only
+when `git -C <checkout> status --short --branch` shows no changed files and a
+branch (not `HEAD (no branch)`); otherwise stop and tell your user what is in
+the way. A Codex plugin, for each Codex home: `CODEX_HOME=<home> codex plugin
+marketplace upgrade xsm`, then `CODEX_HOME=<home> codex plugin add xsm@xsm`; if
+that home was set up earlier with `xsm install --codex-home`, run
+`<plugin folder>/bin/xsm install --refresh` once after adding the plugin, which
+removes what that install left beside the plugin's hooks. A Claude Code plugin: `claude plugin marketplace
+update xsm`, then `claude plugin update xsm@xsm`, with `CLAUDE_CONFIG_DIR=<home>`
+set when the home is not `~/.claude`; `already at the latest version` means the
+plugin's version number has not gone up, and there is nothing more to run.
+Either way, say that sessions already open keep the old hooks and server until
+they restart, so a new session is needed. In Claude Code `/reload-plugins` in
+an open session also switches its hooks and MCP servers to the new version
+(Claude Code's plugin docs), but only your user can type it: offer it instead
+of a new session, never as a step.
 
 **Never** edit or delete files under `~/.xsm` to get past a refusal, and never
 run an older `xsm` to get a laxer answer. Another machine on an older version

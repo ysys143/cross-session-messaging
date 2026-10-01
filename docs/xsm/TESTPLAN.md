@@ -383,11 +383,11 @@ xsm held show <목록에 나온 id>      # 전체 기록. show다, how가 아니
   xsm install --refresh
   ```
 
-- 플러그인으로 설치했다면 Claude Code 세션에서 갱신한다.
+- 플러그인으로 설치했다면 터미널에서 갱신한다(`~/.claude`가 아닌 홈은 앞에 `CLAUDE_CONFIG_DIR=<홈>`을 붙인다).
 
-  ```
-  /plugin marketplace update xsm
-  /plugin update xsm@xsm
+  ```bash
+  claude plugin marketplace update xsm
+  claude plugin update xsm@xsm
   ```
 
 - 어느 쪽이든 갱신한 뒤 **세션을 새로 연다.** 이미 떠 있던 MCP 서버는 예전 도구 목록을 그대로 쓰므로, 그 세션에는 `xsm_link`가 없다. 세션을 새로 열기 어렵다면 Claude Code에서 `/mcp`로 xsm 서버를 다시 연결한다.
