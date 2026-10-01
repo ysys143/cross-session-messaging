@@ -632,13 +632,15 @@ def main(argv=None) -> int:
         # The raw text matters too: if json parsing is what failed, the prompt
         # field was never extracted, and a peer message would look like a human's.
         looks_like_peer = envelope.looks_like_peer(prompt) or envelope.looks_like_peer(raw)
+        event = (data or {}).get("hook_event_name")
+        # A tool result has already happened and nothing here can hold it back:
+        # it never was a block, whatever text it carried (2026-10-01).
         paths.append_jsonl("decisions.jsonl", {
-            "event": (data or {}).get("hook_event_name"), "decision":
-                "block" if looks_like_peer else "pass",
+            "event": event, "decision":
+                "block" if looks_like_peer and event != "PostToolUse" else "pass",
             "reason": "xsm internal error: %s" % type(err).__name__,
             "detail": str(err)[:300], "peer_like": looks_like_peer})
-        if (data or {}).get("hook_event_name") in ("PermissionRequest", "UserPromptExpansion",
-                                                   "PostToolUse"):
+        if event in ("PermissionRequest", "UserPromptExpansion", "PostToolUse"):
             # No answer means the runtime's own default, which for a background
             # worker is to refuse. Never print a prompt decision here. An
             # expansion is the person's own slash command: nothing to refuse.

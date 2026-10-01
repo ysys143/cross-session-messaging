@@ -76,6 +76,11 @@ class PersonDecisionTest(TempState):
         from xsm import consent, paths
         return paths.read_json(consent._pending_path(self.me["ref"]))
 
+    def _taken(self, verb, target, here=None):
+        """What a rerun gets of the reply: (reply, go)."""
+        from xsm import consent
+        return consent.take_or_request(self.me, verb, target, here)[:2]
+
     def _asked_files(self):
         folder = os.path.join(self.tmp, "asked")
         return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
@@ -412,7 +417,7 @@ class PersonDecisionTest(TempState):
         self.assertEqual(self._cli(["unblock", "abc777"])[0], 0)
 
     def test_a_reply_written_during_a_show_is_not_lost(self):
-        """take_verdict read the old reply, the hook wrote the new one, and the
+        """The take read the old reply, the hook wrote the new one, and the
         show wrote the old one back over it: the old yes would then pass
         (measured 323 of 400, 2026-10-01). The read and the write are one step."""
         import threading
@@ -431,7 +436,7 @@ class PersonDecisionTest(TempState):
             return real(p, data, *args, **kwargs)
 
         with mock.patch.object(paths, "write_json", write):
-            self.assertEqual(consent.take_verdict(self.me, "unblock", "abc666"), ("응", False))
+            self.assertEqual(self._taken("unblock", "abc666"), ("응", False))
         late.join(10)
         entry = paths.read_json(pending)
         self.assertEqual(entry["verdict"], "아니 잠깐")
@@ -446,7 +451,7 @@ class PersonDecisionTest(TempState):
 
         def rerun():
             gate.wait()
-            results.append(consent.take_verdict(self.me, "unblock", "abc555"))
+            results.append(self._taken("unblock", "abc555"))
 
         threads = [threading.Thread(target=rerun) for _ in range(8)]
         for t in threads:
@@ -473,7 +478,7 @@ class PersonDecisionTest(TempState):
         is worth a lock file."""
         from xsm import consent
         self._reply("hello")
-        self.assertEqual(consent.take_verdict(self.me, "unblock", "abc333"), (None, False))
+        self.assertFalse(consent.note_verdict(self.me, "hello"))
         asked = os.path.join(self.tmp, consent.ASKED)
         self.assertEqual(os.listdir(asked) if os.path.isdir(asked) else [], [])
 
@@ -568,11 +573,10 @@ class PersonDecisionTest(TempState):
         from xsm import consent, paths
         with mock.patch.object(paths, "write_json", side_effect=PermissionError("denied")):
             self.assertFalse(consent.take_or_request(self.me, "unblock", "abcabc")[2])
-        self.assertTrue(consent.take_or_request(self.me, "unblock", "abcabc")[2])
-        with mock.patch.object(paths, "write_json", side_effect=PermissionError("denied")):
             code, text = self._cli(["unblock", "abcabc"])
         self.assertEqual(code, 2, text)
         self.assertIn("cannot keep their reply", text)
+        self.assertTrue(consent.take_or_request(self.me, "unblock", "abcabc")[2])
 
     def test_a_spawn_that_cannot_keep_the_reply_says_so(self):
         from xsm import workers
@@ -644,7 +648,7 @@ class PersonDecisionTest(TempState):
         self.assertIn("AskUserQuestion", text, "a Claude agent is told it may use its tool")
         question = "Lift the block on session aaa111?"
         self._answered({question: "Yes, lift it"})
-        said = '"%s" -> "Yes, lift it"' % question
+        said = "%s -> Yes, lift it" % question
         self.assertEqual(self._pending()["verdict"], said)
         self._shows(["unblock", "aaa111"], said)
         self.assertIn("aaa111", config.blocked(), "showing is not going ahead")
@@ -666,7 +670,7 @@ class PersonDecisionTest(TempState):
                        {"Lift it?": {"preview": "a diff nobody chose"},
                         "Also log it?": {"notes": "only if it is quiet"}})
         self.assertEqual(self._pending()["verdict"],
-                         '"Lift it?" -> "Yes"; "Also log it?" -> "(notes only)" '
+                         "Lift it? -> Yes; Also log it? -> (notes only) "
                          "(notes: only if it is quiet)")
 
     def test_a_plain_text_result_is_kept_as_it_is(self):
@@ -716,10 +720,10 @@ class PersonDecisionTest(TempState):
                                   "annotations": {}}}
         with mock.patch.object(registry, "by_session", return_value=self.me):
             self.assertIsNone(receive.handle(data))
-            self.assertEqual(self._pending()["verdict"], '"Lift it?" -> "Yes"')
+            self.assertEqual(self._pending()["verdict"], "Lift it? -> Yes")
             other = dict(data, tool_name="Bash", tool_response={"answers": {"Q": "no"}})
             self.assertIsNone(receive.handle(other))
-        self.assertEqual(self._pending()["verdict"], '"Lift it?" -> "Yes"')
+        self.assertEqual(self._pending()["verdict"], "Lift it? -> Yes")
 
     def test_a_broken_post_tool_use_hook_stays_silent(self):
         """A tool result has happened: an error there must print no prompt
@@ -767,7 +771,7 @@ class PersonDecisionTest(TempState):
         entry = self._pending()
         entry["t"] = time.time() - consent.ASK_MAX - 60
         paths.write_json(consent._pending_path(self.me["ref"]), entry)
-        self.assertEqual(consent.take_verdict(self.me, "unblock", "bbb222"), (None, False))
+        self.assertFalse(consent.note_verdict(self.me, "too late"))
         self.assertEqual(self._asked_files(), [])
 
     def test_prune_sweeps_what_nobody_came_back_to(self):
@@ -789,18 +793,23 @@ class PersonDecisionTest(TempState):
         paths.write_json(os.path.join(folder, "typed1.json"), {"verb": "link",
                                                                "t": now - consent.TTL - 60})
         os.utime(os.path.join(folder, "junk00.pending.json"), (now - consent.ASK_MAX - 60,) * 2)
+        os.utime(os.path.join(folder, "lost00.pending.json.lock"), (now - 60,) * 2)
+        open(os.path.join(folder, "young0.pending.json.lock"), "w").close()   # made just now
         would = consent.prune(now, dry_run=True)
         self.assertEqual(sorted(os.listdir(folder)), sorted([
             "old000.pending.json", "old000.pending.json.lock", "new000.pending.json",
             "new000.pending.json.lock", "lost00.pending.json.lock", "junk00.pending.json",
-            "typed0.json", "typed1.json"]), "a dry run removes nothing")
+            "typed0.json", "typed1.json", "young0.pending.json.lock"]), "a dry run removes nothing")
         removed = housekeeping.prune(now)["asked"]
         self.assertEqual(sorted(removed), sorted(would))
         self.assertEqual(sorted(removed), ["junk00.pending.json", "lost00.pending.json.lock",
                                            "old000.pending.json", "typed1.json"])
-        self.assertEqual(sorted(os.listdir(folder)), ["new000.pending.json",
-                                                      "new000.pending.json.lock", "typed0.json"])
+        self.assertEqual(sorted(os.listdir(folder)), [
+            "new000.pending.json", "new000.pending.json.lock", "typed0.json",
+            "young0.pending.json.lock"], "a lock made a moment ago may be about to get its ask")
         self.assertEqual(consent.prune(now), [], "nothing left to sweep")
+        self.assertEqual(consent.prune(now + consent.LOCK_GRACE + 1),
+                         ["young0.pending.json.lock"], "once it is old enough it is an orphan")
 
     def test_prune_leaves_an_ask_that_is_in_use(self):
         import time
@@ -860,7 +869,7 @@ class PersonDecisionTest(TempState):
     # -- take and request are one step (adversarial check, 2026-10-01) ----------------
 
     def test_a_reply_that_lands_while_the_ask_is_renewed_is_kept(self):
-        """take_verdict found nothing, the hook stored the reply, then request
+        """The take found nothing, the hook stored the reply, then the request
         overwrote it unseen. Now the one locked step either shows the reply or
         runs before it is stored."""
         import threading
@@ -896,6 +905,343 @@ class PersonDecisionTest(TempState):
                          (None, False, True), "another thing is a new ask")
         self.assertIsNone(self._pending()["verdict"])
         self.assertEqual(self._pending()["target"], "ddd333")
+
+    # -- a form that got no answer records the ask itself (2026-10-01, Codex) -----------
+
+    def _form(self, name, args, reply=None):
+        """One call of an MCP form tool. With no reply the client has no form;
+        with one, the client answered the form with it (a dismissal, say)."""
+        import json
+        from xsm import mcp
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {} if reply is None else {"elicitation": {}}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": name, "arguments": args}}]
+        if reply is not None:
+            msgs.append(dict({"jsonrpc": "2.0", "id": "xsm-1"}, **reply))
+        out = io.StringIO()
+        server = mcp.Server(io.StringIO("".join(json.dumps(m) + "\n" for m in msgs)), out)
+        server.session = lambda: dict(self.me)
+        server.serve()
+        replies = [json.loads(line) for line in out.getvalue().splitlines()]
+        return next(m for m in replies if m.get("id") == 2)["result"]["content"][0]["text"]
+
+    DISMISSED = {"result": {"action": "cancel"}}
+
+    def _one_yes_is_enough(self, name, args, run, reply=None):
+        """The form got no answer, so the agent is told to ask now; the person
+        says yes once, in words; the command it was given shows that yes the
+        first time it runs. Returns what that run printed."""
+        text = self._form(name, args, reply)
+        self.assertIn("Ask your user now", text)
+        self.assertNotIn("first:", text, "the ask is on record, so no command comes before it")
+        entry = self._pending()
+        self.assertIsNotNone(entry, "the MCP server recorded the ask")
+        self.assertIsNone(entry["verdict"])
+        from xsm import consent
+        self.assertTrue(consent.note_verdict(self.me, "응"), "the first yes has an ask to attach to")
+        shown = run()
+        self.assertIn('your user replied: "응"', shown)
+        return shown
+
+    def test_a_link_form_that_cannot_show_is_asked_for_in_words_and_one_yes_does(self):
+        import shlex
+        from xsm import config
+        self.me["runtime"] = "codex"
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        root, here = config.project_root(other), config.project_root(self.tmp)
+        text = self._form("xsm_link", {"dir": other})
+        self.assertIn("`xsm link %s`" % shlex.quote(root), text)
+        self.assertNotIn("AskUserQuestion", text, "Codex has no such tool")
+        self.assertEqual(
+            {k: self._pending()[k] for k in ("verb", "target", "here", "verdict")},
+            {"verb": "link", "target": root, "here": here, "verdict": None})
+        self._reply("응")
+        self._shows(["link", root], "응")
+        code, text = self._cli(["link", root])
+        self.assertEqual(code, 0, text)
+        self.assertIn("응", config.links()[0]["by"])
+
+    def test_a_claude_agent_is_offered_its_question_tool_in_that_text(self):
+        text = self._form("xsm_join", {"project": "demo"})
+        self.assertIn("AskUserQuestion", text)
+
+    def test_the_other_form_tools_name_the_ask_their_command_finds(self):
+        from xsm import config, doc, paths, workers
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        with self.subTest("join"):
+            self._one_yes_is_enough("xsm_join", {"project": "demo"},
+                                    lambda: self._cli(["join", "demo"])[1], self.DISMISSED)
+        with self.subTest("leave"):
+            self._one_yes_is_enough("xsm_join", {"project": "demo", "leave": True},
+                                    lambda: self._cli(["leave", "demo"])[1])
+        with self.subTest("reach"):
+            self._one_yes_is_enough("xsm_reach", {"dir": other},
+                                    lambda: self._cli(["reach", other])[1], self.DISMISSED)
+        with self.subTest("approve"):
+            workers.save({"name": "w1", "runtime": "claude", "mode": "background", "pane": "%1",
+                          "cwd": self.tmp, "created": 0, "parent_ref": "abc123"})
+            paths.write_json(workers._approval_path("r1"), {
+                "id": "r1", "worker": "w1", "summary": "Bash: rm -rf build", "status": "pending",
+                "t": 0, "tool": "Bash"})
+            self._one_yes_is_enough("xsm_approve", {"id": "r1"},
+                                    lambda: self._cli(["approve", "r1"])[1], self.DISMISSED)
+        with self.subTest("grant"):
+            def grant():
+                with self.assertRaises(workers.WorkerError) as cm:
+                    workers.use_grant(None, self.me, "codex", self.tmp, ["full_access"])
+                return str(cm.exception)
+            text = self._one_yes_is_enough(
+                "xsm_grant", {"runtime": "codex", "options": ["full_access"], "reason": "r",
+                              "dir": self.tmp}, grant, self.DISMISSED)
+            self.assertIn("FULL ACCESS", text)
+        with self.subTest("grant outside this session's scope"):
+            import shutil
+            import tempfile
+            elsewhere = tempfile.mkdtemp(prefix="xsm-test-elsewhere-")
+            self.addCleanup(shutil.rmtree, elsewhere, True)
+            self.assertIsNone(config.scope_for(self.me, {"cwd": elsewhere})[0])
+
+            def grant_there():
+                # spawn adds outside_scope itself for a folder outside the scope
+                with self.assertRaises(workers.WorkerError) as cm:
+                    workers.use_grant(None, self.me, "codex", elsewhere,
+                                      ["full_access", "outside_scope"])
+                return str(cm.exception)
+            self._one_yes_is_enough(
+                "xsm_grant", {"runtime": "codex", "options": ["full_access"], "reason": "r",
+                              "dir": elsewhere}, grant_there, self.DISMISSED)
+        with self.subTest("endorse"):
+            path = os.path.join(self.tmp, "d.md")
+            node = doc.add(path, {"kind": "agent", "name": "w", "alias": "a", "ref": "zzzzzz"},
+                           "the report", ["report"])
+            body = next(n for n in doc.read(path) if n["id"] == node["id"])["body"]
+            self._one_yes_is_enough(
+                "xsm_doc_endorse", {"doc": path, "node": node["id"]},
+                lambda: self._cli(["doc", "add", path, "--tag", "endorsed", "--parent",
+                                   node["id"], "--text", body])[1])
+
+    def test_a_decision_has_no_key_to_record_so_its_command_comes_first(self):
+        """The text to record is the agent's: nothing to record before it runs."""
+        text = self._form("xsm_decide", {"question": "Ship it?"})
+        self.assertIn("Run `xsm post --tag decision", text)
+        self.assertIn("first", text)
+        self.assertNotIn("Ask your user now", text)
+        self.assertEqual(self._asked_files(), [])
+
+    def test_when_the_ask_cannot_be_kept_the_command_comes_first_there_too(self):
+        for label, env in (("a worker", {"XSM_WORKER": "w1"}),):
+            with self.subTest(label), mock.patch.dict(os.environ, env):
+                text = self._form("xsm_join", {"project": "demo"})
+                self.assertIn("Run `xsm join demo` in your shell first", text)
+                self.assertNotIn("Ask your user now", text)
+                self.assertEqual(self._asked_files(), [])
+        self.me = dict(self.me, ref=None)
+        self.assertIn("first", self._form("xsm_join", {"project": "demo"}))
+
+    def test_a_declined_form_is_a_no_and_records_no_ask(self):
+        from xsm import mcp
+        text = self._form("xsm_join", {"project": "demo"}, {"result": {"action": "decline"}})
+        self.assertIn("approval_policy", text, "a client that did not say who it is: unsure")
+        self.assertIn("Ask your user now", text)
+        self.assertEqual(mcp.person_answer({"result": {"action": "decline"}}, client="claude-code"),
+                         (None, mcp.DECLINED))
+
+    def test_the_ask_replaces_an_unrelated_one_and_the_yes_lands_on_the_new_one(self):
+        self._asks(["unblock", "zzz111"])
+        self._form("xsm_join", {"project": "demo"})
+        entry = self._pending()
+        self.assertEqual((entry["verb"], entry["target"], entry["verdict"]),
+                         ("join", "demo", None))
+        self._reply("응")
+        self._shows(["join", "demo"], "응")
+
+    def test_running_again_before_asking_keeps_the_time_the_ask_was_made(self):
+        """Each run before the person was asked made a new ask and pushed
+        ASK_MAX out."""
+        from xsm import consent, paths
+        self._asks(["unblock", "ttt111"])
+        entry = self._pending()
+        entry["t"] -= 100
+        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        self._asks(["unblock", "ttt111"])
+        self.assertEqual(self._pending()["t"], entry["t"])
+        self.assertTrue(consent.ask(self.me, "unblock", "ttt111"))
+        self.assertEqual(self._pending()["t"], entry["t"], "the MCP's ask too")
+        self._asks(["unblock", "ttt222"])
+        self.assertGreater(self._pending()["t"], entry["t"], "another thing is a new ask")
+
+    # -- an older hook with this CLI (version mix, 2026-10-01) ----------------------------
+
+    def test_a_reply_a_0414_hook_stored_is_shown_with_a_warning_and_still_passes(self):
+        """0.4.14 locks the first message and writes no `shown`; the CLI that
+        reads it cannot promise that their next message replaces it."""
+        import time
+        from xsm import consent, paths
+        now = time.time()
+        paths.write_json(consent._pending_path(self.me["ref"]), {
+            "verb": "unblock", "target": "old111", "here": None, "cwd": self.tmp, "t": now - 20,
+            "session_id": "s-agent", "verdict": "응", "verdict_t": now - 10})
+        code, text = self._cli(["unblock", "old111"])
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "응"', text)
+        self.assertIn("hooks are older than this xsm command", text)
+        self.assertIn("only their first message", text)
+        self.assertIn("new session", text)
+        self.assertIn("MCP form tool", text)
+        self._waited()
+        code, text = self._cli(["unblock", "old111"])
+        self.assertEqual(code, 0, text)                  # the pass is as it was
+        self._asks(["unblock", "new111"])
+        self._reply("응")
+        code, text = self._cli(["unblock", "new111"])
+        self.assertNotIn("older", text, "a current hook writes `shown`, so no warning")
+
+    def test_taking_is_one_name_and_the_unused_one_is_gone(self):
+        from xsm import consent
+        self.assertFalse(hasattr(consent, "take_verdict"))
+
+    # -- join and leave read --dir before the reply is used ------------------------------
+
+    def test_dir_is_refused_before_the_reply_is_used_up(self):
+        from xsm import consent
+        for verb in ("join", "leave"):
+            with self.subTest(verb):
+                self._asks([verb, "demo"])
+                self._reply("응")
+                self._shows([verb, "demo"], "응")
+                with self.assertRaises(SystemExit) as cm:
+                    self._cli([verb, "demo", "--dir", self.tmp])
+                self.assertIn("--dir", str(cm.exception))
+                self.assertEqual(self._pending()["verdict"], "응", "the approval was not spent")
+                self.assertTrue(self._pending()["shown"])
+                os.unlink(consent._pending_path(self.me["ref"]))
+
+    # -- blocked refs (0.4.14 stored the prefix) ------------------------------------------
+
+    def test_a_ref_stored_with_its_prefix_is_blocked_and_can_be_lifted(self):
+        from xsm import config, paths
+        paths.write_json(paths.path(config.CONFIG), {"deny": ["ref:abc111", " abc222", "abc333"]})
+        self.assertEqual(config.blocked(), {"abc111", "abc222", "abc333"})
+        self.assertFalse(config.block("ref:abc111"), "already blocked, in either form")
+        self.assertTrue(config.unblock("abc111"))
+        self.assertTrue(config.unblock("ref: abc222"))
+        self.assertTrue(config.unblock("abc333"))
+        self.assertFalse(config.unblock("abc333"))
+        self.assertEqual(config.blocked(), set())
+        self.assertEqual(self._cli(["block", "ref: abc123"])[0], 0)
+        self.assertEqual(paths.read_json(paths.path(config.CONFIG))["deny"], ["abc123"])
+
+    def test_unblocking_asks_for_the_bare_ref_whatever_was_typed(self):
+        from xsm import config, paths
+        paths.write_json(paths.path(config.CONFIG), {"deny": ["ref:abc444"]})
+        self._asks(["unblock", "ref: abc444"])
+        self.assertEqual(self._pending()["target"], "abc444")
+        self._reply("응")
+        self._shows(["unblock", "abc444"], "응")
+        self.assertEqual(self._cli(["unblock", "ref:abc444"])[0], 0)
+        self.assertEqual(config.blocked(), set())
+
+    # -- what counts as a reply (Codex's tags) ---------------------------------------------
+
+    def test_codex_tags_are_not_the_reply_and_a_human_who_starts_with_a_bracket_is(self):
+        from xsm import consent
+        for text in ("<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>",
+                     "<turn_aborted>", "<user_shell_command>\n<command>ls</command>\n"
+                     "</user_shell_command>", "<subagent_notification>x</subagent_notification>",
+                     "<environment_context>\n<cwd>/x</cwd>\n</environment_context>",
+                     "<hook_prompt>x</hook_prompt>", "<some_new_tag attr=\"1\">x</some_new_tag>"):
+            with self.subTest(text[:20]):
+                self.assertTrue(consent.not_a_reply(text))
+        for text in ("<3 응 해 줘", "< 응", "<yes> go ahead", "<-- 응", "<= 맞아", "<b>응",
+                     "<turn> 이야기하자 </turn_x>", "응 <turn_aborted>"):
+            with self.subTest(text):
+                self.assertFalse(consent.not_a_reply(text))
+        self._asks(["unblock", "ccc111"])
+        self._reply("<turn_aborted>\ninterrupted\n</turn_aborted>")
+        self.assertIsNone(self._pending()["verdict"])
+        self._reply("<3 응")
+        self.assertEqual(self._pending()["verdict"], "<3 응")
+
+    # -- a verdict is long enough for several questions ---------------------------------------
+
+    def test_every_answer_survives_a_form_of_many_long_questions(self):
+        from xsm import consent
+        answers = {("Question %d: %s" % (i, "q" * 600)): "Answer %d %s" % (i, "a" * 150)
+                   for i in range(12)}
+        self._asks(["unblock", "ddd444"])
+        self._answered(answers)
+        said = self._pending()["verdict"]
+        self.assertLessEqual(len(said), consent.VERDICT_MAX)
+        for i in range(12):
+            self.assertIn("-> Answer %d %s" % (i, "a" * 150), said, "no answer is cut")
+            self.assertIn("Question %d" % i, said)
+        self.assertNotIn("q" * 400, said, "the questions were shortened")
+        self.assertIn("...", said)
+
+    def test_a_long_reply_is_kept_beyond_the_old_thousand(self):
+        from xsm import consent
+        self._asks(["unblock", "ddd555"])
+        self._reply("x" * 3000 + "end")
+        self.assertEqual(len(self._pending()["verdict"]), 3003)
+        self._reply("y" * (consent.VERDICT_MAX + 50))
+        self.assertEqual(len(self._pending()["verdict"]), consent.VERDICT_MAX)
+
+    def test_the_shown_answer_has_no_nested_quotes(self):
+        self._asks(["unblock", "ddd666"])
+        self._answered({"Lift it?": "Yes"})
+        code, text = self._cli(["unblock", "ddd666"])
+        self.assertIn('your user replied: "Lift it? -> Yes".', text)
+        self.assertNotIn('""', text)
+
+    # -- a typed consent a fresh one replaced is not deleted by the sweep ------------------------
+
+    def test_prune_puts_back_a_typed_consent_written_after_it_was_judged(self):
+        import time
+        from xsm import consent, paths
+        now = time.time()
+        folder = os.path.join(self.tmp, consent.ASKED)
+        path = os.path.join(folder, "typed9.json")
+        paths.write_json(path, {"verb": "link", "t": now - consent.TTL - 60})
+        real, state = consent._stale, {"first": True}
+
+        def stale(p, at, typed):
+            judged = real(p, at, typed)
+            if state["first"] and typed:
+                state["first"] = False
+                paths.write_json(path, {"verb": "link", "t": now})    # typed just now
+            return judged
+
+        with mock.patch.object(consent, "_stale", stale):
+            self.assertEqual(consent.prune(now), [], "judged stale, but replaced since")
+        self.assertEqual(paths.read_json(path)["t"], now)
+        self.assertEqual(os.listdir(folder), ["typed9.json"], "no claim file is left")
+        paths.write_json(path, {"verb": "link", "t": now - consent.TTL - 60})
+        self.assertEqual(consent.prune(now), ["typed9.json"])
+        self.assertEqual(os.listdir(folder), [])
+
+    # -- the log of a broken tool-result hook ----------------------------------------------------
+
+    def test_a_broken_hook_logs_a_block_only_for_what_it_could_hold_back(self):
+        import json
+        from xsm import paths, receive
+        peer = "<cross-session-message>[xsm v1 id=x]</cross-session-message>"
+        for event, extra, want in (
+                ("PostToolUse", {"tool_name": "AskUserQuestion",
+                                 "tool_response": {"answers": {"q": peer}}}, "pass"),
+                ("UserPromptSubmit", {"prompt": peer}, "block")):
+            with self.subTest(event):
+                raw = json.dumps(dict({"hook_event_name": event}, **extra))
+                with mock.patch.object(sys, "stdin", io.StringIO(raw)), \
+                        mock.patch.dict(os.environ, {"XSM_FORCE_ERROR": "1"}), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    receive.main()
+                logged = paths.read_jsonl("decisions.jsonl")[-1]
+                self.assertEqual((logged["event"], logged["decision"], logged["peer_like"]),
+                                 (event, want, True))
 
     def test_frameworks_ignore_needs_a_name(self):
         code, text = self._cli(["frameworks", "ignore"])

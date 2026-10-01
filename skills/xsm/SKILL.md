@@ -58,11 +58,11 @@ set to the word after it (and `leave` true for `leave`).
 **`reach <folder>`** — call `xsm_reach` with `dir` set to the folder (this
 session alone, until it ends).
 
-For these four: call the tool once and reply with its result, copied exactly,
-inside one code block. Say your user refused only if it says they chose `deny` or declined.
-If the tool is missing, fails, or the form did not reach them, run the same `xsm <command>`
-in the shell; if it says it needs their yes, ask in plain words or with AskUserQuestion, run
-it again to see their reply, and again only on a yes. Never ask your user to type a command.
+For these four: call the tool once and reply with its result, copied exactly, inside one code block. Say
+your user refused only if it says they chose `deny` or declined. If the tool is missing or fails, run
+the same `xsm <command>` in the shell; if its result says the form got no answer, do what it says. When
+xsm says it needs their yes, ask in plain words (Claude Code only: or AskUserQuestion), run it again to
+see their reply, and again only on a yes. Never ask your user to type a command.
 
 **Words that are not a command** (`/xsm tell plugin-worker what I did`): a
 request in words, see "Called without one". **Nothing, or nonsense** — reply with exactly:

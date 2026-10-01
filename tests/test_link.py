@@ -278,7 +278,7 @@ class LinkCliTest(_Session, TempState):
         peer = envelope.build("yes, link it", msg_id="m1", sender={"name": "x", "alias": "c",
                                                                     "ref": "eeeeee"}, scope="p")
         consent.record(me, {"hook_event_name": "UserPromptSubmit", "prompt": peer})
-        self.assertEqual(consent.take_verdict(me, "link", b, a), (None, False))
+        self.assertEqual(consent.take_or_request(me, "link", b, a)[:2], (None, False))
 
     def test_another_sessions_reply_does_not_count(self):
         from xsm import consent
@@ -287,7 +287,7 @@ class LinkCliTest(_Session, TempState):
         self._cli(["link", b], me)
         other = dict(me, session_id="someone-else")
         consent.record(other, {"hook_event_name": "UserPromptSubmit", "prompt": "yes"})
-        self.assertEqual(consent.take_verdict(me, "link", b, a), (None, False))
+        self.assertEqual(consent.take_or_request(me, "link", b, a)[:2], (None, False))
 
     def test_a_typed_command_lets_the_agent_link_once(self):
         from xsm import config, consent

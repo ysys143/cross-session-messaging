@@ -329,7 +329,7 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
                 % what)
     verdict, go, kept = consent.take_or_request(me, *key)
     if verdict is not None and not go:
-        return consent.shown_refusal(verdict, what)
+        return consent.shown_refusal(verdict, what, kept)
     if verdict is not None:
         _verdict = verdict
         paths.append_jsonl("decisions.jsonl", {
@@ -350,11 +350,11 @@ def cmd_join(args) -> int:
     except ValueError as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return USAGE
+    here = _here(args)                          # refuses an agent's --dir, before the reply is used
     why = _person_or_refuse("joining a project", "xsm_join", ("join", args.project))
     if why:
         print("refused: %s" % why, file=sys.stderr)
         return REFUSED
-    here = _here(args)
     try:
         scope, added = config.join(args.project, here)
     except ValueError as exc:
@@ -383,11 +383,11 @@ def cmd_join(args) -> int:
 
 
 def cmd_leave(args) -> int:
+    here = _here(args)                          # as in join
     why = _person_or_refuse("leaving a project", "xsm_join (with leave)", ("leave", args.project))
     if why:
         print("refused: %s" % why, file=sys.stderr)
         return REFUSED
-    here = _here(args)
     if config.leave(args.project, here):
         print("left project %s: %s" % (args.project, _home_tilde(config.project_root(here))))
         return OK
@@ -521,9 +521,7 @@ def cmd_link(args) -> int:
 
 
 def cmd_block(args) -> int:
-    ref = args.ref.strip()
-    if ref.startswith("ref:"):          # the deny list holds bare refs, as `list` shows them
-        ref = ref[len("ref:"):]
+    ref = config.bare_ref(args.ref)     # the deny list holds bare refs, as `list` shows them
     if not ref or len(ref.split()) != 1:        # before anyone is asked, or anything is stored
         print("usage: xsm %s <ref> (the [ref] `xsm list` shows, e.g. a1b2c3)" % args.command,
               file=sys.stderr)
@@ -1586,7 +1584,7 @@ def cmd_post(args) -> int:
         if args.tag == "decision" and author.get("kind") != "human":
             author = _decided_by_reply(me, "recording as a decision in %s: %s" % (
                 where[0], (args.text or "")[:120]), "xsm_decide",
-                ("decide", _digest(where[1], args.text)))
+                ("decide", consent.digest(where[1], args.text)))
             if author is None:
                 return REFUSED
         rec = channel.post(where, author, args.text, args.tag, args.reply_to)
@@ -1595,13 +1593,6 @@ def cmd_post(args) -> int:
         return REFUSED
     print("posted %s to %s as %s" % (rec["id"], where[0], channel.label(author)))
     return OK
-
-
-def _digest(*parts) -> str:
-    """A short stable name for what is being decided, so the same command run
-    again finds the same request."""
-    import hashlib
-    return hashlib.sha256("\0".join(str(p or "") for p in parts).encode()).hexdigest()[:16]
 
 
 def _decided_by_reply(me: dict | None, what: str, mcp_tool: str, ask: tuple) -> dict | None:
@@ -1661,7 +1652,7 @@ def cmd_doc(args) -> int:
             if "endorsed" in (args.tag or []) and author.get("kind") != "human":
                 author = _decided_by_reply(me, "endorsing in %s: %s" % (args.doc, body[:120]),
                                            "xsm_doc_endorse",
-                                           ("endorse", _digest(args.doc, body, args.parent)))
+                                           ("endorse", consent.digest(args.doc, body, args.parent)))
                 if author is None:
                     return REFUSED
             node = doc.add(args.doc, author, body, args.tag or ["result"], args.parent or [],

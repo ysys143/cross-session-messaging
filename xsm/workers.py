@@ -224,6 +224,12 @@ def describe_grant(runtime: str, cwd: str, options: list) -> str:
     return "Starting a %s worker in %s with %s" % (runtime, os.path.realpath(cwd), what)
 
 
+def grant_target(runtime: str, cwd: str, options: list) -> str:
+    """What a grant is asked for, as the ask is keyed (consent.take_or_request).
+    The MCP tool names the same one when its form cannot be answered."""
+    return "%s:%s:%s" % (runtime, os.path.realpath(cwd), ",".join(sorted(options)))
+
+
 def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
               options: list) -> dict:
     """Consume a grant that covers exactly this spawn, or refuse.
@@ -234,11 +240,11 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
     acting on it; the run after that turns it into a one-use grant."""
     if not grant_id:
         from . import consent
-        target = "%s:%s:%s" % (runtime, os.path.realpath(cwd), ",".join(sorted(options)))
+        target = grant_target(runtime, cwd, options)
         what = describe_grant(runtime, cwd, options)
         verdict, go, kept = consent.take_or_request(caller, "grant", target)
         if verdict is not None and not go:
-            raise WorkerError(consent.shown_refusal(verdict, what))
+            raise WorkerError(consent.shown_refusal(verdict, what, kept))
         if verdict is not None:
             paths.append_jsonl("decisions.jsonl", {"event": "consent", "verb": "grant",
                                                    "target": target, "verdict": verdict,

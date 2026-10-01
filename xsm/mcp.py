@@ -389,11 +389,12 @@ class Server:
 
     def decide(self, where: tuple, me: dict, args: dict) -> str:
         if "elicitation" not in (self.client_caps or {}):
+            # The text to record is the agent's, so there is no ask to record
+            # for it here: the command comes first (in_words).
             raise channel.ChannelError("this client cannot show a form (no elicitation "
-                                       "support); ask your user in plain words and run "
-                                       "`xsm post --tag decision \"<their decision>\"`: it "
-                                       "keeps their reply as the verdict, shows it to you, "
-                                       "and goes ahead when you run it again on a yes")
+                                       "support). " + self.in_words(
+                                           me, 'xsm post --tag decision "<the decision to '
+                                               'record>"'))
         question = (args.get("question") or "").strip()
         # Offered as they will be compared: stripped, no empties, no repeats.
         # " yes " used to be offered as is and then compared stripped, so the
@@ -412,7 +413,10 @@ class Server:
                                 "required": ["answer"]}})
         answer, why = self.answer(reply, options)
         if answer is None:
-            return "%s; nothing was recorded" % unanswered(why)
+            return "%s; nothing was recorded%s" % (unanswered(why), "" if why == DECLINED else
+                                                   ". " + self.in_words(
+                                                       me, 'xsm post --tag decision "<the '
+                                                           'decision to record>"'))
         summary = (args.get("summary") or "").strip()
         text = "%s: %s" % (summary, answer) if summary else "%s -> %s" % (question, answer)
         author = {"kind": "human", "name": os.environ.get("USER") or "person",
@@ -425,18 +429,20 @@ class Server:
 
     def endorse(self, me: dict, args: dict) -> str:
         from . import doc
-        if "elicitation" not in (self.client_caps or {}):
-            raise channel.ChannelError("this client cannot show a form; ask your user in plain "
-                                       "words and run `xsm doc add <doc> --tag endorsed --parent "
-                                       "<node> --text \"…\"`: it keeps their reply as the verdict, "
-                                       "shows it to you, and goes ahead when you run it "
-                                       "again on a yes")
         path = args.get("doc") or ""
         if not os.path.isabs(path):
             path = os.path.join(me.get("cwd") or os.getcwd(), path)
         node = next((n for n in doc.read(path) if n["id"] == args.get("node")), None)
         if not node:
             raise channel.ChannelError("no node %s in %s" % (args.get("node"), path))
+        # The command is the node's own text, so the ask recorded for it here is
+        # the one that command finds (consent.digest as the CLI keys it).
+        command = "xsm doc add %s --tag endorsed --parent %s --text %s" % (
+            shlex.quote(args.get("doc") or ""), shlex.quote(node["id"]), shlex.quote(node["body"]))
+        key = ("endorse", consent.digest(args.get("doc"), node["body"], [node["id"]]))
+        if "elicitation" not in (self.client_caps or {}):
+            raise channel.ChannelError("this client cannot show a form. "
+                                       + self.in_words(me, command, key))
         preview = node["body"] if len(node["body"]) < 1500 else node["body"][:1500] + " …"
         reply = self.ask_client("elicitation/create", {
             "message": "Endorse this node of %s as the document's text?\n[%s] by %s\n\n%s" % (
@@ -446,7 +452,9 @@ class Server:
                 "required": ["answer"]}})
         answer, why = self.answer(reply, ["endorse", "not now"])
         if answer != "endorse":
-            return "your user did not endorse it (%s); nothing was added" % why
+            return "your user did not endorse it (%s); nothing was added%s" % (
+                why, ". " + self.in_words(me, command, key) if answer is None and why != DECLINED
+                else "")
         author = {"kind": "human", "name": os.environ.get("USER") or "person",
                   "via": "mcp-elicitation"}
         new = doc.add(path, author, node["body"], ["endorsed"], [node["id"]],
@@ -454,16 +462,22 @@ class Server:
         return "endorsed: node %s now carries %s; run `xsm doc render %s`" % (
             new["id"], node["id"], args.get("doc"))
 
-    def allowed(self, question: str, command: str, agent_runs: bool = True) -> tuple:
+    def in_words(self, me: dict, command: str, key: tuple | None = None) -> str:
+        """What to tell the agent when a form got no answer: ask in plain words,
+        then run `command`. The ask is recorded here under `key` (the one that
+        command computes), so their first "yes" has an ask to attach to; with no
+        key, or no session xsm can keep a reply for, the command goes first
+        (consent.in_words)."""
+        return consent.in_words(command, bool(key) and consent.ask(me, *key), me.get("runtime"))
+
+    def allowed(self, me: dict, question: str, command: str, key: tuple | None = None) -> tuple:
         """Ask the person allow/deny. Returns (True, None) on their allow, else
         (False, what to tell the agent). The way round a form that cannot show
         is the agent's own shell command, which asks for the user's reply
         (consent.py) — never the person typing it (user decision, 2026-10-01)."""
         if "elicitation" not in (self.client_caps or {}):
-            raise channel.ChannelError("this client cannot show a form; run `%s` in your "
-                                       "shell instead: it tells you to ask your user, keeps "
-                                       "their reply as the verdict, shows it to you, and goes "
-                                       "ahead when you run it again on a yes" % command)
+            raise channel.ChannelError("this client cannot show a form. "
+                                       + self.in_words(me, command, key))
         reply = self.ask_client("elicitation/create", {"message": question, "requestedSchema": {
             "type": "object", "properties": {"answer": {"type": "string", "title": "Permission",
                                                         "enum": ["allow", "deny"]}},
@@ -475,10 +489,7 @@ class Server:
             return False, "your user declined: they chose 'deny'; do not work around it"
         if why == DECLINED:
             return False, unanswered(why)
-        return False, ("your user did not answer (%s). If the form did not reach them, ask "
-                       "them in plain words and run `%s` in your shell: it keeps their reply "
-                       "as the verdict, shows it to you, and goes ahead when you run it "
-                       "again on a yes" % (why, command))
+        return False, "your user did not answer (%s). %s" % (why, self.in_words(me, command, key))
 
     def link(self, me: dict, args: dict) -> str:
         from . import config
@@ -504,11 +515,11 @@ class Server:
             # person at a terminal, so it would refuse the agent (issue #9).
             command = "xsm link %s" % shlex.quote(other)
             ok, refusal = self.allowed(
-                "%s@%s asks to link %s with %s: the sessions of both folders talk, both ways, "
+                me, "%s@%s asks to link %s with %s: the sessions of both folders talk, both ways, "
                 "until unlinked.%s\nAllow it?" % (
                     me.get("name"), me.get("alias"), root, other,
                     ("\nReason: " + args["reason"]) if args.get("reason") else ""), command,
-                agent_runs=True)
+                ("link", other, here))
             if not ok:
                 return refusal
         try:
@@ -533,10 +544,10 @@ class Server:
                 raise channel.ChannelError(str(exc))
         if not consent.take(me, verb, project):       # the person typed /xsm join <project>
             ok, refusal = self.allowed(
-                "%s@%s asks to let %s %s the xsm project %r.%s\nAllow it?" % (
+                me, "%s@%s asks to let %s %s the xsm project %r.%s\nAllow it?" % (
                     me.get("name"), me.get("alias"), root, verb, project,
                     ("\nReason: " + args["reason"]) if args.get("reason") else ""), command,
-                agent_runs=True)
+                (verb, project))
             if not ok:
                 return refusal + "; the folder's projects are unchanged"
         try:
@@ -570,10 +581,10 @@ class Server:
             raise channel.ChannelError(str(exc))
         if not consent.take(me, "reach", root):        # the person typed /xsm reach <dir>
             ok, refusal = self.allowed(
-                "%s@%s (%s) asks to talk with the sessions in %s, both ways, until it ends.%s\n"
+                me, "%s@%s (%s) asks to talk with the sessions in %s, both ways, until it ends.%s\n"
                 "Allow it?" % (me.get("name"), me.get("alias"), me.get("ref"), root,
                                ("\nReason: " + args["reason"]) if args.get("reason") else ""),
-                command, agent_runs=True)
+                command, ("reach", root))
             if not ok:
                 return refusal
         try:
@@ -593,11 +604,10 @@ class Server:
         if not req:
             return "no waiting request from your workers" + (
                 " with id %s" % args["id"] if args.get("id") else "")
+        command, key = "xsm approve %s" % shlex.quote(req["id"]), ("approve", req["id"])
         if "elicitation" not in (self.client_caps or {}):
-            raise channel.ChannelError("this client cannot show a form; ask your user in plain "
-                                       "words and run `xsm approve %s`: it keeps their reply as "
-                                       "the verdict, shows it to you, and approves when you run "
-                                       "it again on a yes" % shlex.quote(req["id"]))
+            raise channel.ChannelError("this client cannot show a form. "
+                                       + self.in_words(me, command, key))
         allow, deny = "allow", "deny"
         reply = self.ask_client("elicitation/create", {
             "message": "Worker %s is waiting for your permission:\n%s\nAllow it?"
@@ -610,17 +620,14 @@ class Server:
             answer = deny               # they said no to the form: the request is answered
         if answer is None:
             return ("your user did not answer (%s); the request is still waiting and the worker "
-                    "is blocked until it is answered. Ask your user in plain words and run "
-                    "`xsm approve %s`: it keeps their reply as the verdict, shows it to "
-                    "you, and approves when you run it again on a yes" % (
-                        why, shlex.quote(req["id"])))
+                    "is blocked until it is answered. %s" % (why, self.in_words(me, command, key)))
         workers.answer_asked(req["id"], answer == allow, me.get("ref"),
                              None if answer == allow else "your user said no")
         return "%s: worker %s's request [%s] %s" % (
             "allowed" if answer == allow else "denied", req["worker"], req["id"], req["summary"])
 
     def grant(self, where: tuple, me: dict, args: dict) -> str:
-        from . import workers
+        from . import config, workers
         options = sorted(set(o for o in (args.get("options") or []) if o in workers.DANGEROUS))
         if not options:
             raise channel.ChannelError("options must name full_access and/or trust_hooks")
@@ -643,15 +650,29 @@ class Server:
             "message": question, "requestedSchema": {"type": "object", "properties": {
                 "answer": {"type": "string", "title": "Permission", "enum": [deny, allow]}},
                 "required": ["answer"]}}) if "elicitation" in (self.client_caps or {}) else None
+        # What the agent runs without --grant, and the ask that command finds.
+        # workers.spawn adds outside_scope itself for a folder outside this
+        # session's scope; the other options are the flags it was given.
+        remote = isinstance(runtime, str) and runtime.startswith("remote:")
+        flags = [o for o in options if o in ("full_access", "trust_hooks")]
+        if remote:
+            command, asked = "xsm remote add %s --project <project>" % shlex.quote(runtime[7:]), \
+                ["remote"]
+        else:
+            command = " ".join(["xsm spawn", str(runtime), "--dir", shlex.quote(cwd)]
+                               + ["--" + o.replace("_", "-") for o in flags])
+            asked = flags + ([] if config.scope_for(me, {"cwd": cwd})[0] else ["outside_scope"])
+        key = ("grant", workers.grant_target(runtime, cwd, asked))
         if reply is None:
-            raise channel.ChannelError("this client cannot show a form; run the same `xsm spawn` "
-                                       "without --grant: it tells you what to ask your user, "
-                                       "keeps their reply as the verdict, shows it to you, and "
-                                       "starts the worker when you run it again on a yes")
+            raise channel.ChannelError("this client cannot show a form. "
+                                       + self.in_words(me, command, key))
         answer, why = self.answer(reply, [deny, allow])
         if answer is None:
             # Nobody chose, so there is no decision to put on record.
-            return "%s; nothing was granted — do not start that worker" % unanswered(why)
+            if why == DECLINED:
+                return "%s; nothing was granted — do not start that worker" % unanswered(why)
+            return ("%s; nothing was granted, so do not start that worker without their yes. %s"
+                    % (unanswered(why), self.in_words(me, command, key)))
         author = {"kind": "human", "name": os.environ.get("USER") or "person",
                   "via": "mcp-elicitation", "asked_by": me.get("ref"), "runtime": me.get("runtime")}
         verdict = "allowed" if answer == allow else "refused"

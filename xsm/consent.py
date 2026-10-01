@@ -46,8 +46,14 @@ verdict, exactly as a typed reply would be. What the hook receives was read from
 a transcript: the tool's own result is {"questions", "answers": {question:
 label or the person's own words}, "annotations": {question: {"notes"?}}}.
 
-An ask leaves files behind: the pending file holds up to 1000 characters of the
-person's words, and flock's file stays. Both go when the ask is used or has
+An MCP form tool that gets no answer (no form, a decline the client never showed,
+a dismissal) records the ask itself (`ask`), under the key its CLI command will
+use, and tells the agent to ask now. Telling it to run the command and then ask
+made the person say yes twice: their first "yes" had no ask to attach to
+(2026-10-01, Codex).
+
+An ask leaves files behind: the pending file holds up to VERDICT_MAX characters of
+the person's words, and flock's file stays. Both go when the ask is used or has
 expired (while the lock is held, so a waiter on the old lock starts over on the
 new one), and `prune` sweeps the ones nobody came back to.
 """
@@ -68,6 +74,10 @@ TTL = 600
 # ask alive for hours and an unrelated later message became its verdict. This
 # counts from the ask itself (2026-10-01).
 ASK_MAX = 1800
+# What a verdict keeps of the person's words. A form of several questions had
+# its tail cut at 1000 (2026-10-01); answers_text shortens the questions first.
+VERDICT_MAX = 4000
+QUESTION_MAX = 200
 # A reply shown to the agent passes no sooner than this after it was shown, on
 # a later run: `xsm unblock X || xsm unblock X` on one line showed the reply
 # and used it in the same breath, before the agent could read it (2026-10-01).
@@ -75,6 +85,10 @@ SHOW_DELAY = 1.0
 # How long a run waits for another that holds the lock of an ask; then it goes
 # on unlocked, as it does where the folder cannot be written (2026-10-01).
 LOCK_WAIT = 5.0
+# A lock file with no ask is an orphan only after this long: a run makes the
+# lock a moment before it writes the ask, and a sweep in between would take it
+# from under the run (2026-10-01).
+LOCK_GRACE = 5.0
 VERBS = ("link", "join", "leave", "reach")
 # A Codex prompt as typed: `$xsm link <folder>`.
 CODEX_RE = re.compile(r"\A\s*\$xsm[ \t]+(%s)(?![^ \t\n])[ \t]*([^\n]*)" % "|".join(VERBS))
@@ -85,11 +99,13 @@ CLAUDE_COMMANDS = ("xsm", "xsm:xsm")
 # What the harness writes into a prompt is not the person answering: a
 # background task's completion, a hook's or a command's echo, a peer message.
 # A task completion was stored as the verdict (measured 2026-10-01). The
-# prefixes are the tags Claude Code and xsm use; any other lowercase-hyphenated
-# tag counts when it is also closed.
+# prefixes are the tags Claude Code and xsm use, and Codex's (underscores);
+# any other lowercase tag counts when it is also closed.
 HARNESS_PREFIXES = ("<task-notification", "<system-reminder", "<command-", "<local-command",
-                    "<bash-", "<user-prompt-submit-hook", "<cross-session-message")
-TAG_RE = re.compile(r"\A<([a-z][a-z0-9]*(?:-[a-z0-9]+)+)[\s>]")
+                    "<bash-", "<user-prompt-submit-hook", "<cross-session-message",
+                    "<turn_aborted", "<user_shell_command", "<subagent_notification",
+                    "<environment_context", "<hook_prompt")
+TAG_RE = re.compile(r"\A<([a-z][a-z0-9_-]*)[\s>]")
 # A slash command (`/clear`, `/model opus`) is not an answer; a path ("/tmp/x") is.
 SLASH_RE = re.compile(r"\A/[A-Za-z][\w:.-]*(?:\s|\Z)")
 
@@ -207,11 +223,14 @@ def not_a_reply(text: str) -> bool:
 
 
 def answers_text(data: dict) -> str | None:
-    """The person's choices in an AskUserQuestion result, one `"<question>" ->
-    "<answer>"` per question (the answer is the option's label, or what they
-    wrote under Other), with their notes when they gave any. From the hook's
-    `tool_response`. Not `tool_input.answers`, which only a hook fills in. A
-    result that is plain text comes through as it is."""
+    """The person's choices in an AskUserQuestion result, one `<question> ->
+    <answer>` per question (the answer is the option's label, or what they
+    wrote under Other), with their notes when they gave any. Not quoted: the
+    show step quotes the whole reply, and nested quotes read as `""Q" -> "A""`
+    (2026-10-01). From the hook's `tool_response`, which carries the answers
+    (Claude Code 2.1.286 also puts them in `tool_input`, so either would do). A
+    result that is plain text comes through as it is. Past VERDICT_MAX the
+    questions are shortened, never the answers."""
     out = data.get("tool_response")
     if isinstance(out, list):
         out = " ".join(b.get("text") or "" for b in out if isinstance(b, dict))
@@ -220,15 +239,19 @@ def answers_text(data: dict) -> str | None:
     if not isinstance(out, dict) or not isinstance(out.get("answers"), dict):
         return None
     notes = out.get("annotations") if isinstance(out.get("annotations"), dict) else {}
-    parts = []
+    rows = []
     for question, answer in out["answers"].items():
-        part = '"%s" -> "%s"' % (str(question)[:200], answer)
         note = (notes.get(question) or {}).get("notes") if isinstance(notes.get(question), dict) \
             else None
+        tail = " -> %s" % answer
         if isinstance(note, str) and note.strip():
-            part += " (notes: %s)" % note.strip()
-        parts.append(part)
-    return "; ".join(parts) or None
+            tail += " (notes: %s)" % note.strip()
+        rows.append((str(question), tail))
+    if not rows:
+        return None
+    room = (VERDICT_MAX - sum(len(t) + 2 for _, t in rows)) // len(rows)
+    limit = min(QUESTION_MAX, max(room, 20))
+    return "; ".join((q if len(q) <= limit else q[:limit - 3] + "...") + t for q, t in rows)
 
 
 def record(me: dict | None, data: dict) -> dict | None:
@@ -262,8 +285,8 @@ def record(me: dict | None, data: dict) -> dict | None:
 
 def _fresh_pending(me: dict | None) -> tuple:
     """(path, entry) of this session's unexpired request, or (None, None). An
-    expired one is removed here: it holds up to 1000 characters of the person's
-    words. Called with the lock held."""
+    expired one is removed here: it holds up to VERDICT_MAX characters of the
+    person's words. Called with the lock held."""
     if not me or not me.get("ref"):
         return None, None
     p = _pending_path(me["ref"])
@@ -292,7 +315,7 @@ def note_verdict(me: dict | None, text: str) -> bool:
             p, entry = _fresh_pending(me)
             if not p:
                 return False
-            entry.update({"verdict": text.strip()[:1000], "verdict_t": time.time(),
+            entry.update({"verdict": text.strip()[:VERDICT_MAX], "verdict_t": time.time(),
                           "shown": False})
             paths.write_json(p, entry, mode=0o600)
     except OSError:
@@ -308,78 +331,119 @@ def _wanted(me: dict, verb: str, target: str, here: str | None) -> tuple:
     return resolve(verb, target, cwd), resolve(verb, here, cwd) if here else None
 
 
+def digest(*parts) -> str:
+    """A short stable name for what is being decided (a decision's channel and
+    text, an endorsement), so the same command run again finds the same ask.
+    The CLI keys its ask with it, and so does the MCP tool that names that
+    command when its form cannot be answered (ask)."""
+    import hashlib
+    return hashlib.sha256("\0".join(str(p or "") for p in parts).encode()).hexdigest()[:16]
+
+
+def _matches(entry: dict, verb: str, want: str, want_here: str | None) -> bool:
+    """Whether a pending ask is for exactly this."""
+    return entry.get("verb") == verb and want == entry.get("target") and not (
+        want_here and entry.get("here") and want_here != entry["here"])
+
+
+# Appended to what the agent is shown with a reply an older hook stored. The
+# hooks of a session started before an update keep running the old code, and
+# 0.4.14's kept only the first message after an ask (new ones mark theirs
+# `shown`, which an old one never writes; 2026-10-01).
+OLD_HOOK = ("Note: this session's xsm hooks are older than this xsm command, so only their first "
+            "message after the ask was kept. If they said anything else since, it is not here, "
+            "and you must not run this again on it: tell them a new session is needed for the "
+            "update, or use the MCP form tool if there is one.")
+
+
 def _take(me: dict, verb: str, want: str, want_here: str | None) -> tuple:
-    """take_verdict's step, with the lock held. An OSError from it means the
-    reply could not be marked or used: the folder cannot be written."""
+    """take_or_request's step, with the lock held: (reply, go, how it was
+    kept). An OSError from it means the reply could not be marked or used: the
+    folder cannot be written."""
     p, entry = _fresh_pending(me)
-    if not p or entry.get("verdict") is None or entry.get("verb") != verb:
-        return None, False
-    if want != entry.get("target"):
-        return None, False
-    if want_here and entry.get("here") and want_here != entry["here"]:
-        return None, False
+    if not p or entry.get("verdict") is None or not _matches(entry, verb, want, want_here):
+        return None, False, True
     now = time.time()
     if not entry.get("shown"):
+        old = "shown" not in entry
         entry.update({"shown": True, "shown_t": now})
         paths.write_json(p, entry, mode=0o600)
-        return entry["verdict"], False
+        return entry["verdict"], False, OLD_HOOK if old else True
     if now - float(entry.get("shown_t") or 0) < SHOW_DELAY:
-        return entry["verdict"], False
+        return entry["verdict"], False, True
     try:
         os.unlink(p)
     except FileNotFoundError:
-        return None, False              # used by another reader first
+        return None, False, True        # used by another reader first
     _drop(p)                            # the lock too
-    return entry["verdict"], True
+    return entry["verdict"], True, True
 
 
-def take_verdict(me: dict | None, verb: str, target: str, here: str | None = None) -> tuple:
-    """What the person said to the request for exactly this, in two steps
-    (user decision, 2026-10-01: xsm does not read the words, so the agent
-    reads them before anything is done on them). Returns (reply, go):
-    (None, False) when there is no such request or no reply yet, or when the
-    state folder cannot be written; (reply, False) for a reply the agent has
-    not seen, which is marked as shown now and which the caller refuses with;
-    (reply, True) for the reply that was shown and is still the latest and was
-    shown at least SHOW_DELAY ago, which is used up: the caller goes ahead,
-    once. A rerun sooner than that gets the reply shown again, so a line that
-    runs the command twice does not pass on its own showing. The read and the
-    write are one step (_locked)."""
-    if not me or not me.get("ref") or not os.path.exists(_pending_path(me["ref"])):
-        return None, False
-    want, want_here = _wanted(me, verb, target, here)
-    try:
-        with _locked(_pending_path(me["ref"])):
-            return _take(me, verb, want, want_here)
-    except OSError:
-        return None, False
+def _record(me: dict, verb: str, want: str, want_here: str | None) -> None:
+    """Record the ask, with the lock held. One already on record for exactly
+    this stays as it is, with the time it was made: a run before the person
+    was asked pushed ASK_MAX out each time (2026-10-01)."""
+    _, entry = _fresh_pending(me)
+    if entry and _matches(entry, verb, want, want_here):
+        return
+    paths.write_json(_pending_path(me["ref"]), {
+        "verb": verb, "target": want, "here": want_here, "cwd": me.get("cwd") or "",
+        "t": time.time(), "session_id": str(me.get("session_id") or ""),
+        "verdict": None}, mode=0o600)
 
 
 def take_or_request(me: dict | None, verb: str, target: str, here: str | None = None) -> tuple:
-    """take_verdict, and when there is nothing to take, record that the agent
-    asked to `verb` `target` and must ask its user (their latest answer then
-    becomes the verdict, note_verdict). One locked step: a reply landing
+    """What the person said to the request for exactly this, in two steps
+    (user decision, 2026-10-01: xsm does not read the words, so the agent
+    reads them before anything is done on them), and when there is nothing to
+    take, a record that the agent asked to `verb` `target` and must ask its
+    user (their latest answer then becomes the verdict, note_verdict).
+    Returns (reply, go, kept):
+
+    - (None, False, kept): no such request or no reply yet. `kept` says that an
+      ask is on record. Not kept, the reply cannot be kept here (no registered
+      session, a worker, a state folder that cannot be written) and the caller
+      does not promise it.
+    - (reply, False, kept): a reply the agent has not seen, marked as shown now,
+      which the caller refuses with. `kept` is OLD_HOOK, a string to show with
+      it, for a reply an older hook stored.
+    - (reply, True, kept): the reply that was shown, is still the latest and was
+      shown at least SHOW_DELAY ago, which is used up: the caller goes ahead,
+      once. A rerun sooner than that gets the reply shown again, so a line that
+      runs the command twice does not pass on its own showing.
+
+    One locked step, the read and the write together (_locked): a reply landing
     between a take and a separate request was overwritten unseen (adversarial
-    check, 2026-10-01). Returns (reply, go, kept), kept saying that an ask is on
-    record. Not kept: the reply cannot be kept here (no registered session, a
-    worker, a state folder that cannot be written), and the caller does not
-    promise it."""
+    check, 2026-10-01)."""
     if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not target:
         return None, False, False
     want, want_here = _wanted(me, verb, target, here)
-    p = _pending_path(me["ref"])
     try:
-        with _locked(p):
-            reply, go = _take(me, verb, want, want_here)
-            if reply is not None:
-                return reply, go, True
-            paths.write_json(p, {
-                "verb": verb, "target": want, "here": want_here, "cwd": me.get("cwd") or "",
-                "t": time.time(), "session_id": str(me.get("session_id") or ""),
-                "verdict": None}, mode=0o600)
+        with _locked(_pending_path(me["ref"])):
+            reply, go, kept = _take(me, verb, want, want_here)
+            if reply is None:
+                _record(me, verb, want, want_here)
+            return reply, go, kept
     except OSError:
         return None, False, False
-    return None, False, True
+
+
+def ask(me: dict | None, verb: str, target: str, here: str | None = None) -> bool:
+    """Record that `verb` on `target` is being put to the person, as the CLI
+    does at its first refusal. For a form that could not be answered: the agent
+    then asks in plain words, and without this their "yes" has no ask to attach
+    to (note_verdict), or attaches to an unrelated one (2026-10-01). The CLI
+    command that follows finds this ask by the same key. True when an ask is on
+    record, with the same limits as take_or_request."""
+    if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not target:
+        return False
+    want, want_here = _wanted(me, verb, target, here)
+    try:
+        with _locked(_pending_path(me["ref"])):
+            _record(me, verb, want, want_here)
+    except OSError:
+        return False
+    return True
 
 
 def _stale(p: str, now: float, typed: bool) -> bool:
@@ -394,12 +458,39 @@ def _stale(p: str, now: float, typed: bool) -> bool:
         return False
 
 
+def _drop_typed(p: str, now: float) -> bool:
+    """Remove a typed consent past TTL. Nothing locks these (a hook writes one
+    with a rename, `take` unlinks it), so it is judged where it was moved to: a
+    fresh one written since it was last read is put back, not deleted."""
+    claim = "%s.%d.prune.json" % (p[:-len(".json")], os.getpid())
+    try:
+        os.rename(p, claim)
+    except OSError:
+        return False
+    if _stale(claim, now, typed=True):
+        os.unlink(claim)
+        return True
+    try:
+        os.link(claim, p)               # not if a newer one has been written
+    except OSError:
+        pass
+    os.unlink(claim)
+    return False
+
+
+def _young(p: str, now: float) -> bool:
+    try:
+        return now - os.path.getmtime(p) < LOCK_GRACE
+    except OSError:
+        return False
+
+
 def prune(now: float | None = None, dry_run: bool = False) -> list:
     """Remove what asks left behind: a pending file past its window (it keeps
-    up to 1000 characters of the person's words), a lock with no ask, a typed
-    consent past TTL. An ask in use is left: it is taken under its lock, without
-    waiting, and judged again once held. Returns the names removed (or that
-    would be)."""
+    up to VERDICT_MAX characters of the person's words), a lock with no ask
+    (not a young one: see LOCK_GRACE), a typed consent past TTL. An ask in use
+    is left: it is taken under its lock, without waiting, and judged again once
+    held. Returns the names removed (or that would be)."""
     now = time.time() if now is None else now
     folder = paths.path(ASKED)
     try:
@@ -413,18 +504,13 @@ def prune(now: float | None = None, dry_run: bool = False) -> list:
             continue                    # went with the ask before it
         if name.endswith(".pending.json.lock"):
             lock, pending = p, p[:-len(".lock")]
-            stale = not os.path.exists(pending)
+            stale = not os.path.exists(pending) and not _young(p, now)
         elif name.endswith(".pending.json"):
             lock, pending = p + ".lock", p
             stale = _stale(p, now, typed=False)
         elif name.endswith(".json"):
-            if _stale(p, now, typed=True):
+            if _stale(p, now, typed=True) and (dry_run or _drop_typed(p, now)):
                 removed.append(name)
-                if not dry_run:
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
             continue
         else:
             continue
@@ -445,14 +531,18 @@ def prune(now: float | None = None, dry_run: bool = False) -> list:
     return removed
 
 
+def _how(runtime: str | None) -> str:
+    """How the agent may ask. A Claude Code agent may use its question tool: the
+    answer it gets is kept as the reply (answers_text); no other runtime's is."""
+    return "in plain words, or with your question tool (AskUserQuestion)" if runtime == "claude" \
+        else "in plain words"
+
+
 def asks(what: str, tail: str = "", runtime: str | None = None) -> str:
     """What the agent is told when nobody has been asked yet: ask first, then
     run the command again to be shown the reply, then once more on a yes. The
-    order was left implicit and agents reran before asking (2026-10-01). A
-    Claude Code agent may ask with its question tool: the answer it gets is kept
-    as the reply (answers_text); no other runtime's is."""
-    how = "in plain words, or with your question tool (AskUserQuestion)" if runtime == "claude" \
-        else "in plain words"
+    order was left implicit and agents reran before asking (2026-10-01)."""
+    how = _how(runtime)
     return ("%s needs your user's yes. First ask them, %s, whether to go ahead, and "
             "wait for their answer. After they answer, run this same command again: xsm keeps "
             "their latest answer in this session as the verdict, and this run shows you that "
@@ -460,12 +550,31 @@ def asks(what: str, tail: str = "", runtime: str | None = None) -> str:
             "if it is a no or a question, leave it and answer them.%s" % (what, how, tail))
 
 
-def shown_refusal(reply: str, what: str) -> str:
+def shown_refusal(reply: str, what: str, kept=None) -> str:
     """What the agent is told with a reply it has not seen: the words, and
-    that this run did not go ahead."""
-    return ('your user replied: "%s". If that is a yes to %s, run this same command again to '
+    that this run did not go ahead. `kept` is take_or_request's: a string
+    (OLD_HOOK) is added."""
+    text = ('your user replied: "%s". If that is a yes to %s, run this same command again to '
             'go ahead; if it is a no or a question, do not: answer them, and their next '
             'message replaces it.' % (reply, what[:1].lower() + what[1:]))
+    return text + " " + kept if isinstance(kept, str) else text
+
+
+def in_words(command: str, kept: bool, runtime: str | None = None) -> str:
+    """What the agent is told when a form could not be answered: ask in plain
+    words, and the command is the way to act on the answer. With the ask on
+    record (`ask`, `kept`) they ask now and the command shows the reply. Without
+    one, the command goes first, because it is what records the ask and an
+    answer before it has nothing to attach to (2026-10-01: the person said yes
+    twice)."""
+    if kept:
+        return ("Ask your user now, %s, whether to go ahead. After they answer, run `%s` in your "
+                "shell: it shows you their reply without acting on it. If it is a yes, run it once "
+                "more to go ahead; if it is a no or a question, leave it and answer them."
+                % (_how(runtime), command))
+    return ("Run `%s` in your shell first: it records that you are asking and tells you what to "
+            "ask. Then ask your user, %s, whether to go ahead; after they answer, run it again to "
+            "be shown their reply, and once more on a yes." % (command, _how(runtime)))
 
 
 def cannot_keep(what: str, form_tool: str | None) -> str:

@@ -580,26 +580,35 @@ def _drop_reach_rows(match) -> int:
 # otherwise allowed project. Blocking only narrows, so anyone may add a ref;
 # lifting a block widens again, so only a person may.
 
+def bare_ref(ref) -> str:
+    """A session ref as `list` shows it: no `ref:` prefix, no spaces. 0.4.14
+    stored `ref:abc123` as typed, which never matched a session (2026-10-01)."""
+    ref = str(ref).strip()
+    return ref[len("ref:"):].strip() if ref.startswith("ref:") else ref
+
+
 def blocked() -> set:
-    return set(load().get("deny") or [])
+    return {bare_ref(r) for r in load().get("deny") or [] if isinstance(r, str)}
 
 
 def block(ref: str) -> bool:
     raw = _raw()
     refs = raw.setdefault("deny", [])
-    if ref in refs:
+    if bare_ref(ref) in {bare_ref(r) for r in refs}:
         return False
-    refs.append(ref)
+    refs.append(bare_ref(ref))
     _save(raw)
     return True
 
 
 def unblock(ref: str) -> bool:
+    """Lifts the block, in either form it may have been stored in."""
     raw = _raw()
     refs = raw.get("deny") or []
-    if ref not in refs:
+    kept = [r for r in refs if bare_ref(r) != bare_ref(ref)]
+    if len(kept) == len(refs):
         return False
-    raw["deny"] = [r for r in refs if r != ref]
+    raw["deny"] = kept
     _save(raw)
     return True
 
