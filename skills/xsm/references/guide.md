@@ -406,6 +406,55 @@ reply as the verdict. The reverse also holds: when the shell is sandboxed and re
 the MCP tool (see Sending). Tell your user a session showing `orphaned` in
 `xsm doctor` needs restarting.
 
+### When versions are mixed
+
+xsm has several parts that update at different times: the `xsm` command, the
+hooks and the MCP server a session started with, this skill as it was loaded,
+and xsm on another machine. After an update an open session keeps its old
+hooks and server until it restarts. Not every mix works, so recognize it and
+handle it instead of retrying.
+
+**Signs.** Text from xsm that disagrees with this guide or with what just
+happened: a refusal that sends your user to a terminal or hands you `--dir`; a reply
+xsm shows you that is not the latest thing your user said; a `this session's
+xsm hooks are older than this xsm command` note; a command that is missing.
+
+**Check.** `xsm --version` prints the version and the path of the command you
+ran. `xsm doctor` prints the same as its `cli` line, any other `xsm` on the
+PATH, each plugin's version and folder (`plugin … at <folder>`), `older than
+this CLI` (or `may be older`) on a plugin behind it, and `orphaned` for a
+server whose folder an update removed.
+
+**First fix: run the newest command by its full path.** You do not need to
+wait for a new session to get the new command. Take the folder from the
+`plugin … at <folder>` line with the highest version (or the checkout of a
+direct install) and run `<folder>/bin/xsm <command>`. That fixes an old or
+missing `xsm` on the PATH, old instructions from an MCP tool, and old
+instructions in a skill loaded before the update. When this guide and a
+refusal from the newest command disagree, follow the refusal.
+
+What the full path cannot fix, because it lives in the session, not the
+command:
+
+| Sign | Why | What to do |
+|---|---|---|
+| The reply xsm shows is not what your user said last, or it says the hooks are older | the session's hook records replies the old way (only the first message) | Do not run it again on that reply. Use the MCP form tool for that decision if there is one; otherwise tell your user a new session is needed for this decision |
+| Claude Code: after an AskUserQuestion answer, xsm still asks for their yes | the session has no hook for that tool yet | Ask in plain words in the chat; the reply is kept |
+| An `xsm_*` tool answers with old text or fails; `orphaned` in doctor | the server is the one the session started with | Use the shell, newest command by full path |
+
+**Updating.** Ask your user whether to update; on a yes you run it. Codex
+plugin: `codex plugin marketplace upgrade xsm` then `codex plugin add
+xsm@xsm`. Direct install: `xsm install --refresh`. A Claude Code plugin updates
+with `/plugin update xsm@xsm`, which only your user can type in their session;
+ask them whether they want it, say what it does, and do not hand them other
+commands. Either way, say that sessions already open keep the old hooks until
+they restart.
+
+**Never** edit or delete files under `~/.xsm` to get past a refusal, and never
+run an older `xsm` to get a laxer answer. Another machine on an older version
+can relay old wording that says a block is for a person alone to lift: ask
+your user, then run `xsm unblock <ref>` on this machine yourself.
+
 ## What this does not do
 
 No remote machines, no MCP server, no background process, no channel history.

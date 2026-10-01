@@ -73,7 +73,7 @@ usage: /xsm list | who | log | projects | doctor | send <target> <message> | lin
 When you loaded this skill yourself, or your user asked in words, read
 [references/guide.md](references/guide.md) before you choose a command or write
 an address. It covers sessions, projects, sending and replying, the channel,
-shared documents, other machines, workers, and what to do when something breaks.
+shared documents, other machines, workers, breakage and mixed versions.
 
 One refusal is common enough to know before you open it. From a sandboxed
 shell (a background worker, a Codex workspace-write session) `xsm send` to a
