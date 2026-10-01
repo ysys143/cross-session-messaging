@@ -246,12 +246,7 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
         if verdict is not None and not go:
             raise WorkerError(consent.shown_refusal(verdict, what, kept))
         if verdict is not None:
-            record = {"event": "consent", "verb": "grant", "target": target, "verdict": verdict,
-                      "by": (caller or {}).get("name")}
-            if isinstance(kept, str):
-                record["old_hooks"] = True      # an older hook kept this reply
-            paths.append_jsonl("decisions.jsonl", record)
-            print(consent.approved_line(verdict, kept))
+            print(consent.approved("grant", target, verdict, kept, (caller or {}).get("name")))
             grant = create_grant((caller or {}).get("ref"), runtime, cwd, options,
                                  "verdict: " + verdict)
             p = paths.path(GRANTS, grant["id"] + ".json")

@@ -297,8 +297,7 @@ _verdict: str | None = None
 
 def _by() -> str:
     """Who decided: the person's own reply when one was given, else the user."""
-    person = os.environ.get("USER") or "person"
-    return "%s, replying: %s" % (person, _verdict) if _verdict else person
+    return consent.by(_verdict)
 
 
 def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
@@ -332,12 +331,7 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
         return consent.shown_refusal(verdict, what, kept)
     if verdict is not None:
         _verdict = verdict
-        record = {"event": "consent", "verb": key[0], "target": key[1], "verdict": verdict,
-                  "by": (me or {}).get("name")}
-        if isinstance(kept, str):
-            record["old_hooks"] = True          # an older hook kept this reply
-        paths.append_jsonl("decisions.jsonl", record)
-        print(consent.approved_line(verdict, kept))
+        print(consent.approved(key[0], key[1], verdict, kept, (me or {}).get("name")))
         return None
     if not kept:
         return consent.cannot_keep(what, mcp_tool)
@@ -627,21 +621,32 @@ def cmd_homes(args) -> int:
 
 def cmd_send(args) -> int:
     body = args.text
-    if args.text_file:
-        body = sys.stdin.read() if args.text_file == "-" else open(args.text_file).read()
-    if not body:
-        print("nothing to send: pass --text or --text-file", file=sys.stderr)
-        return USAGE
-    if args.outcome and args.kind != "reply":
-        print("refused: --outcome belongs to the reply that closes a task, not to %s"
-              % args.kind, file=sys.stderr)
-        return REFUSED
-    result = send.send(args.target, body, kind=args.kind, reply_to=args.reply_to,
+    if args.held:
+        if args.target or args.text or args.text_file or args.resend:
+            print("refused: --held sends the message that was kept, as it was kept: give it no "
+                  "target, text or --resend", file=sys.stderr)
+            return USAGE
+    else:
+        if not args.target:
+            print("usage: xsm send <target> --text \"...\"", file=sys.stderr)
+            return USAGE
+        if args.text_file:
+            body = sys.stdin.read() if args.text_file == "-" else open(args.text_file).read()
+        if not body:
+            print("nothing to send: pass --text or --text-file", file=sys.stderr)
+            return USAGE
+        if args.outcome and args.kind != "reply":
+            print("refused: --outcome belongs to the reply that closes a task, not to %s"
+                  % args.kind, file=sys.stderr)
+            return REFUSED
+    result = send.send(args.target or "", body or "", kind=args.kind, reply_to=args.reply_to,
                        priority=args.priority, wait=args.wait, outcome=args.outcome,
-                       msg_id=args.resend, resend=bool(args.resend))
+                       msg_id=args.resend, resend=bool(args.resend), held=args.held)
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=False))
     else:
+        for note in result.notes:
+            print(note)
         print("%s: %s" % (result.status, result.reason or result.msg_id or ""))
         if result.candidates and "resume it with" not in (result.reason or "") \
                 and "has not registered" not in (result.reason or ""):
@@ -1752,10 +1757,10 @@ def cmd_prune(args) -> int:
     verb = "would remove" if args.dry_run else "removed"
     lines = removed.get("telemetry") or {}
     print("%s %d session pointer(s), %d ledger record(s), %d held message(s), %d inbox copy(ies), "
-          "%d telemetry line(s), %d ask file(s)" % (
+          "%d telemetry line(s), %d ask file(s), %d held send(s)" % (
               verb, len(removed["sessions"]), len(removed["ledger"]), len(removed["held"]),
               len(removed.get("inbox") or []), sum(lines.values()),
-              len(removed.get("asked") or [])))
+              len(removed.get("asked") or []), len(removed.get("outbox") or [])))
     for name in removed["sessions"]:
         print("  session %s" % name)
     for name, count in sorted(lines.items()):
@@ -1958,7 +1963,8 @@ def build_parser() -> argparse.ArgumentParser:
     prune.set_defaults(func=cmd_prune)
 
     snd = sub.add_parser("send", help="send a message to another session")
-    snd.add_argument("target", help="name, name@home, name [ref], ref:xxxxxx, claude:ID, codex:ID")
+    snd.add_argument("target", nargs="?",
+                     help="name, name@home, name [ref], ref:xxxxxx, claude:ID, codex:ID")
     snd.add_argument("--text")
     snd.add_argument("--text-file", help="file path, or - for stdin")
     snd.add_argument("--kind", choices=list(envelope.KINDS), default="note")
@@ -1969,6 +1975,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="send the message with this id again, unchanged: same target, same text "
                           "and kind, and only while it is queued, unknown or error. The receiver "
                           "drops an id it already has, so it cannot run twice")
+    snd.add_argument("--held", metavar="ID",
+                     help="send the message a refused send kept under this id (out of scope: it "
+                          "waits for your user's yes to connect, then goes with it)")
     snd.add_argument("--priority", choices=["next", "now", "later"], default="next")
     snd.add_argument("--wait", type=float, default=0.0,
                      help="seconds to wait for the receiver's own record of delivery")

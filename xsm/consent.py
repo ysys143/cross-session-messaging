@@ -556,7 +556,7 @@ def prune(now: float | None = None, dry_run: bool = False) -> list:
     return removed
 
 
-def _how(runtime: str | None) -> str:
+def how(runtime: str | None) -> str:
     """How the agent may ask. A Claude Code agent may use its question tool: the
     answer it gets is kept as the reply (answers_text); no other runtime's is."""
     return "in plain words, or with your question tool (AskUserQuestion)" if runtime == "claude" \
@@ -567,12 +567,12 @@ def asks(what: str, tail: str = "", runtime: str | None = None) -> str:
     """What the agent is told when nobody has been asked yet: ask first, then
     run the command again to be shown the reply, then once more on a yes. The
     order was left implicit and agents reran before asking (2026-10-01)."""
-    how = _how(runtime)
     return ("%s needs your user's yes. First ask them, %s, whether to go ahead, and "
             "wait for their answer. After they answer, run this same command again: xsm keeps "
             "their latest answer in this session as the verdict, and this run shows you that "
             "reply without acting on it. If it is a yes, run the command once more to go ahead; "
-            "if it is a no or a question, leave it and answer them.%s" % (what, how, tail))
+            "if it is a no or a question, leave it and answer them.%s"
+            % (what, how(runtime), tail))
 
 
 def shown_refusal(reply: str, what: str, kept=None) -> str:
@@ -594,6 +594,24 @@ def approved_line(verdict: str, kept=None) -> str:
         " (old hooks: their first message after the ask)" if isinstance(kept, str) else "")
 
 
+def approved(verb: str, target: str, verdict: str, kept=None, name: str | None = None) -> str:
+    """A run goes ahead on the person's reply: record it (decisions.jsonl,
+    `event: consent`) and return the line the run prints. The CLI commands,
+    workers.use_grant and the one-yes send (connect.py) all say it this way."""
+    record = {"event": "consent", "verb": verb, "target": target, "verdict": verdict, "by": name}
+    if isinstance(kept, str):
+        record["old_hooks"] = True              # an older hook kept this reply
+    paths.append_jsonl("decisions.jsonl", record)
+    return approved_line(verdict, kept)
+
+
+def by(verdict: str | None) -> str:
+    """Who decided, as a link, join or reach records it: the person's own reply
+    when one was given, else the user."""
+    person = os.environ.get("USER") or "person"
+    return "%s, replying: %s" % (person, verdict) if verdict else person
+
+
 def in_words(command: str, kept: bool, runtime: str | None = None) -> str:
     """What the agent is told when a form could not be answered: ask in plain
     words, and the command is the way to act on the answer. With the ask on
@@ -605,10 +623,10 @@ def in_words(command: str, kept: bool, runtime: str | None = None) -> str:
         return ("Ask your user now, %s, whether to go ahead. After they answer, run `%s` in your "
                 "shell: it shows you their reply without acting on it. If it is a yes, run it once "
                 "more to go ahead; if it is a no or a question, leave it and answer them."
-                % (_how(runtime), command))
+                % (how(runtime), command))
     return ("Run `%s` in your shell first: it records that you are asking and tells you what to "
             "ask. Then ask your user, %s, whether to go ahead; after they answer, run it again to "
-            "be shown their reply, and once more on a yes." % (command, _how(runtime)))
+            "be shown their reply, and once more on a yes." % (command, how(runtime)))
 
 
 def cannot_keep(what: str, form_tool: str | None) -> str:

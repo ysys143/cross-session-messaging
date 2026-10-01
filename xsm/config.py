@@ -265,13 +265,17 @@ def _worker_link(a: dict, b: dict) -> str | None:
     return None
 
 
+def joined_projects(session: dict, cfg: dict | None = None) -> set:
+    """The ids of the named projects the session's folder has joined."""
+    cfg = cfg or load()
+    return {s.get("id") for s in cfg.get("scopes", [])
+            if any(m.get("root") and member_matches(m, session) for m in s.get("members", []))}
+
+
 def _half_joined(a: dict, b: dict, cfg: dict) -> str:
     """When one side has joined a project the other has not, say which and what
     would open it — otherwise the refusal reads as if joining had no effect."""
-    def joined(session):
-        return {s.get("id") for s in cfg.get("scopes", [])
-                if any(m.get("root") and member_matches(m, session) for m in s.get("members", []))}
-    ja, jb = joined(a), joined(b)
+    ja, jb = joined_projects(a, cfg), joined_projects(b, cfg)
     notes = []
     for mine, other in ((ja - jb, b), (jb - ja, a)):
         for name in sorted(mine):

@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from contextlib import nullcontext
 
-from . import adapters, config, envelope, inbox, ledger, paths, registry, resolve
+from . import adapters, config, envelope, inbox, ledger, outbox, paths, registry, resolve
 
 
 class SendResult:
@@ -25,9 +25,12 @@ class SendResult:
         self.msg_id = msg_id
         self.target = target
         self.candidates = candidates or []
+        self.notes = []               # what a one-yes send did before it sent (connect.py)
 
     def as_dict(self) -> dict:
         out = {"status": self.status, "reason": self.reason, "id": self.msg_id}
+        if self.notes:
+            out["notes"] = list(self.notes)
         if self.target:
             out["to"] = "%s@%s" % (self.target.get("name"), self.target.get("alias"))
         if self.candidates:
@@ -36,15 +39,22 @@ class SendResult:
         return out
 
 
+# A held message has left once the receiving side has taken it, even to hold it.
+LEFT = ("delivered", "sent-unconfirmed", "held", "blocked")
+
+
 def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
          reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
          msg_id: str | None = None, outcome: str | None = None,
-         resend: bool = False) -> SendResult:
+         resend: bool = False, held: str | None = None) -> SendResult:
     """One span around the whole attempt, refusals included.
 
     A refusal is as worth timing as a delivery: "out of scope" and "target has
     no inbox socket" are the two things a caller actually hits, and neither
     shows up in a log that only records what succeeded.
+
+    `held` is the id of a message a refused send kept (outbox.py): it is sent
+    as it was kept, and the target, text and kind arguments are not read.
     """
     try:
         from . import telemetry
@@ -53,9 +63,13 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
     span_cm = telemetry.span("xsm.send", {"xsm.msg.kind": kind},
                              kind="PRODUCER") if telemetry else nullcontext()
     with span_cm as span:
+        ctx = {"notes": [], "held": None}
         result = _send(target_spec, body, sender=sender, kind=kind, reply_to=reply_to,
                        priority=priority, wait=wait, msg_id=msg_id, outcome=outcome,
-                       resend=resend, span=span)
+                       resend=resend, span=span, held=held, ctx=ctx)
+        result.notes = ctx["notes"]
+        if ctx["held"] and result.status in LEFT:
+            outbox.drop(ctx["held"])        # it went: the held copy must not send it twice
         if span is not None:
             span.set_attribute("xsm.result.status", result.status)
             if result.msg_id:
@@ -73,12 +87,22 @@ def send(target_spec: str, body: str, *, sender: dict | None = None, kind: str =
 def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str = "note",
           reply_to: str | None = None, priority: str = "next", wait: float = 0.0,
           msg_id: str | None = None, outcome: str | None = None, resend: bool = False,
-          span=None) -> SendResult:
+          span=None, held: str | None = None, ctx: dict | None = None) -> SendResult:
     sender = sender or registry.me()
+    ctx = ctx if ctx is not None else {"notes": [], "held": None}
     if not sender:
         return SendResult("refused", "this session is not registered; run `xsm doctor`")
     if resend and not msg_id:
         return SendResult("refused", "--resend needs the id of the message to send again")
+    if held:
+        rec = outbox.get(held, sender)
+        if not rec:
+            return SendResult("refused", "no message %s is held for this session (a refused "
+                              "send is kept for a day, by the session that sent it)" % held)
+        target_spec, body, kind = rec["spec"], rec["body"], rec["kind"]
+        reply_to, outcome, priority = rec.get("reply_to"), rec.get("outcome"), \
+            rec.get("priority") or "next"
+        msg_id, ctx["held"] = rec["id"], rec["id"]
 
     from . import remote
     local_spec, peer = remote.split_target(target_spec)
@@ -119,6 +143,18 @@ def _send(target_spec: str, body: str, *, sender: dict | None = None, kind: str 
                               sender.get("ref") if mine else target.get("ref")), target=target)
 
     scope, reason = config.scope_for(sender, target)
+    if not scope and not resend:
+        from . import connect
+        step = connect.offer(sender, target, target_spec, {
+            "body": body, "kind": kind, "reply_to": reply_to, "outcome": outcome,
+            "priority": priority}, reason)
+        if step is not None:
+            ctx["held"] = step.id
+            ctx["notes"] += step.notes
+            if not step.go:
+                return SendResult("refused", step.text, step.id, target)
+            msg_id = step.id
+            scope, reason = config.scope_for(sender, target)    # connected: send it now
     if not scope:
         return SendResult("refused", "out of scope: %s" % reason, target=target)
     if target.get("runtime") == "codex" and sandboxed():

@@ -20,7 +20,7 @@ import json
 import os
 import time
 
-from . import attempts, config, consent, identity, inbox, paths
+from . import attempts, config, consent, identity, inbox, outbox, paths
 
 STAMP = "last-prune"
 INTERVAL = 3600.0
@@ -87,6 +87,8 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
     # An ask nobody came back to keeps up to 1000 characters of the person's
     # last message, and its lock file stays (consent.py).
     removed["asked"] = consent.prune(now, dry_run)
+    # A refused send kept for its person's yes, which never came (outbox.py).
+    removed["outbox"] = outbox.prune(now, dry_run)
 
     # A copy for a Codex session that never read it: the queue item it
     # duplicates is gone with the session, so it goes with the pointer window.

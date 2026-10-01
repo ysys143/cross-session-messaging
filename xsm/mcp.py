@@ -80,7 +80,11 @@ TOOLS = [
                     "description": "the id of an earlier send that ended unknown or error: sends "
                                    "that same message again under its id, which the receiver "
                                    "drops if it already has it. Same target, kind and text only."},
-         "wait": {"type": "number", "default": 15}}, "required": ["target", "text"]}},
+         "held": {"type": "string",
+                  "description": "the id of a message a refused send kept (out of scope: it "
+                                 "waits for your user's yes to connect, then goes with it): "
+                                 "sends it as it was kept, so target and text are not needed."},
+         "wait": {"type": "number", "default": 15}}, "required": []}},
     {"name": "xsm_inbox",
      "description": ("Codex sessions: read messages other sessions sent you that are still "
                      "waiting. Codex takes them only between turns; while you are working, call "
@@ -369,8 +373,8 @@ class Server:
                               wait=float(args.get("wait") or 0),
                               outcome=args.get("outcome") if args.get("kind") == "reply" else None,
                               msg_id=args.get("resend") or None,
-                              resend=bool(args.get("resend")))
-            return "%s: %s" % (r.status, r.reason or "")
+                              resend=bool(args.get("resend")), held=args.get("held") or None)
+            return "\n".join(list(r.notes) + ["%s: %s" % (r.status, r.reason or "")])
         if name == "xsm_doc_endorse":
             return self.endorse(me, args)
         if name == "xsm_inbox":
