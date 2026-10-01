@@ -941,8 +941,38 @@
    }
   },
   {
-   "id": "unregistered-sender-is-refused",
-   "why": "Registration is consent: a session that never ran the hook cannot be a sender either.",
+   "id": "unregistered-sender-passes-noted",
+   "why": "A person who pastes an xsm log into their own prompt writes a header nobody registered, and a conversation they want is not refused for it (user decision, 2026-10-02). It passes noted as unchecked, a claim and not a fact; fail_open = false is the refusal below.",
+   "sessions": [
+    {
+     "name": "recv",
+     "alias": "claude-4",
+     "session_id": "r1",
+     "cwd": "{tmp}/ws"
+    }
+   ],
+   "receiver": "r1",
+   "message": {
+    "kind": "xsm",
+    "from": "ghost",
+    "body": "hi"
+   },
+   "expect": {
+    "output": "allow",
+    "context_contains": [
+     "could not check this message",
+     "not a session this machine knows",
+     "no record of that message being sent",
+     "not from your user"
+    ]
+   }
+  },
+  {
+   "id": "unregistered-sender-is-refused-when-fail-open-is-off",
+   "why": "Registration is consent: with fail_open = false a session that never ran the hook cannot be a sender either (the rule as it was before 2026-10-02).",
+   "config": {
+    "fail_open": false
+   },
    "sessions": [
     {
      "name": "recv",

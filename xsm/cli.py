@@ -817,6 +817,16 @@ def _held_deliver(args) -> int:
         print("refused: it was held for another session (ref:%s); that session delivers it"
               % entry["receiver_ref"], file=sys.stderr)
         return REFUSED
+    # A hold from before receiver_ref was kept names its session only: it goes to the
+    # session of that name, or to the person running this themselves (2026-10-02).
+    if not entry.get("receiver_ref") and not workers.human_terminal() and \
+            (not me or entry.get("receiver") not in (me.get("name"), "%s@%s" % (
+                me.get("name"), me.get("alias")))):
+        print("refused: an older xsm held this %s" % (
+            "for %s, not for this session; that session delivers it" % entry["receiver"]
+            if entry.get("receiver") else "without saying which session it was for"),
+            file=sys.stderr)
+        return REFUSED
     # The sender's own words, once and short: they go into the agent's context.
     who = " ".join(str(entry.get("from") or "an unknown sender").split())[:60]
     why = _person_or_refuse("delivering the held message %s from %s to this session (it was "
@@ -2337,7 +2347,7 @@ def main(argv=None) -> int:
         # reads still works; what writes says why, below.
         if not paths.blocked_write(err):
             raise
-    consent.supplied = None
+    consent.supplied = consent.used_via = None
     if getattr(args, "reply", None):
         if config.policy("reply_flag"):
             consent.supplied = args.reply

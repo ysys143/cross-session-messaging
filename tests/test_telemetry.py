@@ -277,6 +277,8 @@ class ReceiveInstrumentationTest(TempState):
 
     def test_a_blocked_message_is_marked_and_counted(self):
         from xsm import envelope, paths, telemetry
+        # An unknown sender passes noted unless fail_open is off (2026-10-02).
+        paths.write_json(paths.path("config.json"), {"fail_open": False})
         sender = {"name": "send", "alias": "claude-3", "ref": "aaaaaa", "session_id": "s1"}
         out = self._gate(envelope.build("hi", msg_id="m1", sender=sender, scope="dir:x"))
         assert out is not None, "a peer message always gets a decision"

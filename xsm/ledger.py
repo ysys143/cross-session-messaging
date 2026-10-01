@@ -75,12 +75,17 @@ def reached(msg_id: str) -> None:
 
 
 def receipt(msg_id: str, decision: str, receiver: dict | None, reason: str = "",
-            outcome: str | None = None) -> None:
-    """Written by the receiving hook. `decision` is delivered | held | blocked."""
+            outcome: str | None = None, from_ref: str | None = None,
+            body_sha: str | None = None) -> None:
+    """Written by the receiving hook. `decision` is delivered | held | blocked.
+    `from_ref` and `body_sha` say whose message and which text was delivered, so a
+    second run of the hook is only passed for the very same one (receive._repeat)."""
     rec = {"id": msg_id, "decision": decision, "reason": reason, "t": time.time(),
            "receiver": {k: (receiver or {}).get(k) for k in ("name", "alias", "ref", "runtime")}}
     if outcome:
         rec["outcome"] = outcome
+    if body_sha:
+        rec.update({"from_ref": from_ref, "body_sha": body_sha})
     paths.write_json(_receipt_path(msg_id), rec)
 
 

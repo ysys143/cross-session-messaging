@@ -11,13 +11,16 @@ Two rules shape this file.
    goes through with a note that it was not checked (policy `fail_open`;
    false brings the refusal back), and nothing here ever blocks a person's own
    prompt. A write that fails (a state folder that cannot be written) decides
-   nothing either.
+   nothing either. With `fail_open` false all of that is the way it was: a session
+   that cannot be identified, a sender nobody registered and a failed write each
+   block again (2026-10-02: the switch had restored only the catch-all).
 2. The runtime is decided from the hook input's own fields, not from path
    strings (ADR-0001 draft A'), because CODEX_HOME and CLAUDE_CONFIG_DIR can
    live anywhere.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -130,6 +133,8 @@ def register(data: dict, runtime: str) -> dict | None:
     except OSError as err:
         # A state folder that cannot be written must not make a session
         # unknown to the gate, which then could not check anything (2026-10-01).
+        if _fail_closed():
+            raise
         _write_failed("registry.upsert", err)
         return registry.by_session(runtime, session_id)
 
@@ -142,10 +147,13 @@ def _write_failed(what: str, err: OSError) -> None:
 def _safely(fn, *args, **kwargs):
     """Run a write the verdict does not depend on. The check has decided; a
     ledger or inbox that cannot be written must not turn that into a block, or
-    into an error that blocks (2026-10-01)."""
+    into an error that blocks (2026-10-01). With fail_open false it is the error
+    again, which the catch-all in main() turns into a refusal, as it was."""
     try:
         return fn(*args, **kwargs)
     except OSError as err:
+        if _fail_closed():
+            raise
         _write_failed(getattr(fn, "__name__", "write"), err)
         return None
 
@@ -360,16 +368,25 @@ def _context(decision: str, reason: str, parsed, runtime: str, **kw) -> str:
     return envelope.sender_context(parsed, runtime, **kw)
 
 
+def _body_sha(parsed) -> str:
+    return hashlib.sha256((parsed.body or "").encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _repeat(runtime: str, me: dict | None, parsed, msg_id: str) -> dict | None:
     """The same context again, for the second run of a hook this message already
     passed through (2026-10-01). Refusing it as "already received" refused the
     whole prompt, and the person's session got nothing. Only the same receiver
     within REPEAT_WINDOW, and only a delivery the hook itself recorded: the
     queue copy that arrives after `xsm inbox` read the message stays refused (it
-    is what drops it from Codex's queue)."""
+    is what drops it from Codex's queue). And only the same message: the receipt
+    keeps the sender's ref and a hash of the body, because a header that reuses a
+    just-delivered id is otherwise a free pass for any text (2026-10-02). A
+    receipt without them (an older hook's) is not a repeat."""
     rec = ledger.receipt_of(msg_id)
     if not rec or rec.get("decision") != "delivered" or \
             (rec.get("reason") or "").startswith(VIA_INBOX):
+        return None
+    if rec.get("from_ref") != parsed.header.get("ref") or rec.get("body_sha") != _body_sha(parsed):
         return None
     # A session xsm could not identify has no ref, on either run: the same hook
     # twice for it is still the same hook twice.
@@ -442,7 +459,8 @@ def _gate(data: dict, runtime: str, me: dict | None, parsed, span=None) -> dict 
     outcome = _outcome(parsed)
     if msg_id:
         _safely(ledger.receipt, msg_id, "delivered", me,
-                "unchecked: %s" % reason if decision == "unchecked" else "", outcome=outcome)
+                "unchecked: %s" % reason if decision == "unchecked" else "", outcome=outcome,
+                from_ref=parsed.header.get("ref"), body_sha=_body_sha(parsed))
     if parsed.header.get("kind") == "reply":
         _safely(_close_task, parsed, outcome)
         _safely(workers.on_reply, parsed.header.get("ref"), parsed.header.get("reply-to"), me,
@@ -476,11 +494,7 @@ def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
     if not parsed.header:
         decision, reason = _check_native(parsed, me, cfg)
     elif not me:
-        # Without knowing which session we are, scope cannot be checked at all.
-        # That is our own gap, and a conversation the person wants is not held
-        # for it: the message goes through and says it was not checked.
-        decision, reason = "unchecked", "this session could not be identified, so scope was not " \
-                                        "checked"
+        decision, reason = _unidentified(cfg)
     elif parsed.header.get("origin"):
         # From a paired machine (ADR-0007): trusted only if this machine's own
         # receiver recorded the id for that peer, and only into its project.
@@ -502,7 +516,7 @@ def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
         sender, why_not = _sender_record(parsed)
         mismatch = _socket_mismatch(parsed, sender) if sender is not None else None
         if sender is None:
-            decision, reason = "block", why_not
+            decision, reason = _unknown_sender(parsed, why_not, me, cfg)
         elif mismatch:
             decision, reason = "block", mismatch
         else:
@@ -510,6 +524,38 @@ def check(parsed, me: dict | None, cfg: dict | None = None) -> tuple:
             if decision != "block" and scope != parsed.header.get("scope"):
                 decision, reason = "block", "scope changed since the message was sent"
     return decision, reason
+
+
+def _unidentified(cfg: dict) -> tuple:
+    """(decision, reason) for a session xsm cannot identify. Without knowing which
+    session we are, scope cannot be checked at all. That is our own gap, and a
+    conversation the person wants is not held for it: the message goes through and
+    says it was not checked. fail_open = false is the old refusal."""
+    if config.policy("fail_open", cfg=cfg):
+        return "unchecked", "this session could not be identified, so scope was not checked"
+    return "block", "cannot identify this session, so scope was not checked"
+
+
+def _unknown_sender(parsed, why_not: str, me: dict, cfg: dict) -> tuple:
+    """(decision, reason) for a header whose ref no registered session has. A person
+    who pastes an xsm log into their own prompt writes exactly that, and was refused
+    for it (2026-10-02). It passes, unchecked, unless this machine's ledger shows
+    that ref sent this very id (then it only lost its registry record, and it passes
+    as checked); a session a person blocked stays blocked. A ref that is ambiguous,
+    and fail_open = false, are the refusal as it was."""
+    claimed, ref = parsed.header.get("from"), parsed.header.get("ref")
+    if "is not registered" not in why_not or not config.policy("fail_open", cfg=cfg):
+        return "block", why_not
+    if ref in config.blocked() or me.get("ref") in config.blocked():
+        return "block", "a blocked session is on this message"
+    if ledger.sent_by(parsed.header.get("id"), ref):
+        return "pass", "sender %r is no longer registered; this machine's ledger shows it sent " \
+                       "this message" % claimed
+    return "unchecked", "sender %r is not a session this machine knows, and it has no record of " \
+                        "that message being sent%s" % (
+                            claimed, "" if parsed.attrs else " (it has an xsm header but no Claude "
+                                                             "envelope: it may be text your user "
+                                                             "pasted)")
 
 
 def _socket_mismatch(parsed, sender: dict) -> str | None:
@@ -646,7 +692,7 @@ def _check_native(parsed, me: dict | None, cfg: dict) -> tuple:
     if cfg.get("strict_peers", False):
         return "block", "peer message without an xsm header (strict_peers)"
     if not me:
-        return "unchecked", "this session could not be identified, so scope was not checked"
+        return _unidentified(cfg)
     if me.get("runtime") != "claude":
         # Claude sessions are the only ones Claude's messaging reaches; the same
         # text arriving through a Codex queue came some other way.

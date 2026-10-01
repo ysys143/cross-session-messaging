@@ -173,17 +173,27 @@ class RequestAsReplyTest(_Repos, TempState):
             self._reply("link repo-b")
         self.assertFalse(os.path.exists(consent._recent_path(self.me["ref"])))
 
-    def test_prune_sweeps_old_prompts_and_leaves_young_ones(self):
+    def test_prune_empties_old_prompts_keeps_the_record_that_a_hook_wrote_and_leaves_young_ones(self):
+        """2026-10-02: the words go after ASK_MAX, as before. The file stays (empty) for
+        HOOK_SEEN_MAX: it is what tells a session with a hook from one without."""
         from xsm import consent, paths
         now = time.time()
         folder = os.path.join(self.tmp, consent.ASKED)
+        said = [{"text": "yes", "t": now - consent.ASK_MAX - 60}]
         paths.write_json(os.path.join(folder, "old000.recent.json"),
-                         {"session_id": "s", "t": now - consent.ASK_MAX - 60, "prompts": []})
+                         {"session_id": "s", "t": now - consent.ASK_MAX - 60, "prompts": said})
         paths.write_json(os.path.join(folder, "new000.recent.json"),
-                         {"session_id": "s", "t": now - 5, "prompts": []})
-        self.assertEqual(consent.prune(now, dry_run=True), ["old000.recent.json"])
-        self.assertEqual(consent.prune(now), ["old000.recent.json"])
-        self.assertEqual(os.listdir(folder), ["new000.recent.json"])
+                         {"session_id": "s", "t": now - 5, "prompts": said})
+        paths.write_json(os.path.join(folder, "gone00.recent.json"),
+                         {"session_id": "s", "t": now - consent.HOOK_SEEN_MAX - 60, "prompts": []})
+        self.assertEqual(consent.prune(now, dry_run=True), ["gone00.recent.json", "old000.recent.json"])
+        self.assertEqual(paths.read_json(os.path.join(folder, "old000.recent.json"))["prompts"], said)
+        self.assertEqual(consent.prune(now), ["gone00.recent.json", "old000.recent.json"])
+        self.assertEqual(sorted(os.listdir(folder)), ["new000.recent.json", "old000.recent.json"])
+        old = paths.read_json(os.path.join(folder, "old000.recent.json"))
+        self.assertEqual((old["prompts"], old["session_id"]), ([], "s"), "emptied, still there")
+        self.assertEqual(paths.read_json(os.path.join(folder, "new000.recent.json"))["prompts"], said)
+        self.assertEqual(consent.prune(now), [], "and nothing more to do the next time")
 
 
 class ReplyFlagTest(_Repos, TempState):
@@ -204,6 +214,106 @@ class ReplyFlagTest(_Repos, TempState):
         self.assertEqual(self._asked_files(), [], "used up")
         logged = [d for d in paths.read_jsonl("decisions.jsonl") if d.get("event") == "consent-flag"]
         self.assertEqual(len(logged), 1, "the use of the flag is on record, once")
+
+    def _link(self, *extra):
+        return self._cli(["link", "../repo-b"] + list(extra))
+
+    def test_an_agent_alone_cannot_approve_when_the_hook_keeps_prompts(self):
+        """2026-10-02: two runs of `--reply "yes please"` linked the folders and logged
+        the person as the one who said it."""
+        from xsm import paths
+        self._reply("run the tests please")             # the hook works: it keeps their words
+        for _ in range(3):
+            code, text = self._link("--reply", "yes please")
+            self.assertEqual(code, 2, text)
+            self.assertIn("--reply is ignored", text)
+            self.assertIn("your user's own words", text)
+            self.assertIn("needs your user's yes", text, "and it is asked as it would be")
+            self.assertNotIn('your user replied: "yes please"', text)
+        self.assertEqual(self._links(), [])
+        self.assertIsNone(self._pending()["verdict"])
+        events = [d.get("event") for d in paths.read_jsonl("decisions.jsonl")]
+        self.assertNotIn("consent-flag", events)
+        self.assertNotIn("consent", events)
+
+    def test_the_words_a_person_wrote_pass_and_what_is_kept_is_their_wording(self):
+        from xsm import config, paths
+        self._reply("yes, go ahead and connect them")   # before the ask: no pending to attach to
+        code, text = self._link("--reply", "YES,   go ahead and connect them, thanks to the agent")
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "yes, go ahead and connect them"', text,
+                      "the person's words, not the agent's wording")
+        self.assertNotIn("thanks to the agent", text)
+        self.assertEqual(self._links(), [])
+        self._waited()
+        code, text = self._link("--reply", "go ahead and connect")
+        self.assertEqual(code, 0, text)
+        self.assertIn("approved on your user's reply", text)
+        self.assertIn("given with --reply by the agent", text)
+        (link,) = config.links()
+        self.assertIn("agent-supplied", link["by"], "the record says it was not typed into xsm")
+        self.assertIn("yes, go ahead and connect them", link["by"])
+        consents = [d for d in paths.read_jsonl("decisions.jsonl") if d.get("event") == "consent"]
+        self.assertEqual(consents[-1]["via"], "agent-supplied")
+        flags = [d for d in paths.read_jsonl("decisions.jsonl") if d.get("event") == "consent-flag"]
+        self.assertEqual(flags[-1]["via"], "agent-supplied")
+
+    def test_a_session_the_hook_never_wrote_for_is_heard_through_the_flag(self):
+        from xsm import config, consent, paths
+        self.assertFalse(os.path.exists(consent._recent_path(self.me["ref"])))
+        self._link("--reply", "응 연결해")
+        self._waited()
+        code, text = self._link("--reply", "응 연결해")
+        self.assertEqual(code, 0, text)
+        (link,) = config.links()
+        self.assertIn("agent-supplied", link["by"])
+        self.assertIn("응 연결해", link["by"])
+        self.assertEqual([d for d in paths.read_jsonl("decisions.jsonl")
+                          if d.get("event") == "consent"][-1]["via"], "agent-supplied")
+
+    def test_a_hook_that_wrote_once_is_not_forgotten_when_its_words_age_out(self):
+        """The person went quiet for half an hour and the hook's words were pruned: an
+        agent still cannot say it never had a hook."""
+        from xsm import consent, paths
+        self._reply("run the tests")
+        old = time.time() - consent.ASK_MAX - 60
+        recent = consent._recent_path(self.me["ref"])
+        paths.write_json(recent, {"session_id": self.me["session_id"], "t": old,
+                                  "prompts": [{"text": "run the tests", "t": old}]})
+        consent.prune()
+        self.assertEqual(paths.read_json(recent)["prompts"], [])
+        code, text = self._link("--reply", "yes")
+        self.assertIn("--reply is ignored", text)
+        self.assertEqual(self._links(), [])
+
+    def test_a_prompt_already_taken_for_a_request_or_too_old_is_not_theirs_to_repeat(self):
+        from xsm import consent, paths
+        self._reply("yes do it")
+        recent = consent._recent_path(self.me["ref"])
+        entry = paths.read_json(recent)
+        entry["prompts"][-1]["used"] = True
+        paths.write_json(recent, entry)
+        self.assertIn("--reply is ignored", self._link("--reply", "yes do it")[1])
+        entry["prompts"][-1].pop("used")
+        entry["prompts"][-1]["t"] -= consent.ASK_MAX + 60
+        paths.write_json(recent, entry)
+        self.assertIn("--reply is ignored", self._link("--reply", "yes do it")[1])
+
+    def test_the_verdict_the_hook_stored_on_the_ask_counts_and_the_agents_own_does_not(self):
+        """What the hook keeps from an AskUserQuestion answer is no prompt, but it is theirs."""
+        from xsm import config, consent, paths
+        self._asks(["unblock", "ccc111"])
+        consent.note_verdict(self.me, "Yes -> unblock it")      # the hook, from the form's answer
+        config.block("ccc111")
+        code, text = self._cli(["unblock", "ccc111", "--reply", "yes -> UNBLOCK it"])
+        self.assertNotIn("--reply is ignored", text)
+        self.assertIn('your user replied: "Yes -> unblock it"', text)
+        self.assertNotIn("via", self._pending(), "it is still the hook's verdict")
+        os.unlink(self._pending_file())
+        # An agent's own flag is not a hook's verdict, and does not vouch for itself.
+        self._reply("unrelated chatter")
+        self._cli(["unblock", "ccc111", "--reply", "yes"])
+        self.assertEqual(self._pending()["verdict"], None)
 
     def test_the_same_words_given_again_do_not_reset_the_show(self):
         from xsm import config

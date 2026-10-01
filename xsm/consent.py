@@ -79,8 +79,19 @@ ASK_MAX; a reply is good for TTL.
 When the hook did not record the reply (a session started before an update; a state
 folder it could not write) the agent gives it itself, `--reply "<their words>"` on the
 asking command (`supplied`): the same show step runs on those words, and the use is
-logged (event consent-flag). Policy `reply_flag` = false refuses the flag. Both are
-inside the uid boundary (ADR-0009): the agent could write the file itself.
+logged (event consent-flag). Policy `reply_flag` = false refuses the flag.
+
+An agent must not approve on its own words (adversarial check, 2026-10-02: two runs of
+`--reply "yes please"` linked two folders and logged the person as the one who said it).
+So the flag is taken only for words the person wrote: they match (whitespace and case
+aside, either contained in the other) a prompt the hook kept for this session, or the
+verdict the hook stored on the ask; what is kept is then that prompt, never the agent's
+wording. A session the hook has never written for (`recent.json` was never there: an
+older hook, a folder it cannot write) has no such record to check against, and the flag
+stands as it was. Either way the use is marked agent-supplied (`used_via`, by(), the
+decision log): the person did not type it into xsm. Both paths are inside the uid
+boundary (ADR-0009): the agent could write the files itself; this only keeps it from
+doing so by accident or on a whim.
 """
 from __future__ import annotations
 
@@ -89,6 +100,7 @@ import fcntl
 import os
 import re
 import shlex
+import sys
 import time
 
 from . import envelope, paths
@@ -121,10 +133,15 @@ LOCK_GRACE = 5.0
 # The person's last prompts of a session, kept so the request that made the
 # agent run a command can stand as the reply to its ask (2026-10-01).
 RECENT_KEEP = 3
+# How long a `recent.json` stays once its words are gone: it says a hook has written
+# in this session, which `--reply` is checked against (2026-10-02).
+HOOK_SEEN_MAX = 7 * 86400
 # A request is a sentence or two; a long paste that happens to mention a
 # folder and "send" is not one.
 REQUEST_MAX = 500
 VERBS = ("link", "join", "leave", "reach")
+# What a consent given with --reply is called in the records (by, decisions.jsonl).
+AGENT_SUPPLIED = "agent-supplied"
 # What a person says when they want the thing done: to connect, send, let in.
 # English words as words (so "unlink" is not "link"), Korean as stems.
 INTENT_RE = re.compile(
@@ -492,6 +509,8 @@ def _take(me: dict, p: str, verb: str, want: str, want_here: str | None) -> tupl
     except FileNotFoundError:
         return None, False, True        # used by another reader first
     _drop(p)                            # the lock too
+    global used_via
+    used_via = entry.get("via")
     return entry["verdict"], True, kept
 
 
@@ -508,31 +527,75 @@ def _record(me: dict, p: str, verb: str, want: str, want_here: str | None) -> No
         "verdict": None}, mode=0o600)
 
 
-# A reply the person gave on the command line, as `--reply "<their words>"`
-# (set by the CLI for one run). The way to be heard when the hook that keeps
-# replies did not run or could not write (a session started before an update, a
-# state folder the hook could not reach). Inside the uid boundary like the rest:
-# the agent can write these files itself, so this opens nothing it did not have
-# (ADR-0009); it makes the step explicit, and the show step still guards it.
+# A reply given on the command line, as `--reply "<their words>"` (set by the CLI
+# for one run). The way to be heard when the hook that keeps replies did not run or
+# could not write (a session started before an update, a state folder the hook could
+# not reach). What it may stand for is `_their_words`: the agent cannot approve on
+# words of its own.
 supplied: str | None = None
+# How the reply the last take_or_request used up reached xsm: "flag" (the agent gave
+# it with --reply), "request" (the person's own prompt), or None (the hook kept it
+# as their answer to the ask). Reset at the start of every take_or_request.
+used_via: str | None = None
+
+
+def _norm(text) -> str:
+    return " ".join(str(text or "").split()).casefold()
+
+
+def _their_words(me: dict, entry: dict | None, text: str) -> str | None:
+    """The person's own words that `--reply` text stands for, or None when it
+    stands for nothing the person wrote (2026-10-02: an agent could pass
+    `--reply "yes please"` twice and approve alone).
+
+    A prompt the hook kept for this session (recent.json: the last RECENT_KEEP, young
+    enough, not already taken for a request) or the verdict the hook stored on the ask
+    counts when either contains the other, whitespace and case aside; what is returned
+    is that record, so the agent's own wording is never what the verdict says. A
+    session the hook never wrote a record for (an older hook, a state folder it cannot
+    write) has nothing to check against, and the text is taken as given: `--reply` is
+    how the person is heard there. Called with the lock held."""
+    now, saved = time.time(), paths.read_json(_recent_path(me["ref"]))
+    hooked = isinstance(saved, dict) and saved.get("session_id") == str(me.get("session_id") or "")
+    kept = [x["text"] for x in reversed((saved.get("prompts") or []) if hooked else [])
+            if isinstance(x, dict) and isinstance(x.get("text"), str) and not x.get("used")
+            and now - float(x.get("t") or 0) <= ASK_MAX]
+    if entry and entry.get("via") != "flag" and isinstance(entry.get("verdict"), str):
+        kept.append(entry["verdict"])       # the hook's, or the person's own request
+    want = _norm(text)
+    for words in kept:
+        said = _norm(words)
+        if said and (want in said or said in want):
+            return words
+    return None if hooked else text
 
 
 def _supply(me: dict, p: str, verb: str, want: str, want_here: str | None, text: str) -> None:
     """Keep `text`, with the lock held, as the reply to the ask at `p` (the ask
-    is made if there is none): what the hook would have done. The same words
-    given again change nothing, so a run that passes `--reply` twice shows the
-    reply once and then goes ahead."""
+    is made if there is none): what the hook would have done, for words the person
+    wrote (`_their_words`). Words that are not theirs are refused in a plain line and
+    the run goes on as if no flag was given. The same words given again change
+    nothing, so a run that passes `--reply` twice shows the reply once and then goes
+    ahead."""
     text = text.strip()[:VERDICT_MAX]
     _record(me, p, verb, want, want_here)
     _, entry = _fresh_pending(me, p)
-    if not text or not entry or not _matches(entry, verb, want, want_here) or \
-            entry.get("verdict") == text:
+    if not text or not entry or not _matches(entry, verb, want, want_here):
         return
-    entry.update({"verdict": text, "verdict_t": time.time(), "shown": False, "via": "flag"})
+    words = _their_words(me, entry, text)
+    if words is None:
+        print("xsm: --reply is ignored: it has to be your user's own words from this session, "
+              "and these match nothing they wrote here. Ask them in plain words; xsm keeps "
+              "their answer itself, so run the command again after they reply, without "
+              "--reply.", file=sys.stderr)
+        return
+    if entry.get("verdict") == words:
+        return
+    entry.update({"verdict": words, "verdict_t": time.time(), "shown": False, "via": "flag"})
     entry.pop("old_hook", None)
     paths.write_json(p, entry, mode=0o600)
     paths.append_jsonl("decisions.jsonl", {"event": "consent-flag", "verb": verb, "target": want,
-                                           "verdict": text[:200]})
+                                           "verdict": words[:200], "via": AGENT_SUPPLIED})
 
 
 def _mentions(text: str, name: str) -> bool:
@@ -557,8 +620,8 @@ def _names_for(verb: str, target: str, want: str) -> set:
 
 def _session_names(verb: str, want: str) -> set:
     """The names of the sessions a decision is about: the running sessions in a
-    folder, the session to unblock, the sender of a held message. For when
-    `_names_for` finds nothing. Lazy: it reads the registry."""
+    folder, the session to unblock, the registered sender of a held message. For
+    when `_names_for` finds nothing. Lazy: it reads the registry."""
     from . import config, registry
     names = set()
     if verb in ("link", "reach"):
@@ -572,10 +635,25 @@ def _session_names(verb: str, want: str) -> set:
             if rec.get("ref") == want:
                 names |= {rec.get("name")}
     elif verb == "held-deliver":
+        # The registry's own name for the session the header's ref names, when that
+        # is one session: the claimed `from` is text the sender wrote (2026-10-02).
         held = paths.read_json(paths.path(paths.HELD, "%s.json" % want))
-        if isinstance(held, dict):
-            names |= {str(held.get("from") or "").split("@")[0], (held.get("header") or {}).get("ref")}
+        ref = ((held or {}).get("header") or {}).get("ref") if isinstance(held, dict) else None
+        known = [rec for rec in registry.records() if ref and rec.get("ref") == ref]
+        if len(known) == 1:
+            names |= {known[0].get("name"), known[0].get("ref")}
     return {n for n in names if n}
+
+
+# What a hold says when the message lied about who it is from. The person's request
+# is never taken as the reply to deliver one of those (2026-10-02).
+FORGED = ("not the socket of", "is not registered", "is not a Claude session")
+
+
+def _forged(held_name: str) -> bool:
+    held = paths.read_json(paths.path(paths.HELD, "%s.json" % held_name))
+    reason = str(held.get("reason") or "") if isinstance(held, dict) else ""
+    return any(mark in reason for mark in FORGED)
 
 
 def _latest_request(me: dict) -> dict | None:
@@ -604,7 +682,7 @@ def _from_request(me: dict, p: str, verb: str, target: str, want: str,
     purpose: no name or no intent, and the person is asked as before. Switched off
     by the policy reply_from_request. Called with the lock held."""
     from . import config
-    if not config.policy("reply_from_request"):
+    if not config.policy("reply_from_request") or (verb == "held-deliver" and _forged(want)):
         return None
     last = _latest_request(me)
     if not last or not INTENT_RE.search(last["text"]):
@@ -653,6 +731,8 @@ def take_or_request(me: dict | None, verb: str, target: str, here: str | None = 
     between a take and a separate request was overwritten unseen (adversarial
     check, 2026-10-01). Each thing asked about has its own request file, so one
     ask does not erase the reply to another."""
+    global used_via
+    used_via = None
     if not me or not me.get("ref") or os.environ.get("XSM_WORKER") or not target:
         return None, False, False
     want, want_here = _wanted(me, verb, target, here)
@@ -756,17 +836,26 @@ def prune(now: float | None = None, dry_run: bool = False) -> list:
             lock, pending = p + ".lock", p
             stale = _stale(p, now, typed=False)
         elif name.endswith(".recent.json"):
-            # The person's last prompts: of use to an ask for ASK_MAX, then not.
+            # The person's last prompts: of use to an ask for ASK_MAX, then their words
+            # go, and the file stays as the record that a hook wrote here (it is what
+            # tells a session with a hook from one without, `_their_words`) until
+            # HOOK_SEEN_MAX.
             entry = paths.read_json(p)
             try:
-                old = now - float(entry.get("t") or 0) > ASK_MAX if isinstance(entry, dict) \
-                    else now - os.path.getmtime(p) > ASK_MAX
+                age = now - float(entry.get("t") or 0) if isinstance(entry, dict) \
+                    else now - os.path.getmtime(p)
             except (TypeError, ValueError, OSError):
                 continue
-            if old:
+            wipe = isinstance(entry, dict) and age <= HOOK_SEEN_MAX and entry.get("prompts")
+            if age > HOOK_SEEN_MAX or (age > ASK_MAX and (wipe or not isinstance(entry, dict))):
                 if not dry_run:
                     try:
-                        os.unlink(p)
+                        if wipe:
+                            fresh = paths.read_json(p)      # a prompt may have come since
+                            if isinstance(fresh, dict) and fresh.get("t") == entry.get("t"):
+                                paths.write_json(p, dict(fresh, prompts=[]), mode=0o600)
+                        else:
+                            os.unlink(p)
                     except OSError:
                         continue
                 removed.append(name)
@@ -825,31 +914,40 @@ def shown_refusal(reply: str, what: str, kept=None) -> str:
     return text + " " + kept if isinstance(kept, str) else text
 
 
-def approved_line(verdict: str, kept=None) -> str:
+def approved_line(verdict: str, kept=None, via: str | None = None) -> str:
     """What a run prints when it goes ahead on a reply. `kept` is take_or_request's:
     a string (OLD_HOOK) says the reply came from an older hook, so the output and
-    the log show it too."""
-    return 'approved on your user\'s reply: "%s"%s' % (
+    the log show it too. `via` is used_via: a reply the agent gave with --reply says
+    so, because the hook did not keep it."""
+    return 'approved on your user\'s reply: "%s"%s%s' % (
         verdict.replace("\n", " ")[:200],
-        " (old hooks: their first message after the ask)" if isinstance(kept, str) else "")
+        " (old hooks: their first message after the ask)" if isinstance(kept, str) else "",
+        " (given with --reply by the agent, not kept by a hook)" if via == "flag" else "")
 
 
 def approved(verb: str, target: str, verdict: str, kept=None, name: str | None = None) -> str:
     """A run goes ahead on the person's reply: record it (decisions.jsonl,
     `event: consent`) and return the line the run prints. The CLI commands,
-    workers.use_grant and the one-yes send (connect.py) all say it this way."""
+    workers.use_grant and the one-yes send (connect.py) all say it this way. A reply
+    the agent gave with --reply is marked `via: agent-supplied` (used_via)."""
     record = {"event": "consent", "verb": verb, "target": target, "verdict": verdict, "by": name}
     if isinstance(kept, str):
         record["old_hooks"] = True              # an older hook kept this reply
+    if used_via == "flag":
+        record["via"] = AGENT_SUPPLIED
     paths.append_jsonl("decisions.jsonl", record)
-    return approved_line(verdict, kept)
+    return approved_line(verdict, kept, used_via)
 
 
 def by(verdict: str | None) -> str:
     """Who decided, as a link, join or reach records it: the person's own reply
-    when one was given, else the user."""
+    when one was given, else the user. A reply the agent gave with --reply is
+    marked, so the record says it was not typed into xsm by them (used_via)."""
     person = os.environ.get("USER") or "person"
-    return "%s, replying: %s" % (person, verdict) if verdict else person
+    if not verdict:
+        return person
+    return "%s, replying%s: %s" % (person, " (%s)" % AGENT_SUPPLIED if used_via == "flag" else "",
+                                   verdict)
 
 
 def in_words(command: str, kept: bool, runtime: str | None = None) -> str:
