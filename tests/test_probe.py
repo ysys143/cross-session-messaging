@@ -91,7 +91,7 @@ class BoundedTest(unittest.TestCase):
         self.assertEqual(len(asked), 3, "outside quick every call asks again")
 
 
-class GitTest(unittest.TestCase):
+class GitTest(TempState):
     def test_a_git_that_does_not_answer_is_killed_not_waited_for_and_unknown(self):
         from xsm import probe
         _StuckGit.killed = 0
@@ -117,8 +117,10 @@ class GitTest(unittest.TestCase):
         with mock.patch.object(probe.subprocess, "Popen", side_effect=FileNotFoundError("git")):
             self.assertIsNone(probe.git("/x", "status"))
         self.assertIsNone(probe.git(os.path.join(os.sep, "nonexistent-folder-for-xsm"), "status"))
-        self.assertEqual(probe.git(os.path.dirname(os.path.abspath(__file__)), "rev-parse",
-                                   "--is-inside-work-tree"), "true\n")
+        folder = os.path.join(self.tmp, "a-repository")
+        os.makedirs(folder)
+        subprocess.run(["git", "init", "-q", folder], check=True)
+        self.assertEqual(probe.git(folder, "rev-parse", "--is-inside-work-tree"), "true\n")
 
 
 class FoldersTest(TempState):
