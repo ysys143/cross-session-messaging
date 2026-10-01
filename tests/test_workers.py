@@ -434,7 +434,7 @@ class SafetyTest(TempState):
         workers.save({"name": "b", "parent_ref": rec["ref"], "created": 0})
         started = []
         with mock.patch.object(workers.subprocess, "Popen",
-                               lambda argv, **kw: started.append(argv[3:])):
+                               lambda argv, **kw: started.append(argv[4:])):
             receive.handle({"hook_event_name": "SessionEnd", "session_id": "s1",
                             "session_title": "boss", "reason": "exit"})
         self.assertEqual(started, [["reap", "--after-pid", str(os.getpid())]],

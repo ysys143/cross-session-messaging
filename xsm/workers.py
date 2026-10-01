@@ -742,7 +742,7 @@ def _ask_trust(worker: dict) -> dict:
 def _finish_detached(worker: dict) -> None:
     env = dict(os.environ)
     env["PYTHONPATH"] = install.REPO
-    subprocess.Popen([install.pinned_python(), "-m", "xsm", "worker-finish", worker["name"]],
+    subprocess.Popen(install.cli_argv("worker-finish", worker["name"]),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, env=env, start_new_session=True)
 
@@ -1128,7 +1128,7 @@ def reap_detached(ending: dict | None = None) -> None:
     `ending` is a session saying goodbye. Its SessionEnd hook runs while its
     process is still alive, so it still reads as live; the reaper waits for
     that process to exit before it looks."""
-    argv = [install.pinned_python(), "-m", "xsm", "reap"]
+    argv = install.cli_argv("reap")
     if ending:
         if not any(w.get("parent_ref") == ending.get("ref") for w in all_workers()):
             return
@@ -1166,8 +1166,8 @@ def on_reply(sender_ref: str | None, reply_to: str | None, receiver: dict | None
             # process so the reply's context still reaches the parent in time.
             env = dict(os.environ)
             env["PYTHONPATH"] = install.REPO
-            subprocess.Popen([install.pinned_python(), "-m", "xsm", "stop", "--internal",
-                              worker["name"]], stdin=subprocess.DEVNULL,
+            subprocess.Popen(install.cli_argv("stop", "--internal", worker["name"]),
+                             stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
                              start_new_session=True)
 

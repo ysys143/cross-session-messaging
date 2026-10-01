@@ -328,7 +328,7 @@ Principles:
 ├── hooks/hooks.json, .mcp.json   # hooks and MCP server the plugin provides
 ├── .codex-plugin/, .agents/plugins/   # the same for Codex
 ├── hooks/codex-hooks.json, codex-mcp.json   # hooks and MCP server of the Codex plugin
-├── bin/xsm                       # launcher (sets PYTHONPATH, then python3 -m xsm)
+├── bin/xsm                       # launcher (runs xsm.cli from its own folder, whatever the current directory holds)
 ├── xsm/                          # the whole implementation (Python, stdlib only)
 │   ├── cli.py                   # every subcommand
 │   ├── registry.py              # session registry (written by hooks, enriched from the runtime on lookup)

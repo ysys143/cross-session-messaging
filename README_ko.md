@@ -320,7 +320,7 @@ Local Machine -> SSH -> Remote Server                     양쪽 다 xsm 설치 
 ├── hooks/hooks.json, .mcp.json   # 플러그인이 제공하는 훅과 MCP 서버
 ├── .codex-plugin/, .agents/plugins/   # Codex용 같은 매니페스트
 ├── hooks/codex-hooks.json, codex-mcp.json   # Codex 플러그인의 훅과 MCP 서버
-├── bin/xsm                       # 런처 (PYTHONPATH 설정 후 python3 -m xsm)
+├── bin/xsm                       # 런처 (현재 디렉터리와 상관없이 자기 폴더의 xsm.cli를 실행)
 ├── xsm/                          # 구현 전체 (Python, stdlib만)
 │   ├── cli.py                   # 서브커맨드 전부
 │   ├── registry.py              # 세션 레지스트리 (훅이 기록, 조회 시 런타임에서 보강)

@@ -82,6 +82,23 @@ def pinned_python() -> str:
     return (paths.read_json(paths.path(INTERPRETER), {}) or {}).get("path") or sys.executable
 
 
+# How xsm is started from the folder it lives in, whatever the current directory holds
+# (2026-10-02). `python -m xsm` puts the current directory first on sys.path, so a run
+# inside another xsm checkout (a worktree) ran that checkout's code instead of the
+# launcher's. This takes the folder as its first argument, puts it first and drops the
+# current directory; `-P` does the second half and is Python 3.11. bin/xsm carries the
+# same text (a test keeps the two equal); no quote, `$` or backslash, so sh keeps it whole.
+BOOT = ('import os, sys; here = sys.argv.pop(1); cwd = os.path.realpath("."); '
+        'sys.path[:] = [here] + [p for p in sys.path if p and os.path.realpath(p) != cwd]; '
+        'from xsm.cli import main; sys.exit(main())')
+
+
+def cli_argv(*args: str) -> list:
+    """The command that runs `xsm <args>` from this folder with the pinned python: for
+    what xsm starts itself (a detached reaper, a worker's finish)."""
+    return [pinned_python(), "-c", BOOT, REPO] + list(args)
+
+
 def pin_python(path: str) -> dict:
     version = ""
     try:
