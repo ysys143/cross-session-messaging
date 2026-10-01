@@ -458,8 +458,20 @@ class InstallNoteTest(TempState):
             cli.main(["install", "--refresh"])
             cli.main(["doctor"])
         self.assertNotIn("keeps it up to date", out.getvalue())
-        self.assertEqual(out.getvalue().count("/plugin update xsm@xsm"), 2)
+        self.assertEqual(out.getvalue().count("claude plugin update xsm@xsm"), 2)
+        self.assertEqual(out.getvalue().count("CLAUDE_CONFIG_DIR="), 4,
+                         "each of the two notes names the home, once per command")
+        self.assertNotIn("/plugin update", out.getvalue(), "a slash command only the user can type")
+        self.assertIn("ask your user", out.getvalue())
         self.assertIn("UserPromptExpansion", out.getvalue())
+
+    def test_the_default_claude_home_needs_no_config_dir_in_the_update_note(self):
+        from xsm import install
+        note = install.plugin_outdated_note(["UserPromptExpansion"], os.path.expanduser("~/.claude"))
+        self.assertIn("`claude plugin marketplace update xsm && claude plugin update xsm@xsm`",
+                      note)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", note)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", install.plugin_outdated_note(["x"]))
 
     def test_a_current_plugin_is_left_alone(self):
         import json

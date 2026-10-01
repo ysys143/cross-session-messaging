@@ -871,7 +871,7 @@ def cmd_install(args) -> int:
             # an earlier direct install left there is still ours to clear.
             missing = install.plugin_missing_hooks(home)
             print("%s: the xsm plugin (%s) %s; skipped" % (
-                _home_tilde(home), plugin, install.plugin_outdated_note(missing) if missing
+                _home_tilde(home), plugin, install.plugin_outdated_note(missing, home) if missing
                 else "keeps it up to date"))
             _print_retired(home, install.remove_retired(home))
             if runtime == "claude":
@@ -1084,7 +1084,7 @@ def cmd_doctor(args) -> int:
             print("plugin     %-45s xsm %s%s%s%s" % (
                 _home_tilde(home), plugin, " at %s" % root if root else "",
                 "  " + older if older else "",
-                ("  " + install.plugin_outdated_note(missing)) if missing else ""))
+                ("  " + install.plugin_outdated_note(missing, home)) if missing else ""))
     for home, missing in (report.get("allow_missing") or {}).items():
         if missing:
             print("allow      %s" % _allow_note(home, missing))
@@ -1212,7 +1212,7 @@ def _doctor_rows(report: dict) -> list:
     for home, missing in (report.get("plugin_missing_hooks") or {}).items():
         if missing:
             rows.append(("plugin", "%s: %s" % (_home_tilde(home),
-                                               install.plugin_outdated_note(missing))))
+                                               install.plugin_outdated_note(missing, home))))
     for home, older in (report.get("plugin_older") or {}).items():
         if older:
             rows.append(("plugin", "%s: xsm %s at %s, %s" % (

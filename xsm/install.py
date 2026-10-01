@@ -271,20 +271,99 @@ def xsm_on_path() -> list:
     return found
 
 
-def plugin_older(version: str | None, root: str | None, describe: str | None) -> str | None:
-    """Why the plugin copy `version` at `root` is older than this CLI, or None:
-    a lower version, or the same one when this CLI is a checkout past that
-    version's tag (`describe`; a copy has no history to say which commit it
-    is). For the line that names the plugin."""
+# What makes xsm run, relative to its folder: the package, the hooks, the skill
+# and the launcher. A copy that cannot name its commit is compared by these.
+RUNTIME_FILES = ("xsm/*.py", "hooks/*", "skills/**", "bin/xsm")
+# A commit id as git prints it. Checked before one goes on a git command line.
+_REV = re.compile(r"[0-9a-f]{7,64}")
+
+
+def _git(folder: str, *args: str):
+    """`git -C <folder> <args>`, or None when git is missing or takes more than
+    two seconds."""
+    try:
+        return subprocess.run(["git", "-C", folder] + list(args), capture_output=True,
+                              text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def git_head(folder: str) -> str | None:
+    """The commit a folder's own git checkout is at, or None. The `.git` must be
+    in the folder itself: a plugin copy inside a repository (a Claude home kept
+    in git) would otherwise report that repository's HEAD."""
+    if not os.path.exists(os.path.join(folder, ".git")):
+        return None
+    out = _git(folder, "rev-parse", "HEAD")
+    head = out.stdout.strip() if out is not None and out.returncode == 0 else ""
+    return head if _REV.fullmatch(head) else None
+
+
+def plugin_revision(root: str | None) -> str | None:
+    """The commit a plugin copy was made from: the `revision` Codex's marketplace
+    install records in `.codex-marketplace-install.json`, else the HEAD of the
+    copy's own git clone (a Codex cache is one; measured 2026-10-01), else None.
+    A Claude plugin copy has neither."""
+    if not root:
+        return None
+    data = paths.read_json(os.path.join(root, ".codex-marketplace-install.json"), {})
+    rev = data.get("revision") if isinstance(data, dict) else None
+    return rev if isinstance(rev, str) and _REV.fullmatch(rev) else git_head(root)
+
+
+def runtime_digest(root: str) -> str | None:
+    """A hash of the names and bytes of RUNTIME_FILES in a folder, or None when
+    there are none or one cannot be read."""
+    names = sorted({p for pattern in RUNTIME_FILES
+                    for p in glob.glob(os.path.join(root, pattern), recursive=True)
+                    if os.path.isfile(p) and "__pycache__" not in p})
+    if not names:
+        return None
+    digest = hashlib.sha256()
+    for name in names:
+        try:
+            with open(name, "rb") as fh:
+                digest.update(os.path.relpath(name, root).encode() + b"\0" + fh.read() + b"\0")
+        except OSError:
+            return None
+    return digest.hexdigest()
+
+
+def plugin_older(version: str | None, root: str | None, revision: str | None = None,
+                 head: str | None = None) -> str | None:
+    """How the plugin copy `version` at `root` stands to this CLI, or None when
+    it is the same code or nothing says. `revision` is the copy's commit
+    (plugin_revision), `head` this checkout's (git_head).
+
+    A lower version is older. The same version says nothing (a checkout keeps
+    its version for many commits), so the commits decide: this checkout's git
+    says how many the copy is behind, or that its commit is no ancestor (or
+    unknown here: not fetched, so it just differs). A copy with no commit is
+    compared by its runtime files. The first cut called every copy "older"
+    while this CLI was past its tag, assuming a copy has no history; a Codex
+    cache is a clone, and one identical to HEAD was flagged (2026-10-01). Never
+    "older" without evidence."""
     mine = plugin_version()
     if not (version and mine and version[:1].isdigit() and mine[:1].isdigit()):
         return None
     if version_key(version) < version_key(mine):
         return "older than this CLI (%s)" % mine
-    if version == mine and re.search(r"-\d+-g[0-9a-f]+", describe or "") and root and \
-            os.path.realpath(root) != os.path.realpath(REPO):
-        return "may be older than this CLI (%s, which is past its tag: %s)" % (mine, describe)
-    return None
+    if version_key(version) > version_key(mine) or not root or \
+            os.path.realpath(root) == os.path.realpath(REPO):
+        return None
+    if head and revision:
+        if head.startswith(revision):
+            return None
+        behind = _git(REPO, "merge-base", "--is-ancestor", revision, head)
+        count = _git(REPO, "rev-list", "--count", "%s..%s" % (revision, head)) \
+            if behind is not None and behind.returncode == 0 else None
+        n = count.stdout.strip() if count is not None and count.returncode == 0 else ""
+        if n.isdigit():
+            return None if n == "0" else "%s behind this CLI (%s)" % (
+                "1 commit" if n == "1" else "%s commits" % n, revision[:7])
+        return "differs from this CLI (%s)" % revision[:7]
+    theirs, ours = runtime_digest(root), runtime_digest(REPO)
+    return "differs from this CLI" if theirs and ours and theirs != ours else None
 
 
 def codex_plugin(home: str) -> dict | None:
@@ -377,9 +456,16 @@ def plugin_missing_hooks(home: str) -> list:
     return out
 
 
-def plugin_outdated_note(missing: list) -> str:
-    return ("the installed plugin is older than this checkout (no %s hook): run /plugin update "
-            "xsm@xsm, then start a new session" % ", ".join(missing))
+def plugin_outdated_note(missing: list, home: str | None = None) -> str:
+    """The agent asks its user and runs the update itself (user decision,
+    2026-10-01: never send the person off to type a command); `claude plugin
+    update` is a shell command, and a home other than ~/.claude needs its
+    CLAUDE_CONFIG_DIR."""
+    env = "" if not home or os.path.realpath(home) == os.path.realpath(
+        os.path.expanduser("~/.claude")) else "CLAUDE_CONFIG_DIR=%s " % shlex.quote(home)
+    return ("the installed plugin is older than this checkout (no %s hook): ask your user, then "
+            "run `%sclaude plugin marketplace update xsm && %sclaude plugin update xsm@xsm` "
+            "yourself; a new session picks it up" % (", ".join(missing), env, env))
 
 
 def leftovers(home: str) -> list:
@@ -1173,8 +1259,10 @@ def doctor() -> dict:
     gone = [h["path"] for h in config.homes() if not os.path.isdir(h["path"])]
     cli = cli_info()
     cli["on_path"] = xsm_on_path()
+    cli["revision"] = git_head(REPO)
     plugins = {h["path"]: plugin_installed(h["path"]) for h in homes}
     roots = {h["path"]: plugin_root(h["path"]) for h in homes if plugins[h["path"]]}
+    revisions = {home: plugin_revision(root) for home, root in roots.items()}
     report = {
         "xsm_home": paths.HOME,
         "interpreter": pinned_python(),
@@ -1198,7 +1286,8 @@ def doctor() -> dict:
         "cli": cli,
         "plugins": plugins,
         "plugin_roots": roots,
-        "plugin_older": {home: plugin_older(plugins[home], root, cli["describe"])
+        "plugin_revisions": revisions,
+        "plugin_older": {home: plugin_older(plugins[home], root, revisions[home], cli["revision"])
                          for home, root in roots.items()},
         "plugin_missing_hooks": {h["path"]: plugin_missing_hooks(h["path"]) for h in homes
                                  if h.get("runtime") == "claude"},
