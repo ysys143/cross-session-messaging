@@ -306,7 +306,15 @@ class Server:
         # No thread id (old Codex) or nothing adoptable: the newest live record,
         # as before 0840ee3 (user decision, 2026-09-30: a possibly wrong
         # neighbour is better than a refusal).
-        return max(rows, key=lambda r: r.get("updated", 0)) if rows else None
+        if rows:
+            return max(rows, key=lambda r: r.get("updated", 0))
+        # A Claude session whose hooks never ran (started before xsm, or before
+        # its plugin was enabled) has no record at all: its own process is this
+        # server's parent, and Claude's record of it names the session (audit,
+        # 2026-10-01: such a session could not use any xsm tool). By pid, never by
+        # an environment variable: a Codex started from a Claude shell inherits
+        # that session's id.
+        return registry.adopt_claude_process(pid)
 
     @staticmethod
     def codex_homes(codex_rows: list) -> list:
@@ -314,16 +322,7 @@ class Server:
         this server's own env, the homes of records sharing the daemon, the
         declared Codex homes, then the default. The caller keeps the first one
         whose state DB knows the thread."""
-        from . import config
-        found = []
-        for h in ([os.environ.get("CODEX_HOME")] + [r.get("home") for r in codex_rows]
-                  + [h.get("path") for h in config.homes() if h.get("runtime") == "codex"]
-                  + ["~/.codex"]):
-            if h:
-                h = os.path.realpath(os.path.expanduser(h))
-                if h not in found:
-                    found.append(h)
-        return found
+        return registry.codex_homes(codex_rows)
 
     # -- tools --------------------------------------------------------------------
     def call(self, name: str, args: dict) -> str:
