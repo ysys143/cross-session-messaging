@@ -184,16 +184,17 @@ class DoctorLinesTest(TempState):
             os.path.join(link_dir, "xsm"), os.path.realpath(launcher))])
 
     def test_a_plugin_line_carries_the_install_root(self):
-        home, root = self._codex_home("0.4.14")
         from xsm import install
-        line = next(l for l in self._doctor("v0.4.14") if l.startswith("plugin "))
-        self.assertEqual(line, "plugin     %-45s xsm 0.4.14 at %s" % (home, root))
+        version = install.plugin_version()   # the same version as this CLI: no flag
+        home, root = self._codex_home(version)
+        line = next(l for l in self._doctor("v" + version) if l.startswith("plugin "))
+        self.assertEqual(line, "plugin     %-45s xsm %s at %s" % (home, version, root))
         self.assertEqual(install.plugin_root(home), root)
         self.assertTrue(os.path.isabs(root), "`<root>/bin/xsm` runs that version by path")
-        claude_home, claude_root = self._claude_home("0.4.14")
-        line = next(l for l in self._doctor("v0.4.14")
+        claude_home, claude_root = self._claude_home(version)
+        line = next(l for l in self._doctor("v" + version)
                     if l.startswith("plugin ") and "claude-home" in l)
-        self.assertEqual(line, "plugin     %-45s xsm 0.4.14 at %s" % (claude_home, claude_root))
+        self.assertEqual(line, "plugin     %-45s xsm %s at %s" % (claude_home, version, claude_root))
 
     def test_a_plugin_older_than_this_cli_says_so(self):
         from xsm import install
