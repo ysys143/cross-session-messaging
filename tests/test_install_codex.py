@@ -293,5 +293,44 @@ class CodexPluginTest(unittest.TestCase):
             self.assertEqual(link.call_count, calls, runtime)
 
 
+class McpAddTest(unittest.TestCase):
+    """`claude mcp add` took `xsm` as one more variable of `-e`: with a state
+    folder that is not the default, install failed with "Invalid environment
+    variable format: xsm" (2026-10-01). `claude mcp add --help`: the name comes
+    before -e, and `--` ends it."""
+
+    def _added(self, runtime, env):
+        from xsm import install
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            if argv[1:3] == ["mcp", "get"]:
+                return mock.Mock(returncode=1, stdout="", stderr="No MCP server found")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, env(tmp)), \
+                mock.patch.object(install.subprocess, "run", run):
+            self.assertEqual(install.install_mcp(tmp, runtime), "added")
+        return next(a for a in seen if a[1:3] == ["mcp", "add"]), install
+
+    def test_the_name_comes_before_the_env_flag(self):
+        elsewhere = lambda tmp: {"XSM_HOME": os.path.join(tmp, "state")}
+        argv, install = self._added("claude", elsewhere)
+        state = argv[argv.index("-e") + 1]
+        self.assertTrue(state.startswith("XSM_HOME="), argv)
+        self.assertEqual(argv, [install._mcp_cli("claude"), "mcp", "add", "--scope", "user",
+                                "xsm", "-e", state, "--"] + install.mcp_command())
+        argv, install = self._added("codex", elsewhere)
+        self.assertEqual(argv, [install._mcp_cli("codex"), "mcp", "add", "xsm", "--env",
+                                argv[argv.index("--env") + 1], "--"] + install.mcp_command())
+        self.assertTrue(argv[argv.index("--env") + 1].startswith("XSM_HOME="))
+
+    def test_the_default_state_folder_adds_no_env(self):
+        argv, install = self._added("claude", lambda tmp: {"XSM_HOME": "~/.xsm"})
+        self.assertEqual(argv, [install._mcp_cli("claude"), "mcp", "add", "--scope", "user",
+                                "xsm", "--"] + install.mcp_command())
+
 if __name__ == "__main__":
     unittest.main()

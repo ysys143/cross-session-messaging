@@ -1232,15 +1232,60 @@ class FormToolPermissionTest(TempState):
         paths.write_json(target, data)
         install.remove_form_tools(home)
         self.assertEqual(paths.read_json(target), {"permissions": {"allow": ["Bash(ls:*)"]}})
-        # A home from before the note: an allow list that xsm's removal emptied was xsm's.
+        # A home from before the note: an allow list that xsm's removal emptied was
+        # xsm's, but the note does not say who made `permissions`, so that stays.
         home, target = settings("old-empty", {"model": "opus", "permissions": {
             "allow": install.form_tool_names()}})
         self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"model": "opus", "permissions": {}})
+        # Installing again after that records what it made anew: only the list.
+        install.allow_form_tools(home)
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"model": "opus", "permissions": {}})
+        # Whereas what a note says xsm made it takes away again, permissions too.
+        home, target = settings("noted-both", {"model": "opus"})
+        install.allow_form_tools(home)
+        self.assertEqual(paths.read_json(install._state_file(install.ALLOWED, target))["created"],
+                         ["permissions", "allow"])
+        self.assertTrue(install.remove_form_tools(home))
         self.assertEqual(paths.read_json(target), {"model": "opus"})
-        # Installing again after that records what it made anew.
+        # An empty `permissions` of theirs, and a note that says it was theirs.
+        home, target = settings("their-empty", {"permissions": {}})
+        install.allow_form_tools(home)
+        self.assertEqual(paths.read_json(install._state_file(install.ALLOWED, target))["created"],
+                         ["allow"])
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target), {"permissions": {}})
+
+    def test_an_old_install_after_an_uninstall_does_not_leave_the_tool_names_behind(self):
+        """new install, new uninstall (the note emptied), then 0.4.14's install
+        (it adds the 14 MCP names and writes no note), then a refresh and an
+        uninstall: those names are only ever xsm's, so they go (2026-10-01)."""
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "mixed")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"model": "opus"})
         install.allow_form_tools(home)
         self.assertTrue(install.remove_form_tools(home))
         self.assertEqual(paths.read_json(target), {"model": "opus"})
+        self.assertEqual(paths.read_json(install._state_file(install.ALLOWED, target)),
+                         {"file": target, "added": [], "v": install.NOTE_VERSION})
+        data = paths.read_json(target)              # what 0.4.14's allow_form_tools wrote
+        data["permissions"] = {"allow": list(install.mcp_tool_names())}
+        paths.write_json(target, data)
+        self.assertEqual(len(install.mcp_tool_names()), 14)
+        self.assertEqual(install.allow_form_tools(home), "added")
+        self.assertTrue(install.remove_form_tools(home))
+        left = paths.read_json(target)
+        self.assertEqual(left.get("permissions", {}).get("allow", []), [], left)
+        for prefix in install.FORM_TOOL_PREFIXES:
+            self.assertNotIn(prefix, json.dumps(left))
+        # And without the refresh in between, the emptied note is no obstacle.
+        data["permissions"] = {"allow": list(install.mcp_tool_names()) + ["Bash(ls:*)"]}
+        paths.write_json(target, data)
+        self.assertTrue(install.remove_form_tools(home))
+        self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
 
     def test_a_home_from_before_the_note_loses_the_known_names_as_it_did(self):
         from xsm import install, paths

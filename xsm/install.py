@@ -705,8 +705,15 @@ NOTE_VERSION = 2              # a note without it predates counting the rules al
 STALE_RULES = ("Bash(xsm spawn:*)", "Bash(xsm post:*)", "Bash(xsm doc add:*)")
 
 
+def mcp_tool_names() -> list:
+    """The MCP form tools in the allow list: all 0.4.13 and 0.4.14 wrote. Only
+    xsm's own tools carry these names, so they are xsm's whatever the note says
+    (2026-10-01: an old install after an uninstall adds them with no note)."""
+    return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in FORM_TOOLS]
+
+
 def form_tool_names() -> list:
-    return [prefix + tool for prefix in FORM_TOOL_PREFIXES for tool in FORM_TOOLS] + \
+    return mcp_tool_names() + \
         ["Skill(xsm)", "Skill(xsm:xsm)"] + ["Bash(xsm %s:*)" % c for c in ASKING_COMMANDS]
 
 
@@ -736,16 +743,18 @@ def missing_form_tools(home: str) -> list:
 
 
 def _xsm_rules(note, allow: list) -> list:
-    """What xsm put in this allow list. A current note says so itself. With no
-    note, or one from before NOTE_VERSION (it holds only what its refresh newly
-    added), the known names already in the list are xsm's: an earlier version
-    put them there, and they look exactly like a person's (2026-10-01: a
-    refresh over such a home left about 24 rules behind after uninstall)."""
+    """What xsm put in this allow list. A current note says so itself, and the
+    MCP tool names besides (mcp_tool_names: an old install after an uninstall
+    puts them back and notes nothing). With no note, or one from before
+    NOTE_VERSION (it holds only what its refresh newly added), every known name
+    already in the list is xsm's: an earlier version put them there, and they
+    look exactly like a person's (2026-10-01: a refresh over such a home left
+    about 24 rules behind after uninstall)."""
     held = list(note["added"]) if isinstance(note, dict) and isinstance(note.get("added"), list) \
         else []
-    if isinstance(note, dict) and note.get("v") == NOTE_VERSION:
-        return held
-    return held + [n for n in form_tool_names() if n in allow and n not in held]
+    known = mcp_tool_names() if isinstance(note, dict) and note.get("v") == NOTE_VERSION \
+        else form_tool_names()
+    return held + [n for n in known if n in allow and n not in held]
 
 
 def allow_form_tools(home: str) -> str:
@@ -814,12 +823,14 @@ def remove_form_tools(home: str) -> bool:
         perms = data["permissions"]
         perms["allow"] = kept
         # `created` unknown (a home from before the note says): an allow list
-        # that holds nothing after xsm's rules went was xsm's to begin with.
+        # that holds nothing after xsm's rules went was xsm's to begin with, but
+        # an empty `permissions` may be the person's own, and it is left unless
+        # the note says xsm made it (2026-10-01).
         created = note.get("created") if isinstance(note, dict) and \
             isinstance(note.get("created"), list) else None
         if not kept and (created is None or "allow" in created):
             del perms["allow"]
-        if not perms and (created is None or "permissions" in created):
+        if not perms and "permissions" in (created or []):
             del data["permissions"]
         paths.write_json(target, data, mode=0o644)
     if isinstance(note, dict):
@@ -1197,8 +1208,11 @@ def install_mcp(home: str, runtime: str) -> str:
     if os.environ.get("XSM_HOME") and not _is_default_home(os.environ["XSM_HOME"]):
         extra = (["-e"] if runtime == "claude" else ["--env"]) + \
             ["XSM_HOME=%s" % os.environ["XSM_HOME"]]
+    # The name first: Claude's -e takes every word up to the next option or `--`,
+    # so `-e XSM_HOME=x xsm --` read `xsm` as a variable ("Invalid environment
+    # variable format: xsm"; `claude mcp add --help` shows the name before -e).
     argv = [_mcp_cli(runtime), "mcp", "add"] + (["--scope", "user"] if runtime == "claude" else []) \
-        + extra + [MCP_NAME, "--"] + mcp_command()
+        + [MCP_NAME] + extra + ["--"] + mcp_command()
     out = subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env)
     if out.returncode != 0:
         return "failed: %s" % (out.stderr or out.stdout).strip()[:200]
