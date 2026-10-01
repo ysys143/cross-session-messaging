@@ -660,17 +660,22 @@ def _running_from() -> set:
 
 
 def _configured_for() -> set:
-    """The ids of the snapshots a config file or the PATH link names: the
+    """The ids of the snapshots a config file or a link names: the
     settings, hooks and MCP entries of every home xsm knows, ~/.claude.json,
-    and ~/.local/bin/xsm. A home `xsm install` did not touch this time keeps
-    the snapshot it was given."""
+    ~/.local/bin/xsm and each home's skills/xsm. A home `xsm install` did not
+    touch this time keeps the snapshot it was given."""
     files = [os.path.expanduser("~/.claude.json")]
     for home in config.homes():
         files += [os.path.join(home["path"], name)
                   for name in ("settings.json", "hooks.json", "config.toml", ".claude.json")]
     texts = [_read_text(f) or "" for f in files]
-    link = os.path.expanduser("~/.local/bin/xsm")
-    texts.append(os.readlink(link) + "/" if os.path.islink(link) else "")
+    # The links that name a snapshot: `xsm` on PATH, and each home's skill (a
+    # plain `install` leaves a skill link where it was, so the snapshot it
+    # names must stay; review of PR #10, 2026-10-02).
+    links = [os.path.expanduser("~/.local/bin/xsm")]
+    links += [os.path.join(home["path"], "skills", "xsm") for home in config.homes()]
+    for link in links:
+        texts.append(os.readlink(link) + "/" if os.path.islink(link) else "")
     found = set()
     for text in texts:
         found |= _snapshot_ids(text)

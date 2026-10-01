@@ -597,6 +597,21 @@ class PruneTest(_Checkout):
         self.assertEqual(os.path.realpath(os.path.join(self.tmp, "runtime", "current")),
                          os.path.realpath(second["path"]))
 
+    def test_a_skill_link_that_names_it_keeps_it(self):
+        """A plain install leaves a home's skill link where it was; the snapshot
+        it names must not be pruned under it (review of PR #10)."""
+        from xsm import config, install
+        first, second = self._two()
+        home = os.path.join(self.tmp, "claude-skill")
+        os.makedirs(os.path.join(home, "skills"))
+        os.symlink(os.path.join(first["path"], "skills", "xsm"),
+                   os.path.join(home, "skills", "xsm"))
+        config.add_home(home, "claude")
+        with mock.patch.object(install, "_running_from", return_value=set()), \
+                mock.patch.object(install, "_live_session_starts", return_value=[]):
+            self.assertEqual(install.prune_snapshots(), [])
+        self.assertTrue(os.path.isdir(first["path"]))
+
     def test_a_running_process_or_a_config_that_names_it_keeps_it(self):
         from xsm import config, install, paths
         first, second = self._two()

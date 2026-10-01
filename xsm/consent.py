@@ -697,8 +697,11 @@ def _from_request(me: dict, p: str, verb: str, target: str, want: str,
         "session_id": str(me.get("session_id") or ""), "verdict": last["text"], "verdict_t": now,
         "shown": True, "shown_t": now, "via": "request"}, mode=0o600)
     entry = paths.read_json(_recent_path(me["ref"])) or {}
-    entry["prompts"][-1]["used"] = True
-    paths.write_json(_recent_path(me["ref"]), entry, mode=0o600)
+    prompts = entry.get("prompts") if isinstance(entry.get("prompts"), list) else []
+    if prompts and isinstance(prompts[-1], dict):
+        # Read again outside the hook's lock: it may have changed or emptied.
+        prompts[-1]["used"] = True
+        paths.write_json(_recent_path(me["ref"]), entry, mode=0o600)
     paths.append_jsonl("decisions.jsonl", {"event": "consent-request", "verb": verb,
                                            "target": want, "verdict": last["text"][:200]})
     return last["text"]
