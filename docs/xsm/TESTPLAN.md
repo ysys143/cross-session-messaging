@@ -194,7 +194,7 @@ which xsm && xsm list -a
 **훅을 먼저 설치했는지 확인한다.** 훅은 세션이 시작할 때 읽히므로, 2장 전에 띄워 둔 세션은 등록되지 않는다. 이미 열려 있으면 닫고 다시 띄운다.
 
 ```bash
-grep -c '#xsm-hook' ~/.claude-4/settings.json ~/.claude-5/settings.json   # 각 4가 나와야 한다(SessionStart, UserPromptSubmit, UserPromptExpansion, SessionEnd)
+grep -c '#xsm-hook' ~/.claude-4/settings.json ~/.claude-5/settings.json   # 각 5가 나와야 한다(SessionStart, UserPromptSubmit, UserPromptExpansion, PostToolUse, SessionEnd)
 ```
 
 터미널 두 개를 연다. 두 세션의 **작업 폴더는 같은 git 저장소 안**이어야 한다(기본 범위 규칙). 테스트용 저장소를 하나 만든다.

@@ -424,12 +424,12 @@ class LinkUsabilityTest(_Session, TempState):
 
 
 class InstallNoteTest(TempState):
-    def _plugin_home(self, events):
+    def _plugin_home(self, events, hooks=None):
         from xsm import paths
         home = os.path.join(self.tmp, "plugin-home")
         cache = os.path.join(home, "plugins", "cache", "xsm", "xsm", "0.4.3")
         paths.write_json(os.path.join(cache, "hooks", "hooks.json"),
-                         {"hooks": {e: [] for e in events}})
+                         {"hooks": hooks if hooks is not None else {e: [] for e in events}})
         paths.write_json(os.path.join(home, "plugins", "installed_plugins.json"),
                          {"version": 2, "plugins": {"xsm@xsm": [
                              {"version": "0.4.3", "installPath": cache}]}})
@@ -450,7 +450,8 @@ class InstallNoteTest(TempState):
         from xsm import cli, config, install
         home = self._plugin_home(["SessionStart", "UserPromptSubmit", "SessionEnd",
                                   "PermissionRequest"])
-        self.assertEqual(install.plugin_missing_hooks(home), ["UserPromptExpansion"])
+        self.assertEqual(install.plugin_missing_hooks(home),
+                         ["UserPromptExpansion", "PostToolUse(AskUserQuestion)"])
         config.add_home(home, "claude")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -464,9 +465,51 @@ class InstallNoteTest(TempState):
         import json
         from xsm import install
         with open(os.path.join(install.REPO, "hooks", "hooks.json")) as fh:
-            events = list(json.load(fh)["hooks"])
-        home = self._plugin_home(events)
+            hooks = json.load(fh)["hooks"]
+        home = self._plugin_home(None, hooks)
         self.assertEqual(install.plugin_missing_hooks(home), [])
+
+    def test_a_refresh_says_what_it_did_to_the_allow_list(self):
+        import json
+        from xsm import cli, config, install, paths
+        with open(os.path.join(install.REPO, "hooks", "hooks.json")) as fh:
+            hooks = json.load(fh)["hooks"]
+        home = self._plugin_home(None, hooks)
+        config.add_home(home, "claude")
+        target = os.path.join(home, "settings.json")
+
+        def refresh():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.main(["install", "--refresh"])
+            return out.getvalue()
+
+        paths.write_json(target, {"permissions": {"allow": install.form_tool_names()
+                                                  + list(install.STALE_RULES)}})
+        self.assertIn("took out allow rules an earlier xsm added", refresh())
+        self.assertNotIn("took out", refresh())
+        with open(target, "w") as fh:
+            fh.write("{ nope")
+        said = refresh()
+        self.assertIn("is not valid JSON, so xsm left it as it is", said)
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "{ nope")
+
+    def test_a_plugin_whose_post_tool_use_matches_another_tool_lacks_the_matcher(self):
+        """The event is there, the AskUserQuestion matcher is not: the answer to
+        a question would never reach xsm, and a version string does not say."""
+        import json
+        from xsm import install
+        with open(os.path.join(install.REPO, "hooks", "hooks.json")) as fh:
+            hooks = json.load(fh)["hooks"]
+        for label, groups in (("other tool", [dict(hooks["PostToolUse"][0], matcher="Bash")]),
+                              ("no groups", [])):
+            with self.subTest(label):
+                home = self._plugin_home(None, dict(hooks, PostToolUse=groups))
+                self.assertEqual(install.plugin_missing_hooks(home),
+                                 ["PostToolUse(AskUserQuestion)"])
+                self.assertIn("PostToolUse(AskUserQuestion)", install.plugin_outdated_note(
+                    install.plugin_missing_hooks(home)))
 
 
 class LinkMcpTest(_Folders, TempState):

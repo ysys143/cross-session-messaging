@@ -58,6 +58,28 @@ class PersonDecisionTest(TempState):
         self._waited()
         return text
 
+    def _answered(self, answers, annotations=None, me=None, tool="AskUserQuestion",
+                  event="PostToolUse", response=None):
+        """The hook input Claude Code gives for an answered AskUserQuestion. The
+        tool_response is the tool's own result, as a transcript records it
+        (toolUseResult): questions, answers by question text, annotations."""
+        from xsm import consent
+        questions = [{"question": q, "header": "Q", "multiSelect": False,
+                      "options": [{"label": "Yes", "description": "go"}]} for q in answers]
+        consent.record(me or self.me, {
+            "hook_event_name": event, "tool_name": tool, "session_id": "s-agent",
+            "tool_input": {"questions": questions},
+            "tool_response": response if response is not None else {
+                "questions": questions, "answers": answers, "annotations": annotations or {}}})
+
+    def _pending(self):
+        from xsm import consent, paths
+        return paths.read_json(consent._pending_path(self.me["ref"]))
+
+    def _asked_files(self):
+        folder = os.path.join(self.tmp, "asked")
+        return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+
     def test_approving_a_workers_request(self):
         from xsm import paths, workers
         workers.save({"name": "w1", "runtime": "claude", "mode": "background", "pane": "%1",
@@ -194,28 +216,43 @@ class PersonDecisionTest(TempState):
         subject is listed below, explicitly."""
         import re
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        readmes = ["README.md", "README_ko.md"]
         files = [os.path.join("xsm", n) for n in sorted(os.listdir(os.path.join(repo, "xsm")))
                  if n.endswith(".py")] + [
             os.path.join("skills", "xsm", "SKILL.md"),
-            os.path.join("skills", "xsm", "references", "guide.md"), "README.md", "README_ko.md"]
+            os.path.join("skills", "xsm", "references", "guide.md")] + readmes
         phrases = ("in a terminal", "needs a terminal", "only a person can", "a person clears",
                    "(a person only)", "a person only", "needs a person", "a person can lift",
                    "they can type", "you can type", "ask them to type", "run /xsm",
                    "run: /xsm", "with: /xsm", "with `/xsm", "type /xsm", "types /xsm",
                    "run $xsm", "type $xsm")
+        # Outside the READMEs, which may say what a person can type themselves
+        # once the primary way (ask the agent) is named, the backtick forms too,
+        # and where a person at a terminal is the subject at all (2026-10-01).
+        wider = ("type `/xsm", "types `/xsm", "typing `/xsm", "type `$xsm", "types `$xsm",
+                 "typing `$xsm", "at a terminal")
         # (file, text around the phrase): a person typing at a terminal is the point.
         genuine = (("xsm/otlp_export.py", "A person runs this in a terminal"),
                    ("README.md", "The same commands work in a terminal as"),
-                   ("README.md", "# or in a terminal"),
                    ("xsm/install.py", "told the person to type /xsm link instead"),   # history
-                   ("skills/xsm/references/guide.md", "Never ask them to type shell commands"))
+                   ("skills/xsm/references/guide.md", "Never ask them to type shell commands"),
+                   # `--dir` speaks for another folder: only a person at a terminal, and
+                   # the refusal says so (the agent runs from its own folder).
+                   ("xsm/cli.py", "only a person at a terminal may use it with"),
+                   ("xsm/mcp.py", "--dir is taken only from a person at a terminal"),
+                   # Who can answer for a worker no session started, and who wrote a record.
+                   ("xsm/cli.py", "so only a person at a terminal can answer"),
+                   ("xsm/channel.py", "not a person at a terminal and not a registered"),
+                   ("xsm/doc.py", "a person at a terminal, or a session asking its user"),
+                   ("xsm/workers.py", "A person typing `spawn` at a terminal needs no grant"),
+                   ("xsm/workers.py", "Approving is a person's: at a terminal, or through"))
         for name in files:
             with open(os.path.join(repo, name), encoding="utf-8") as fh:
                 text = fh.read()
             # Adjacent string literals and wrapped lines read as one line.
             text = re.sub(r'"\s*\n\s*"', "", text)
             text = re.sub(r"\s*\n\s*(#\s*)?", " ", text)
-            for phrase in phrases:
+            for phrase in phrases + (() if name in readmes else wider):
                 for m in re.finditer(re.escape(phrase), text):
                     around = text[max(0, m.start() - 60):m.end() + 60]
                     if any(name.replace(os.sep, "/") == f and ok in around for f, ok in genuine):
@@ -302,7 +339,7 @@ class PersonDecisionTest(TempState):
         entry["t"] = time.time() - consent.TTL - 60            # asked long ago, unanswered
         paths.write_json(pending, entry)
         self._reply("응")
-        self.assertIsNone(paths.read_json(pending).get("verdict"), "an expired ask keeps nothing")
+        self.assertFalse(os.path.exists(pending), "an expired ask keeps nothing, not even a file")
         entry["t"] = time.time() - consent.TTL + 5             # asked just inside the window
         paths.write_json(pending, entry)
         self._reply("응")
@@ -338,7 +375,7 @@ class PersonDecisionTest(TempState):
         entry["verdict_t"] = time.time() - 5                      # the last reply is fresh
         paths.write_json(pending, entry)
         self._reply("그건 그렇고 다른 얘긴데")
-        self.assertEqual(paths.read_json(pending)["verdict"], "응 풀어", "nothing new is kept")
+        self.assertFalse(os.path.exists(pending), "gone, with the words it kept")
         self._asks(["unblock", "abc999"])                         # a new ask, not the old yes
         self.assertIn("abc999", config.blocked())
         self.assertIsNone(paths.read_json(pending)["verdict"])
@@ -456,6 +493,21 @@ class PersonDecisionTest(TempState):
         self.assertEqual(code, 0, text)
         self.assertEqual(config.blocked(), set())
 
+    def test_an_empty_or_malformed_ref_is_a_usage_error_before_anyone_is_asked(self):
+        """`xsm block ref:` stored an empty string in the deny list, and
+        `unblock ref:` asked about nothing and answered "no change for "."""
+        from xsm import config
+        for argv in (["block", "ref:"], ["block", ""], ["block", "ref: "], ["block", "  "],
+                     ["unblock", "ref:"], ["unblock", "a b"], ["block", "ref:a b"]):
+            with self.subTest(argv=argv):
+                code, text = self._cli(argv)
+                self.assertEqual(code, 4, text)
+                self.assertIn("usage: xsm %s <ref>" % argv[0], text)
+        self.assertEqual(config.blocked(), set())
+        self.assertEqual(config.load().get("deny") or [], [])
+        self.assertEqual(self._asked_files(), [], "nobody was asked")
+        self.assertEqual(self._cli(["block", "ref:abcdef"])[0], 0, "a ref still works")
+
     def test_the_agent_is_told_to_ask_before_it_reruns(self):
         """The refusal left the order implicit and agents reran before asking
         (2026-10-01): ask, wait, rerun to see the reply, rerun once more on a yes."""
@@ -515,8 +567,8 @@ class PersonDecisionTest(TempState):
     def test_a_state_folder_that_cannot_be_written_does_not_raise(self):
         from xsm import consent, paths
         with mock.patch.object(paths, "write_json", side_effect=PermissionError("denied")):
-            self.assertFalse(consent.request(self.me, "unblock", "abcabc"))
-        self.assertTrue(consent.request(self.me, "unblock", "abcabc"))
+            self.assertFalse(consent.take_or_request(self.me, "unblock", "abcabc")[2])
+        self.assertTrue(consent.take_or_request(self.me, "unblock", "abcabc")[2])
         with mock.patch.object(paths, "write_json", side_effect=PermissionError("denied")):
             code, text = self._cli(["unblock", "abcabc"])
         self.assertEqual(code, 2, text)
@@ -528,6 +580,322 @@ class PersonDecisionTest(TempState):
             workers.use_grant(None, None, "codex", self.tmp, ["full_access"])
         self.assertIn("cannot keep their reply", str(cm.exception))
         self.assertIn("xsm_grant MCP tool", str(cm.exception))
+
+    # -- a read-only state folder (adversarial check, 2026-10-01) ---------------------
+
+    def test_a_folder_that_cannot_be_written_refuses_at_the_show_and_the_pass(self):
+        """The show step wrote its mark and raised PermissionError: a traceback
+        and exit 1 where the other steps said they cannot keep the reply."""
+        from xsm import consent, paths
+        for step in ("show", "pass"):
+            with self.subTest(step):
+                self._asks(["unblock", "abc111"])
+                self._reply("응")
+                if step == "pass":
+                    self._shows(["unblock", "abc111"], "응")
+                real_unlink = os.unlink
+
+                def unlink(name, *args, **kwargs):
+                    if str(name).endswith(".pending.json"):
+                        raise PermissionError("denied")
+                    return real_unlink(name, *args, **kwargs)
+
+                with mock.patch.object(paths, "write_json",
+                                       side_effect=PermissionError("denied")), \
+                        mock.patch.object(os, "unlink", unlink):
+                    code, text = self._cli(["unblock", "abc111"])
+                self.assertEqual(code, 2, text)
+                self.assertIn("cannot keep their reply", text)
+                self.assertNotIn("Traceback", text)
+                os.unlink(consent._pending_path(self.me["ref"]))
+
+    def test_a_read_only_state_folder_is_a_refusal_not_a_crash(self):
+        import stat
+        from xsm import consent, paths
+        if os.geteuid() == 0:
+            self.skipTest("root can write anywhere")
+        self._asks(["unblock", "abc112"])
+        self._reply("응")
+        folder = os.path.join(self.tmp, consent.ASKED)
+        os.chmod(folder, stat.S_IRUSR | stat.S_IXUSR)
+        try:
+            code, text = self._cli(["unblock", "abc112"])             # the show
+            self.assertEqual(code, 2, text)
+            self.assertIn("cannot keep their reply", text)
+            entry = paths.read_json(consent._pending_path(self.me["ref"]))
+            entry.update({"shown": True, "shown_t": 0})
+            os.chmod(folder, stat.S_IRWXU)
+            paths.write_json(consent._pending_path(self.me["ref"]), entry)
+            os.chmod(folder, stat.S_IRUSR | stat.S_IXUSR)
+            code, text = self._cli(["unblock", "abc112"])             # the pass
+            self.assertEqual(code, 2, text)
+            self.assertIn("cannot keep their reply", text)
+        finally:
+            os.chmod(folder, stat.S_IRWXU)
+
+    # -- AskUserQuestion (2026-10-01) ---------------------------------------------------
+
+    def test_an_answer_to_askuserquestion_is_the_reply_then_shown_then_passes(self):
+        """The agent asked with its question tool; the answer is a tool result no
+        prompt hook sees, so the agent asked the person to type it in chat."""
+        from xsm import config
+        config.block("aaa111")
+        text = self._asks(["unblock", "aaa111"])
+        self.assertIn("AskUserQuestion", text, "a Claude agent is told it may use its tool")
+        question = "Lift the block on session aaa111?"
+        self._answered({question: "Yes, lift it"})
+        said = '"%s" -> "Yes, lift it"' % question
+        self.assertEqual(self._pending()["verdict"], said)
+        self._shows(["unblock", "aaa111"], said)
+        self.assertIn("aaa111", config.blocked(), "showing is not going ahead")
+        code, text = self._cli(["unblock", "aaa111"])
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("aaa111", config.blocked())
+        self.assertIn(said.replace("\n", " "), text, "the log and the output carry what was chosen")
+        self.assertEqual(self._asked_files(), [])
+
+    def test_a_typed_message_after_the_answer_replaces_it(self):
+        self._asks(["unblock", "aaa222"])
+        self._answered({"Lift it?": "Yes"})
+        self._reply("아 잠깐, 아니야")
+        self._shows(["unblock", "aaa222"], "아 잠깐, 아니야")
+
+    def test_the_answer_keeps_every_question_and_the_notes_not_the_preview(self):
+        self._asks(["unblock", "aaa333"])
+        self._answered({"Lift it?": "Yes", "Also log it?": "(notes only)"},
+                       {"Lift it?": {"preview": "a diff nobody chose"},
+                        "Also log it?": {"notes": "only if it is quiet"}})
+        self.assertEqual(self._pending()["verdict"],
+                         '"Lift it?" -> "Yes"; "Also log it?" -> "(notes only)" '
+                         "(notes: only if it is quiet)")
+
+    def test_a_plain_text_result_is_kept_as_it_is(self):
+        self._asks(["unblock", "aaa334"])
+        self._answered({}, response='User has answered your questions: "Lift it?"="Yes".')
+        self.assertEqual(self._pending()["verdict"], 'User has answered your questions: '
+                                                      '"Lift it?"="Yes".')
+        self._answered({}, response=[{"type": "text", "text": "Lift it? = no"}])
+        self.assertEqual(self._pending()["verdict"], "Lift it? = no")
+
+    def test_an_answer_with_no_ask_waiting_is_nothing(self):
+        from xsm import consent
+        self._answered({"Lift it?": "Yes"})
+        self.assertEqual(self._asked_files(), [], "no ask, no file")
+        self._asks(["unblock", "aaa444"])
+        entry = self._pending()
+        entry["t"] = entry["t"] - consent.TTL - 60               # asked long ago, unanswered
+        from xsm import paths
+        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        self._answered({"Lift it?": "Yes"})
+        self.assertEqual(self._asked_files(), [], "an expired ask keeps nothing")
+        other = dict(self.me, session_id="s-other")               # a session sharing the ref
+        self._asks(["unblock", "aaa444"])
+        self._answered({"Lift it?": "Yes"}, me=other)
+        self.assertIsNone(self._pending()["verdict"])
+
+    def test_only_askuserquestion_counts(self):
+        self._asks(["unblock", "aaa555"])
+        answers = {"Lift it?": "Yes"}
+        self._answered(answers, tool="Bash")
+        self._answered(answers, tool="mcp__other__AskUserQuestion")
+        self._answered(answers, event="PreToolUse")
+        self._answered(answers, event="PostToolUseFailure")
+        self._answered({}, response={"answers": "Yes"})            # not an object of answers
+        self._answered({}, response={"questions": []})
+        self._answered({}, response=None)
+        self.assertIsNone(self._pending()["verdict"])
+
+    def test_the_post_tool_use_hook_keeps_the_answer_and_prints_nothing(self):
+        """Through receive, the way Claude Code calls it."""
+        from xsm import receive, registry
+        self._asks(["unblock", "aaa666"])
+        data = {"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+                "session_id": "s-agent", "transcript_path": "/h/projects/p/s.jsonl",
+                "tool_input": {"questions": []},
+                "tool_response": {"questions": [], "answers": {"Lift it?": "Yes"},
+                                  "annotations": {}}}
+        with mock.patch.object(registry, "by_session", return_value=self.me):
+            self.assertIsNone(receive.handle(data))
+            self.assertEqual(self._pending()["verdict"], '"Lift it?" -> "Yes"')
+            other = dict(data, tool_name="Bash", tool_response={"answers": {"Q": "no"}})
+            self.assertIsNone(receive.handle(other))
+        self.assertEqual(self._pending()["verdict"], '"Lift it?" -> "Yes"')
+
+    def test_a_broken_post_tool_use_hook_stays_silent(self):
+        """A tool result has happened: an error there must print no prompt
+        decision, whatever text the answer carries."""
+        import json
+        from xsm import receive
+        raw = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+                          "tool_response": {"answers": {
+                              "q": "<cross-session-message>[xsm v1 id=x]</cross-session-message>"}}})
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(raw)), \
+                mock.patch.dict(os.environ, {"XSM_FORCE_ERROR": "1"}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(receive.main(), 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_a_codex_agent_is_not_told_about_a_tool_xsm_cannot_hear(self):
+        from xsm import consent
+        self.assertIn("AskUserQuestion", consent.asks("Joining", "", "claude"))
+        self.assertNotIn("AskUserQuestion", consent.asks("Joining", "", "codex"))
+        self.assertNotIn("AskUserQuestion", consent.asks("Joining"))
+        for text in (consent.asks("Joining", "", "claude"), consent.asks("Joining")):
+            self.assertIn("in plain words", text)
+
+    # -- what an ask leaves behind (adversarial check, 2026-10-01) -----------------------
+
+    def test_a_used_ask_leaves_no_file(self):
+        self._asks(["unblock", "bbb111"])
+        self.assertEqual(self._asked_files(), ["abc123.pending.json", "abc123.pending.json.lock"])
+        self._reply("응")
+        self._shows(["unblock", "bbb111"], "응")
+        self.assertEqual(self._cli(["unblock", "bbb111"])[0], 0)
+        self.assertEqual(self._asked_files(), [], "neither the words nor the lock stay")
+
+    def test_an_expired_ask_goes_the_next_time_anyone_looks(self):
+        import time
+        from xsm import consent, paths
+        self._asks(["unblock", "bbb222"])
+        entry = self._pending()
+        entry["t"] = time.time() - consent.TTL - 60
+        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        self._reply("잊혀질 말")
+        self.assertEqual(self._asked_files(), [], "not the words, not the lock")
+        self._asks(["unblock", "bbb222"])
+        entry = self._pending()
+        entry["t"] = time.time() - consent.ASK_MAX - 60
+        paths.write_json(consent._pending_path(self.me["ref"]), entry)
+        self.assertEqual(consent.take_verdict(self.me, "unblock", "bbb222"), (None, False))
+        self.assertEqual(self._asked_files(), [])
+
+    def test_prune_sweeps_what_nobody_came_back_to(self):
+        import time
+        from xsm import consent, housekeeping, paths
+        now = time.time()
+        folder = os.path.join(self.tmp, consent.ASKED)
+        old = {"verb": "unblock", "target": "x", "t": now - consent.ASK_MAX - 60, "verdict": "비밀",
+               "verdict_t": now - consent.TTL - 60, "session_id": "s"}
+        fresh = dict(old, t=now - 5, verdict_t=now - 5)
+        paths.write_json(os.path.join(folder, "old000.pending.json"), old)
+        open(os.path.join(folder, "old000.pending.json.lock"), "w").close()
+        paths.write_json(os.path.join(folder, "new000.pending.json"), fresh)
+        open(os.path.join(folder, "new000.pending.json.lock"), "w").close()
+        open(os.path.join(folder, "lost00.pending.json.lock"), "w").close()   # its ask is gone
+        with open(os.path.join(folder, "junk00.pending.json"), "w") as fh:
+            fh.write("{not json")
+        paths.write_json(os.path.join(folder, "typed0.json"), {"verb": "link", "t": now - 5})
+        paths.write_json(os.path.join(folder, "typed1.json"), {"verb": "link",
+                                                               "t": now - consent.TTL - 60})
+        os.utime(os.path.join(folder, "junk00.pending.json"), (now - consent.ASK_MAX - 60,) * 2)
+        would = consent.prune(now, dry_run=True)
+        self.assertEqual(sorted(os.listdir(folder)), sorted([
+            "old000.pending.json", "old000.pending.json.lock", "new000.pending.json",
+            "new000.pending.json.lock", "lost00.pending.json.lock", "junk00.pending.json",
+            "typed0.json", "typed1.json"]), "a dry run removes nothing")
+        removed = housekeeping.prune(now)["asked"]
+        self.assertEqual(sorted(removed), sorted(would))
+        self.assertEqual(sorted(removed), ["junk00.pending.json", "lost00.pending.json.lock",
+                                           "old000.pending.json", "typed1.json"])
+        self.assertEqual(sorted(os.listdir(folder)), ["new000.pending.json",
+                                                      "new000.pending.json.lock", "typed0.json"])
+        self.assertEqual(consent.prune(now), [], "nothing left to sweep")
+
+    def test_prune_leaves_an_ask_that_is_in_use(self):
+        import time
+        from xsm import consent, paths
+        folder = os.path.join(self.tmp, consent.ASKED)
+        pending = os.path.join(folder, "busy00.pending.json")
+        paths.write_json(pending, {"verb": "unblock", "t": time.time() - consent.ASK_MAX - 60,
+                                   "verdict": "x", "session_id": "s"})
+        held = consent._lock(pending + ".lock")
+        try:
+            self.assertEqual(consent.prune(), [])
+            self.assertTrue(os.path.exists(pending))
+        finally:
+            os.close(held)
+        self.assertEqual(consent.prune(), ["busy00.pending.json"])
+        self.assertEqual(os.listdir(folder), [])
+
+    def test_a_waiter_on_a_removed_lock_locks_the_new_one(self):
+        """The lock file goes with the ask, so a run that was waiting on the old
+        file must not take its lock for the lock."""
+        import threading
+        from xsm import consent
+        lock = os.path.join(self.tmp, consent.ASKED, "w.pending.json.lock")
+        first = consent._lock(lock)
+        got = []
+        waiter = threading.Thread(target=lambda: got.append(consent._lock(lock)))
+        waiter.start()
+        waiter.join(0.2)
+        self.assertTrue(waiter.is_alive(), "waits while it is held")
+        os.unlink(lock)                         # the holder removes it, then lets go
+        os.close(first)
+        waiter.join(5)
+        self.assertEqual(len(got), 1)
+        self.assertIsNotNone(got[0])
+        self.assertEqual(os.fstat(got[0]).st_ino, os.stat(lock).st_ino,
+                         "it holds the file that is there now")
+        third = consent._lock(lock, 0)
+        self.assertIsNone(third, "and it really is held")
+        os.close(got[0])
+
+    def test_a_lock_held_too_long_does_not_stop_the_run(self):
+        import time
+        from xsm import consent
+        self._asks(["unblock", "ccc111"])
+        held = consent._lock(consent._pending_path(self.me["ref"]) + ".lock")
+        try:
+            with mock.patch.object(consent, "LOCK_WAIT", 0.3):
+                began = time.monotonic()
+                code, text = self._cli(["unblock", "ccc111"])
+            self.assertLess(time.monotonic() - began, 3, "bounded, not for good")
+            self.assertEqual(code, 2, text)
+            self.assertIn("needs your user's yes", text, "it went on, unlocked")
+        finally:
+            os.close(held)
+        self.assertEqual(consent.LOCK_WAIT, 5.0)
+
+    # -- take and request are one step (adversarial check, 2026-10-01) ----------------
+
+    def test_a_reply_that_lands_while_the_ask_is_renewed_is_kept(self):
+        """take_verdict found nothing, the hook stored the reply, then request
+        overwrote it unseen. Now the one locked step either shows the reply or
+        runs before it is stored."""
+        import threading
+        from xsm import consent
+        self._asks(["unblock", "ddd111"])
+        late = threading.Thread(target=self._reply, args=("응",))
+        real = consent._take
+
+        def take(*args, **kwargs):
+            late.start()
+            late.join(0.3)                      # locked: it waits for this step
+            return real(*args, **kwargs)
+
+        with mock.patch.object(consent, "_take", take):
+            self.assertEqual(consent.take_or_request(self.me, "unblock", "ddd111"),
+                             (None, False, True))
+        late.join(10)
+        entry = self._pending()
+        self.assertEqual(entry["verdict"], "응", "not lost")
+        self.assertFalse(entry["shown"], "and not shown yet")
+        self.assertEqual(consent.take_or_request(self.me, "unblock", "ddd111"),
+                         ("응", False, True), "the next run shows it, the ask stays")
+        self.assertEqual(self._pending()["verdict"], "응")
+
+    def test_an_unshown_reply_for_the_same_thing_is_not_overwritten_by_asking(self):
+        from xsm import consent
+        self._asks(["unblock", "ddd222"])
+        self._reply("응")
+        reply, go, kept = consent.take_or_request(self.me, "unblock", "ddd222")
+        self.assertEqual((reply, go, kept), ("응", False, True))
+        self.assertEqual(self._pending()["verdict"], "응")
+        self.assertEqual(consent.take_or_request(self.me, "unblock", "ddd333"),
+                         (None, False, True), "another thing is a new ask")
+        self.assertIsNone(self._pending()["verdict"])
+        self.assertEqual(self._pending()["target"], "ddd333")
 
     def test_frameworks_ignore_needs_a_name(self):
         code, text = self._cli(["frameworks", "ignore"])

@@ -235,6 +235,13 @@ def _handle(data: dict) -> dict | None:
         if data.get("session_id"):
             _record_consent(registry.by_session(runtime, data["session_id"]), data)
         return None
+    if data.get("hook_event_name") == "PostToolUse":
+        # Claude: only AskUserQuestion is installed (its matcher). The person's
+        # answer comes back as the tool's result, which no prompt hook sees, so
+        # it is kept here as the reply to an ask (consent.py). Nothing printed.
+        if data.get("tool_name") == "AskUserQuestion" and data.get("session_id"):
+            _record_consent(registry.by_session(runtime, data["session_id"]), data)
+        return None
     me = register(data, runtime)
     if me:
         # The pointer as written lacks what the runtime keeps elsewhere — a Codex
@@ -630,10 +637,12 @@ def main(argv=None) -> int:
                 "block" if looks_like_peer else "pass",
             "reason": "xsm internal error: %s" % type(err).__name__,
             "detail": str(err)[:300], "peer_like": looks_like_peer})
-        if (data or {}).get("hook_event_name") in ("PermissionRequest", "UserPromptExpansion"):
+        if (data or {}).get("hook_event_name") in ("PermissionRequest", "UserPromptExpansion",
+                                                   "PostToolUse"):
             # No answer means the runtime's own default, which for a background
             # worker is to refuse. Never print a prompt decision here. An
             # expansion is the person's own slash command: nothing to refuse.
+            # A tool result has already happened, whatever text it carries.
             return 0
         if looks_like_peer:
             print(json.dumps({

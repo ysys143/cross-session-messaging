@@ -149,6 +149,11 @@ TOOLS = [
 # 0.158). Only Codex is known to decline forms without showing them.
 CODEX_CLIENT = "codex-mcp-client"
 ACTIONS = {"accept": "accepted", "decline": "declined", "cancel": "dismissed"}
+# The MCP spec's three results of a form: accept (the person submitted it),
+# decline (they explicitly said no) and cancel (they dismissed it without
+# choosing). A client that shows its forms reports a no as a decline, so xsm
+# reads it as the person's no and the agent does not ask again (2026-10-01).
+DECLINED = "declined by your user"
 
 
 def person_answer(reply, allowed=None, client=None) -> tuple:
@@ -174,7 +179,9 @@ def person_answer(reply, allowed=None, client=None) -> tuple:
     reported as either. A bare "your user did not allow it" read as a refusal
     nobody had given (a tester's report, 2026-09-28). `client` is the
     clientInfo.name from initialize, so the wording names Codex only when it
-    is Codex."""
+    is Codex. From a client known to show its forms, a decline is the person's
+    no (DECLINED); a client that did not say who it is stays unsure. A cancel
+    is no answer: the form was dismissed."""
     if not isinstance(reply, dict):
         return None, "the client sent no reply"
     error = reply.get("error")
@@ -201,7 +208,7 @@ def person_answer(reply, allowed=None, client=None) -> tuple:
             return None, ("declined — by your user, or by Codex without showing the form "
                           "(approval_policy \"never\")")
         if client:
-            return None, "declined — by your user, or by the client without showing the form"
+            return None, DECLINED
         return None, ("declined — by your user, or by the client without showing the form "
                       "(Codex does this under approval_policy \"never\")")
     if action == "cancel":
@@ -215,6 +222,15 @@ def person_answer(reply, allowed=None, client=None) -> tuple:
     if allowed and answer not in allowed:
         return None, "the form came back with %r, which is not one of its choices" % answer
     return answer, "they chose %r" % answer
+
+
+def unanswered(why: str) -> str:
+    """The head of a form tool's result when no choice came back. A decline
+    (DECLINED) is the person's no and says so; the agent must not ask again.
+    Anything else is no answer, and the agent may ask in plain words."""
+    if why == DECLINED:
+        return "your user declined (they said no; do not ask again or work around it)"
+    return "your user did not answer (%s)" % why
 
 
 def who_answered(reply, client=None) -> str:
@@ -396,7 +412,7 @@ class Server:
                                 "required": ["answer"]}})
         answer, why = self.answer(reply, options)
         if answer is None:
-            return "your user did not answer (%s); nothing was recorded" % why
+            return "%s; nothing was recorded" % unanswered(why)
         summary = (args.get("summary") or "").strip()
         text = "%s: %s" % (summary, answer) if summary else "%s -> %s" % (question, answer)
         author = {"kind": "human", "name": os.environ.get("USER") or "person",
@@ -457,6 +473,8 @@ class Server:
             return True, None
         if answer == "deny":
             return False, "your user declined: they chose 'deny'; do not work around it"
+        if why == DECLINED:
+            return False, unanswered(why)
         return False, ("your user did not answer (%s). If the form did not reach them, ask "
                        "them in plain words and run `%s` in your shell: it keeps their reply "
                        "as the verdict, shows it to you, and goes ahead when you run it "
@@ -588,6 +606,8 @@ class Server:
                 "type": "string", "title": "Permission", "enum": [allow, deny]}},
                 "required": ["answer"]}})
         answer, why = self.answer(reply, [allow, deny])
+        if why == DECLINED:
+            answer = deny               # they said no to the form: the request is answered
         if answer is None:
             return ("your user did not answer (%s); the request is still waiting and the worker "
                     "is blocked until it is answered. Ask your user in plain words and run "
@@ -631,8 +651,7 @@ class Server:
         answer, why = self.answer(reply, [deny, allow])
         if answer is None:
             # Nobody chose, so there is no decision to put on record.
-            return "your user did not answer (%s); nothing was granted — do not start that " \
-                   "worker" % why
+            return "%s; nothing was granted — do not start that worker" % unanswered(why)
         author = {"kind": "human", "name": os.environ.get("USER") or "person",
                   "via": "mcp-elicitation", "asked_by": me.get("ref"), "runtime": me.get("runtime")}
         verdict = "allowed" if answer == allow else "refused"

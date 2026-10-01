@@ -236,7 +236,7 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
         from . import consent
         target = "%s:%s:%s" % (runtime, os.path.realpath(cwd), ",".join(sorted(options)))
         what = describe_grant(runtime, cwd, options)
-        verdict, go = consent.take_verdict(caller, "grant", target)
+        verdict, go, kept = consent.take_or_request(caller, "grant", target)
         if verdict is not None and not go:
             raise WorkerError(consent.shown_refusal(verdict, what))
         if verdict is not None:
@@ -249,10 +249,11 @@ def use_grant(grant_id: str | None, caller: dict | None, runtime: str, cwd: str,
             p = paths.path(GRANTS, grant["id"] + ".json")
             os.rename(p, p + ".used")         # spent on this spawn, like a --grant
             return grant
-        if not consent.request(caller, "grant", target):
+        if not kept:
             raise WorkerError(consent.cannot_keep(what, "xsm_grant"))
         raise WorkerError(consent.asks(what, " (The xsm_grant MCP tool asks with a form "
-                                             "instead; then pass --grant <id>.)"))
+                                             "instead; then pass --grant <id>.)",
+                                       (caller or {}).get("runtime")))
     p = paths.path(GRANTS, grant_id + ".json")
     claimed = p + ".used"
     try:

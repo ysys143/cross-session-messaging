@@ -33,8 +33,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # no SessionEnd event, so a stopped Codex session always reads as stale.
 # UserPromptExpansion fires only for a slash command the person typed, never
 # for a peer message, so it is where a typed `/xsm link` is taken as consent
-# (consent.py, 2026-09-28).
-CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "UserPromptExpansion", "SessionEnd")
+# (consent.py, 2026-09-28). PostToolUse is installed for one tool only: the
+# person's answer to AskUserQuestion is a tool result, no prompt (2026-10-01).
+CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse",
+                 "SessionEnd")
+MATCHERS = {"PostToolUse": "AskUserQuestion"}
 # No PermissionRequest for Codex: Codex has no such hook event to relay a
 # question through, so a background Codex worker runs with approvals off
 # inside its sandbox instead. Background Claude workers get theirs from their
@@ -263,9 +266,15 @@ def _plugin_entry(home: str) -> dict | None:
     return None
 
 
+def _matchers(groups) -> set:
+    return {g["matcher"] for g in groups if isinstance(g, dict) and g.get("matcher")} \
+        if isinstance(groups, list) else set()
+
+
 def plugin_missing_hooks(home: str) -> list:
     """The hook events this checkout's hooks/hooks.json has and the installed
-    plugin's copy lacks. A version string does not tell: the plugin cache kept
+    plugin's copy lacks, and for an event with matchers, `Event(matcher)` for
+    each the copy lacks. A version string does not tell: the plugin cache kept
     a hooks.json without UserPromptExpansion, so a typed /xsm link was never
     recorded, while doctor and --refresh said the plugin kept itself up to
     date (review, 2026-09-28). Empty when there is no plugin or its folder
@@ -275,7 +284,15 @@ def plugin_missing_hooks(home: str) -> list:
         return []
     want = (paths.read_json(os.path.join(REPO, "hooks", "hooks.json"), {}) or {}).get("hooks") or {}
     have = (paths.read_json(os.path.join(path, "hooks", "hooks.json"), {}) or {}).get("hooks") or {}
-    return [event for event in want if event not in have]
+    out = []
+    for event, groups in want.items():
+        wanted = _matchers(groups)
+        if not wanted:
+            if event not in have:
+                out.append(event)
+            continue
+        out += ["%s(%s)" % (event, m) for m in sorted(wanted - _matchers(have.get(event)))]
+    return out
 
 
 def plugin_outdated_note(missing: list) -> str:
@@ -699,8 +716,21 @@ def _allow_list(data) -> list:
     return allow if isinstance(allow, list) else []
 
 
+def settings_invalid(home: str) -> str | None:
+    """The settings file of this Claude home when it exists and is not a JSON
+    object xsm can read, else None. It is the person's file: xsm leaves it as
+    it is (2026-10-01: a refresh replaced one with a file of only `permissions`)
+    and says so."""
+    target = _settings_file(home, "claude")
+    return target if os.path.exists(target) and \
+        not isinstance(paths.read_json(target), dict) else None
+
+
 def missing_form_tools(home: str) -> list:
-    """What `allow_form_tools` would add: the rules this Claude home lacks."""
+    """What `allow_form_tools` would add: the rules this Claude home lacks.
+    None are named for a file it cannot read: it adds nothing there."""
+    if settings_invalid(home):
+        return []
     allow = _allow_list(paths.read_json(_settings_file(home, "claude")))
     return [n for n in form_tool_names() if n not in allow]
 
@@ -719,7 +749,9 @@ def _xsm_rules(note, allow: list) -> list:
 
 
 def allow_form_tools(home: str) -> str:
-    """Add the form tools to this Claude home's permissions.allow: added | already.
+    """Add the form tools to this Claude home's permissions.allow: added |
+    updated (only rules an earlier version added and the list dropped were
+    removed) | already | invalid (the file is not JSON xsm can read: untouched).
 
     What xsm put there is noted (ALLOWED), because a rule the person already
     had looks exactly like one xsm added and `remove_form_tools` must not take
@@ -728,6 +760,8 @@ def allow_form_tools(home: str) -> str:
     `created` is what the note says xsm made from nothing (permissions, allow),
     so uninstall can leave the file as it found it."""
     target = _settings_file(home, "claude")
+    if settings_invalid(home):
+        return "invalid"
     data = paths.read_json(target, {}) or {}
     perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
     allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
@@ -757,7 +791,7 @@ def allow_form_tools(home: str) -> str:
         if created is not None:
             record["created"] = created
         paths.write_json(note_path, record)
-    return "added" if missing else "already"
+    return "added" if missing else "updated" if stale else "already"
 
 
 def remove_form_tools(home: str) -> bool:
@@ -860,7 +894,7 @@ def plan(home: str, runtime: str) -> dict:
     home = os.path.realpath(os.path.expanduser(home))
     target = _settings_file(home, runtime)
     data = paths.read_json(target)
-    if data is None and os.path.exists(target):
+    if os.path.exists(target) and not isinstance(data, dict):
         return {"home": home, "runtime": runtime, "file": target, "error": "file is not valid JSON"}
     data = data or {}
     hooks = data.get("hooks", {}) if isinstance(data.get("hooks"), dict) else {}
@@ -873,7 +907,8 @@ def plan(home: str, runtime: str) -> dict:
         # "keep" means exactly one marked group with exactly the right command:
         # a duplicate or a stale path still needs replacing.
         have = len(ours) == 1 and _same_command(ours[0]["hooks"][0].get("command"), want) and \
-            ours[0]["hooks"][0].get("timeout", 10) == TIMEOUTS.get(event, 10)
+            ours[0]["hooks"][0].get("timeout", 10) == TIMEOUTS.get(event, 10) and \
+            ours[0].get("matcher") == MATCHERS.get(event)
         actions.append({"event": event, "others": len(groups) - len(ours),
                         "action": "keep" if have else ("replace" if ours else "add"),
                         "command": want})
@@ -908,8 +943,11 @@ def apply(home: str, runtime: str) -> dict:
             else:
                 hooks.pop(event, None)
             continue
-        groups.append({"hooks": [{"type": "command", "command": action["command"],
-                                  "timeout": TIMEOUTS.get(event, 10)}]})
+        group = {"hooks": [{"type": "command", "command": action["command"],
+                            "timeout": TIMEOUTS.get(event, 10)}]}
+        if event in MATCHERS:
+            group = dict(matcher=MATCHERS[event], **group)
+        groups.append(group)
         hooks[event] = groups
     paths.write_json(target, data, mode=0o644)
     if paths.read_json(target) is None:                # re-parse or roll back
@@ -926,7 +964,7 @@ def remove(home: str, runtime: str) -> dict:
     home = os.path.realpath(os.path.expanduser(home))
     target = _settings_file(home, runtime)
     data = paths.read_json(target)
-    if data is None:
+    if not isinstance(data, dict):
         return {"home": home, "file": target, "error": "nothing to remove or unreadable file"}
     backup = _backup(target)
     removed = 0
@@ -1065,6 +1103,8 @@ def doctor() -> dict:
                                  if h.get("runtime") == "claude"},
         "allow_missing": {h["path"]: missing_form_tools(h["path"]) for h in homes
                           if h.get("runtime") == "claude"},
+        "settings_invalid": {h["path"]: settings_invalid(h["path"]) for h in homes
+                             if h.get("runtime") == "claude" and settings_invalid(h["path"])},
         "stale": {h["path"]: stale_copies(h["path"], h.get("runtime") or "claude")
                   for h in homes},
         "leftovers": {h["path"]: leftovers(h["path"]) for h in homes},

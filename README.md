@@ -143,7 +143,7 @@ xsm who                                        # how this session appears
 ### 2. Connecting to a session in another repository
 
 ```bash
-/xsm link ~/src/other-repo                     # in a session on either side (Codex: $xsm link ...)
+/xsm link ~/src/other-repo                     # type it in a session on either side (Codex: $xsm link ...), or just ask the agent to link it
 xsm projects                                   # which folders are linked or joined
 ```
 
@@ -174,17 +174,21 @@ xsm selftest                                   # whether the hooks actually run
 ### Communication scope
 
 Sessions in the same Git repository can talk to each other, even from different subfolders. Outside a Git
-repository, sessions in the same folder can talk. To connect another folder, type `/xsm link` in a session on
-either side. One side is enough: the link works both ways and stays until you remove it.
+repository, sessions in the same folder can talk. To connect another folder, ask the agent in a session on either
+side to link it. The agent asks you in plain words, then runs `xsm link <folder>` itself; your reply is the consent.
+You can also type `/xsm link <folder>` yourself. One side is enough: the link works both ways and stays until you
+remove it.
 
 ```bash
-/xsm link ~/src/other-repo           # in a session (Codex: $xsm link ...); typing it is your consent
-xsm link ~/src/other-repo            # or in a terminal
+xsm link ~/src/other-repo            # what the agent runs once you have said yes
+/xsm link ~/src/other-repo           # or you type it in a session (Codex: $xsm link ...): that is your consent
 xsm unlink ~/src/other-repo          # anyone may remove it
 ```
 
-- `join`: to group several folders, type `/xsm join <name>` in a session in each folder.
-- `reach`: to connect a single session for as long as it runs, type `/xsm reach <folder>` in that session.
+- `join`: to group several folders, ask the agent in a session in each folder to join `<name>` (typing
+  `/xsm join <name>` works too).
+- `reach`: to connect a single session for as long as it runs, ask that session's agent to reach the folder
+  (typing `/xsm reach <folder>` works too).
 
 ### Sending messages
 

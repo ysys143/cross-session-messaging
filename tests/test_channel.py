@@ -337,17 +337,41 @@ class McpServerTest(TempState):
         self.assertIn(command, next(m for m in out if m.get("id") == 2)
                       ["result"]["content"][0]["text"])
 
-    def test_a_bare_decline_names_codex_only_for_codex(self):
+    def test_a_bare_decline_is_unsure_only_for_codex_or_an_unnamed_client(self):
         init = lambda name: dict(self.INIT, params=dict(self.INIT["params"],
                                                         clientInfo={"name": name}))
         decline = {"result": {"action": "decline"}}
         text = self._ask("xsm_join", {"project": "demo"}, decline, init=init("codex-mcp-client"))
         self.assertIn("by Codex without showing the form", text)
-        text = self._ask("xsm_join", {"project": "demo"}, decline, init=init("claude-code"))
-        self.assertIn("by the client without showing the form", text)
-        self.assertNotIn("Codex", text)
         text = self._ask("xsm_join", {"project": "demo"}, decline)
         self.assertIn("by the client without showing the form (Codex does this", text)
+
+    def test_a_decline_from_a_client_that_shows_forms_is_the_persons_no(self):
+        """The MCP spec: decline is an explicit no, cancel a dismissal. A form
+        tool read both as no answer and the agent asked again (2026-10-01)."""
+        from xsm import channel, config, mcp
+        init = dict(self.INIT, params=dict(self.INIT["params"], clientInfo={"name": "claude-code"}))
+        decline = {"result": {"action": "decline"}}
+        cancel = {"result": {"action": "cancel"}}
+        text = self._ask("xsm_join", {"project": "demo"}, decline, init=init)
+        self.assertIn("your user declined", text)
+        self.assertIn("do not ask again", text)
+        self.assertNotIn("did not answer", text)
+        self.assertNotIn("run `xsm join", text, "no road round a no")
+        self.assertEqual(config.projects(), [])
+        text = self._ask("xsm_join", {"project": "demo"}, cancel, init=init)
+        self.assertIn("did not answer", text)
+        self.assertIn("dismissed", text)
+        self.assertIn("xsm join demo", text, "no answer: the agent may ask in words")
+        self.assertEqual(mcp.person_answer({"result": {"action": "decline"}}, client="claude-code"),
+                         (None, mcp.DECLINED))
+        call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "xsm_decide", "arguments": {"question": "Ship it?"}}}
+        out, here = self._run(init, call, {"jsonrpc": "2.0", "id": "xsm-1", "result": {
+            "action": "decline"}})
+        said = next(m for m in out if m.get("id") == 2)["result"]["content"][0]["text"]
+        self.assertIn("your user declined", said)
+        self.assertEqual(channel.read(channel.resolve(here)[1]), [])
 
     def test_decide_offers_options_as_they_are_compared(self):
         # " yes " was offered as is and compared stripped, so the person's

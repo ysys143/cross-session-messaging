@@ -1,5 +1,5 @@
 {
-  "description": "Registers this session so others can address it, checks every peer message before it reaches the model (ADR-0001, PROTOCOL 5.1), and keeps a typed /xsm link as the person's consent (PROTOCOL 5.3.3).",
+  "description": "Registers this session so others can address it, checks every peer message before it reaches the model (ADR-0001, PROTOCOL 5.1), and keeps a typed /xsm link, or the answer to an AskUserQuestion, as the person's consent (PROTOCOL 5.3.3).",
   "hooks": {
     "SessionStart": [
       {
@@ -47,6 +47,18 @@
     ],
     "PermissionRequest": [
       {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/xsm-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",

@@ -327,7 +327,7 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
     if not key:
         return ("%s is your user's decision: ask them in plain words, then run this again"
                 % what)
-    verdict, go = consent.take_verdict(me, *key)
+    verdict, go, kept = consent.take_or_request(me, *key)
     if verdict is not None and not go:
         return consent.shown_refusal(verdict, what)
     if verdict is not None:
@@ -337,11 +337,11 @@ def _person_or_refuse(what: str, mcp_tool: str, typed: tuple | None = None,
             "by": (me or {}).get("name")})
         print('approved on your user\'s reply: "%s"' % verdict.replace("\n", " ")[:200])
         return None
-    if not consent.request(me, *key):
+    if not kept:
         return consent.cannot_keep(what, mcp_tool)
     tool = " (The %s MCP tool asks with a form instead.)" % mcp_tool \
         if mcp_tool and mcp_tool != "no" else ""
-    return consent.asks(what, tool)
+    return consent.asks(what, tool, (me or {}).get("runtime"))
 
 
 def cmd_join(args) -> int:
@@ -524,6 +524,10 @@ def cmd_block(args) -> int:
     ref = args.ref.strip()
     if ref.startswith("ref:"):          # the deny list holds bare refs, as `list` shows them
         ref = ref[len("ref:"):]
+    if not ref or len(ref.split()) != 1:        # before anyone is asked, or anything is stored
+        print("usage: xsm %s <ref> (the [ref] `xsm list` shows, e.g. a1b2c3)" % args.command,
+              file=sys.stderr)
+        return USAGE
     if args.command == "unblock":
         why = _person_or_refuse("lifting the block on session %s" % ref, "no",
                                 ask=("unblock", ref))
@@ -870,8 +874,14 @@ def cmd_install(args) -> int:
                 _home_tilde(home), plugin, install.plugin_outdated_note(missing) if missing
                 else "keeps it up to date"))
             _print_retired(home, install.remove_retired(home))
-            if runtime == "claude" and install.allow_form_tools(home) == "added":
-                print("  allowed the xsm skill, approval-form tools and asking commands so auto mode lets them ask")
+            if runtime == "claude":
+                state = install.allow_form_tools(home)
+                if state == "added":
+                    print("  allowed the xsm skill, approval-form tools and asking commands so auto mode lets them ask")
+                elif state == "updated":
+                    print("  took out allow rules an earlier xsm added and no longer wants")
+                elif state == "invalid":
+                    print(_settings_invalid_note(home))
             if runtime == "codex":
                 cleared = install.clear_codex_leftovers(home)
                 if cleared:
@@ -929,9 +939,12 @@ def _install(args, targets) -> int:
             print("installed into %s (backup: %s)" % (result["file"], result.get("backup", "none")))
         _print_retired(home, install.remove_retired(home))
         if runtime == "claude":
-            print("  approval forms: %s (the xsm skill, link, reach, join and the other tools "
-                  "and commands that ask you; allowed so auto mode lets them ask)"
-                  % install.allow_form_tools(home))
+            state = install.allow_form_tools(home)
+            if state == "invalid":
+                print(_settings_invalid_note(home))
+            else:
+                print("  approval forms: %s (the xsm skill, link, reach, join and the other tools "
+                      "and commands that ask you; allowed so auto mode lets them ask)" % state)
         if runtime == "codex":
             cli_state = install.install_cli()
             if cli_state == "foreign":
@@ -977,6 +990,12 @@ def _install(args, targets) -> int:
                   "Until you do, the hook does not run. Codex has no SessionEnd, so a "
                   "stopped Codex session always reads as stale.")
     return USAGE if failed else OK
+
+
+def _settings_invalid_note(home: str) -> str:
+    """A Claude settings file xsm cannot read is left as it is, and named."""
+    return ("  %s is not valid JSON, so xsm left it as it is and added no allow rules; fix it, "
+            "then run `xsm install --refresh`" % _home_tilde(install.settings_invalid(home) or home))
 
 
 def _print_retired(home: str, gone: list) -> None:
@@ -1060,6 +1079,8 @@ def cmd_doctor(args) -> int:
     for home, missing in (report.get("allow_missing") or {}).items():
         if missing:
             print("allow      %s" % _allow_note(home, missing))
+    for home in report.get("settings_invalid") or {}:
+        print("allow      %s" % _settings_invalid_note(home).strip())
     for home, files in (report.get("stale") or {}).items():
         if files:
             print("stale      %s: %d file(s) behind the repo; refresh with `xsm install --refresh`"
@@ -1184,6 +1205,8 @@ def _doctor_rows(report: dict) -> list:
     for home, missing in (report.get("allow_missing") or {}).items():
         if missing:
             rows.append(("allow", _allow_note(home, missing)))
+    for home in report.get("settings_invalid") or {}:
+        rows.append(("allow", _settings_invalid_note(home).strip()))
     for home, files in (report.get("stale") or {}).items():
         if files:
             rows.append(("stale", "%s: %d file(s) behind; refresh with `xsm install --refresh`"
@@ -1721,9 +1744,10 @@ def cmd_prune(args) -> int:
     verb = "would remove" if args.dry_run else "removed"
     lines = removed.get("telemetry") or {}
     print("%s %d session pointer(s), %d ledger record(s), %d held message(s), %d inbox copy(ies), "
-          "%d telemetry line(s)" % (
+          "%d telemetry line(s), %d ask file(s)" % (
               verb, len(removed["sessions"]), len(removed["ledger"]), len(removed["held"]),
-              len(removed.get("inbox") or []), sum(lines.values())))
+              len(removed.get("inbox") or []), sum(lines.values()),
+              len(removed.get("asked") or [])))
     for name in removed["sessions"]:
         print("  session %s" % name)
     for name, count in sorted(lines.items()):

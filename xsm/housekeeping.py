@@ -20,7 +20,7 @@ import json
 import os
 import time
 
-from . import attempts, config, identity, inbox, paths
+from . import attempts, config, consent, identity, inbox, paths
 
 STAMP = "last-prune"
 INTERVAL = 3600.0
@@ -49,7 +49,7 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
     pointer_cutoff = now - _setting("retention_days") * 86400
     record_cutoff = now - _setting("ledger_retention_days") * 86400
     removed = {"sessions": [], "ledger": [], "held": [], "inbox": [], "telemetry": {},
-               "attempts": []}
+               "attempts": [], "asked": []}
 
     for p in glob.glob(paths.path(paths.SESSIONS, "*.json")):
         rec = paths.read_json(p)
@@ -83,6 +83,10 @@ def prune(now: float | None = None, dry_run: bool = False) -> dict:
     # limit exists to stop a burst, not to keep a permanent record of failure.
     removed["attempts"] = attempts.prune(now - _setting("attempt_retention_days") * 86400,
                                          dry_run)
+
+    # An ask nobody came back to keeps up to 1000 characters of the person's
+    # last message, and its lock file stays (consent.py).
+    removed["asked"] = consent.prune(now, dry_run)
 
     # A copy for a Codex session that never read it: the queue item it
     # duplicates is gone with the session, so it goes with the pointer window.

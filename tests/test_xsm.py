@@ -668,6 +668,64 @@ class IdempotenceTest(TempState):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["hooks"][0]["command"], install.hook_command("claude", "SessionStart"))
 
+    def test_the_ask_user_question_hook_is_installed_with_its_matcher(self):
+        """The answer to an AskUserQuestion is a tool result; only a PostToolUse
+        hook on that tool hears it (2026-10-01). Another tool's group stays."""
+        from xsm import install, paths
+        home = self._home()
+        target = os.path.join(home, "settings.json")
+        data = paths.read_json(target)
+        theirs = {"matcher": "Bash", "hooks": [{"type": "command", "command": "sh ~/log.sh"}]}
+        data["hooks"]["PostToolUse"] = [theirs]
+        paths.write_json(target, data, mode=0o644)
+        plan = install.plan(home, "claude")
+        post = next(a for a in plan["actions"] if a["event"] == "PostToolUse")
+        self.assertEqual((post["action"], post["others"]), ("add", 1))
+        install.apply(home, "claude")
+        groups = paths.read_json(target)["hooks"]["PostToolUse"]
+        self.assertEqual(groups[0], theirs)
+        self.assertEqual([g.get("matcher") for g in groups], ["Bash", "AskUserQuestion"])
+        self.assertTrue(install.apply(home, "claude").get("unchanged"))
+        install.remove(home, "claude")
+        self.assertEqual(paths.read_json(target)["hooks"]["PostToolUse"], [theirs])
+
+    def test_an_xsm_group_without_the_matcher_is_replaced_not_kept(self):
+        from xsm import install, paths
+        home = self._home()
+        install.apply(home, "claude")
+        target = os.path.join(home, "settings.json")
+        for label, matcher in (("none", None), ("another tool", "Bash")):
+            with self.subTest(label):
+                data = paths.read_json(target)
+                group = data["hooks"]["PostToolUse"][0]
+                group.pop("matcher", None)
+                if matcher:
+                    group["matcher"] = matcher
+                paths.write_json(target, data, mode=0o644)
+                post = next(a for a in install.plan(home, "claude")["actions"]
+                            if a["event"] == "PostToolUse")
+                self.assertEqual(post["action"], "replace")
+                install.apply(home, "claude")
+                groups = paths.read_json(target)["hooks"]["PostToolUse"]
+                self.assertEqual([g.get("matcher") for g in groups], ["AskUserQuestion"])
+
+    def test_doctor_names_a_home_installed_before_the_matcher(self):
+        from xsm import cli, config, install, paths
+        home = self._home()
+        install.apply(home, "claude")
+        target = os.path.join(home, "settings.json")
+        data = paths.read_json(target)
+        del data["hooks"]["PostToolUse"]                  # what an earlier version wrote
+        paths.write_json(target, data, mode=0o644)
+        config.add_home(home, "claude")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertIn("PostToolUse:add", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["install", "--refresh", "--no-mcp", "--python", sys.executable])
+        self.assertIn("AskUserQuestion", json.dumps(paths.read_json(target)["hooks"]))
+
     def test_round_trip_leaves_the_file_byte_identical(self):
         """A settings file people edit by hand must not be reformatted."""
         from xsm import install
@@ -939,6 +997,55 @@ class FormToolPermissionTest(TempState):
         self.assertTrue(install.remove_form_tools(home))
         self.assertEqual(paths.read_json(target)["permissions"]["allow"], ["Bash(ls:*)"])
         self.assertFalse(install.remove_form_tools(home))
+
+    def test_dropping_only_stale_rules_is_an_update_not_already(self):
+        """Every rule was there and only the ones an earlier build wrote and the
+        list dropped went: `already` said nothing had been touched."""
+        from xsm import install, paths
+        home = os.path.join(self.tmp, "only-stale")
+        os.makedirs(home)
+        target = os.path.join(home, "settings.json")
+        paths.write_json(target, {"permissions": {"allow": ["Bash(ls:*)"] + install.form_tool_names()
+                                                  + list(install.STALE_RULES)}})
+        self.assertEqual(install.allow_form_tools(home), "updated")
+        allow = paths.read_json(target)["permissions"]["allow"]
+        for rule in install.STALE_RULES:
+            self.assertNotIn(rule, allow)
+        self.assertEqual(install.allow_form_tools(home), "already")
+
+    def test_a_settings_file_that_is_not_json_is_left_alone_and_named(self):
+        """It was replaced by a file of only `permissions` (a backup kept). It is
+        the person's file: untouched, and the install and doctor say so."""
+        from xsm import cli, config, install
+        for label, text in (("broken", "{ \"model\": \"opus\", // my notes\n"),
+                            ("empty", ""), ("a list", "[1, 2]")):
+            with self.subTest(label):
+                home = os.path.join(self.tmp, "invalid-" + label.replace(" ", "-"))
+                os.makedirs(home)
+                target = os.path.join(home, "settings.json")
+                with open(target, "w") as fh:
+                    fh.write(text)
+                self.assertEqual(install.settings_invalid(home), target)
+                self.assertEqual(install.allow_form_tools(home), "invalid")
+                self.assertEqual(install.missing_form_tools(home), [])
+                self.assertFalse(install.remove_form_tools(home))
+                self.assertEqual(os.listdir(home), ["settings.json"], "no backup, no new file")
+                with open(target) as fh:
+                    self.assertEqual(fh.read(), text)
+                config.add_home(home, "claude")
+                report = install.doctor()
+                self.assertIn(os.path.realpath(home), report["settings_invalid"])
+                self.assertEqual(report["allow_missing"][os.path.realpath(home)], [],
+                                 "no rules to add to a file it cannot read")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    cli.main(["doctor"])
+                self.assertIn("is not valid JSON, so xsm left it as it is", out.getvalue())
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    cli.main(["install", "--refresh"])
+                with open(target) as fh:
+                    self.assertEqual(fh.read(), text)
 
     def test_a_home_without_settings_gets_them(self):
         from xsm import install, paths
@@ -1232,8 +1339,10 @@ class PluginPackagingTest(TempState):
     def test_the_hooks_manifest_covers_every_event_the_gate_needs(self):
         hooks = self._json("hooks", "hooks.json")["hooks"]
         self.assertEqual(sorted(hooks),
-                         ["PermissionRequest", "SessionEnd", "SessionStart", "UserPromptExpansion",
-                          "UserPromptSubmit"])
+                         ["PermissionRequest", "PostToolUse", "SessionEnd", "SessionStart",
+                          "UserPromptExpansion", "UserPromptSubmit"])
+        self.assertEqual([g.get("matcher") for g in hooks["PostToolUse"]], ["AskUserQuestion"],
+                         "no other tool's result is xsm's business")
         for event, groups in hooks.items():
             for group in groups:
                 for hook in group["hooks"]:
