@@ -2366,8 +2366,9 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ASKING:
         sub.choices[name].add_argument(
             "--reply", metavar="TEXT",
-            help="your user's answer, in their own words, when xsm's hook did not record it "
-                 "(it is shown to you first, as a recorded one is)")
+            help="your user's answer to the question you asked them, in their exact words, "
+                 "only when xsm's hook did not record it (it is shown to you first, as a "
+                 "recorded one is)")
     return p
 
 

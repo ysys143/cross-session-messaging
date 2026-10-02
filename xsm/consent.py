@@ -936,9 +936,11 @@ def asks(what: str, tail: str = "", runtime: str | None = None) -> str:
             "wait for their answer. After they answer, run this same command again: xsm keeps "
             "their latest answer in this session as the verdict, and this run shows you that "
             "reply without acting on it. If it is a yes, run the command once more to go ahead; "
-            "if it is a no or a question, leave it and answer them. If it shows no reply even "
-            "though they answered, xsm's hook did not record it: run it again with --reply "
-            "\"<their words, exactly as they wrote them>\".%s"
+            "if it is a no or a question, leave it and answer them. Use --reply only when they "
+            "have answered the question you asked them and this run still shows no reply (xsm's "
+            "hook did not record it): run it again with --reply \"<their answer, exactly as they "
+            "wrote it>\". Never use it before you have asked, or with what they said earlier, "
+            "such as their original request.%s"
             % (what, how(runtime), tail))
 
 

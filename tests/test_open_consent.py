@@ -385,6 +385,14 @@ class ReplyFlagTest(_Repos, TempState):
         self.assertFalse(os.path.exists(consent._recent_path(self.me["ref"])),
                          "spending words made no record that a hook had written")
 
+    def test_the_first_refusal_does_not_invite_the_flag_before_the_person_answered(self):
+        """2026-10-02: "If it shows no reply even though they answered, run it again with
+        --reply" led an agent to pass the person's original request without asking."""
+        text = self._asks(["link", "../repo-b"])
+        self.assertNotIn("even though they answered", text)
+        self.assertIn("--reply only when they have answered the question you asked them", text)
+        self.assertIn("their original request", text)
+
     def test_the_verdict_the_hook_stored_on_the_ask_counts_and_the_agents_own_does_not(self):
         """What the hook keeps from an AskUserQuestion answer is no prompt, but it is theirs."""
         from xsm import config, consent, paths

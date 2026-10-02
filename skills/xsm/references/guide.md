@@ -135,14 +135,19 @@ does not lose the answer to a link; their answer is kept on every request open i
 session, and each run shows you the words for you to judge against what you asked. An ask
 lives half an hour; their answer, ten minutes.
 
-**If xsm shows no reply after they answered**, its hook did not keep it (a session started before an
-update, or a state folder it could not write). Run the same command again with their words,
+**`--reply` is only for an answer to the question you asked.** Ask first, wait, and run the
+command again: that is how their reply reaches you. Only if they have answered what you asked
+and this run still shows no reply, its hook did not keep it (a session started before an
+update, or a state folder it could not write). Then run the same command with their words,
 exactly as they wrote them: `xsm unblock <ref> --reply "<their words>"` (every command that
 asks takes `--reply`). It is shown to you first and then goes ahead, as a kept reply is. Give
-only what they said; it is logged, marked as given by you. xsm checks the words against what its
-hook kept of what they typed in this session, and words that are not theirs are ignored with a
-line saying so, so a yes you wrote yourself does not pass. Only a session whose hook never wrote
-anything takes your words as given. Never write a yes they did not say.
+only what they said in answer to you; it is logged, marked as given by you. Never use it
+before you have asked, or with their original request, or with words they said about something
+else: that is not an answer, and a yes they gave to one thing does not carry to the next. xsm
+checks the words against what its hook kept of what they typed in this session. Words that
+are not theirs, ones already used for an approval, and ones from before this question was
+put are ignored with a line saying so. Only a session whose hook never wrote anything takes
+your words as given. Never write a yes they did not say.
 
 A **reach** is narrower than a link: one session, for as long as it runs. It
 is for handing one thing to a session in another folder without connecting the
