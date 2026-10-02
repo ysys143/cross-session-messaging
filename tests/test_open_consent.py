@@ -299,6 +299,92 @@ class ReplyFlagTest(_Repos, TempState):
         paths.write_json(recent, entry)
         self.assertIn("--reply is ignored", self._link("--reply", "yes do it")[1])
 
+    def _third(self):
+        """A folder the person was never asked about."""
+        c = os.path.realpath(os.path.join(self.tmp, "repo-c"))
+        os.makedirs(c, exist_ok=True)
+        return c
+
+    def _prompts(self):
+        from xsm import consent, paths
+        return paths.read_json(consent._recent_path(self.me["ref"]))["prompts"]
+
+    def test_the_yes_that_linked_one_folder_does_not_link_another(self):
+        """2026-10-02, live Codex test: the person's "응" approved `xsm link repo-b`, and
+        `xsm link repo-c --reply "응"` then passed, show and pass, though they were never
+        asked about repo-c."""
+        from xsm import config
+        c = self._third()
+        self._reply("run the tests")
+        self._asks(["link", "../repo-b"])
+        self._reply("응")
+        self._shows(["link", "../repo-b"], "응")
+        code, text = self._link()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(config.links()), 1, "the normal flow passes, once")
+        self.assertEqual([p.get("used") for p in self._prompts()], [None, True],
+                         "only the words that approved it are spent")
+        for _ in range(2):
+            code, text = self._cli(["link", "../repo-c", "--reply", "응"])
+            self.assertEqual(code, 2, text)
+            self.assertIn("--reply is ignored", text)
+            self.assertNotIn('your user replied: "응"', text)
+        (link,) = config.links()
+        self.assertNotIn(c, (link["a"], link["b"]), "repo-c was not linked")
+
+    def test_the_words_a_flag_carried_are_spent_too(self):
+        from xsm import config
+        self._reply("yes, go ahead and connect them")
+        self._link("--reply", "yes, go ahead and connect them")
+        self._waited()
+        self.assertEqual(self._link("--reply", "yes, go ahead and connect them")[0], 0)
+        self.assertEqual(len(config.links()), 1)
+        self._third()
+        code, text = self._cli(["link", "../repo-c", "--reply", "yes, go ahead and connect them"])
+        self.assertEqual(code, 2, text)
+        self.assertIn("--reply is ignored", text)
+        self.assertEqual(len(config.links()), 1)
+
+    def test_a_request_taken_for_one_folder_is_not_the_reply_for_another(self):
+        from xsm import config
+        self._third()
+        self._reply("link repo-b")
+        self._shows(["link", "../repo-b"], "link repo-b")
+        self.assertEqual(self._link()[0], 0)
+        code, text = self._cli(["link", "../repo-c", "--reply", "link repo-b"])
+        self.assertEqual(code, 2, text)
+        self.assertIn("--reply is ignored", text)
+        self.assertEqual(len(config.links()), 1)
+
+    def test_a_prompt_from_before_the_ask_is_not_an_answer_to_it(self):
+        """The ask is on record (the agent ran the command, was told to ask), and the
+        words are older than it: they were said about something else."""
+        from xsm import consent
+        self._reply("yes, go ahead")
+        self._asks(["link", "../repo-b"])
+        code, text = self._link("--reply", "yes, go ahead")
+        self.assertEqual(code, 2, text)
+        self.assertIn("--reply is ignored", text)
+        self.assertIsNone(self._pending()["verdict"])
+        consent.remember(self.me, "yes, go ahead and connect them")     # said after it
+        code, text = self._link("--reply", "yes, go ahead and connect them")
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "yes, go ahead and connect them"', text)
+        self.assertNotIn("--reply is ignored", text)
+
+    def test_a_session_with_no_hook_record_is_heard_whatever_came_first(self):
+        """Nothing was kept, so nothing is spent or compared: the flag is how they are heard."""
+        from xsm import config, consent
+        self._asks(["link", "../repo-b"])
+        code, text = self._link("--reply", "응 연결해")
+        self.assertEqual(code, 2, text)
+        self.assertIn('your user replied: "응 연결해"', text)
+        self._waited()
+        self.assertEqual(self._link("--reply", "응 연결해")[0], 0)
+        self.assertEqual(len(config.links()), 1)
+        self.assertFalse(os.path.exists(consent._recent_path(self.me["ref"])),
+                         "spending words made no record that a hook had written")
+
     def test_the_verdict_the_hook_stored_on_the_ask_counts_and_the_agents_own_does_not(self):
         """What the hook keeps from an AskUserQuestion answer is no prompt, but it is theirs."""
         from xsm import config, consent, paths
