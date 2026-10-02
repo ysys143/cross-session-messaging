@@ -356,21 +356,33 @@ class ReplyFlagTest(_Repos, TempState):
         self.assertIn("--reply is ignored", text)
         self.assertEqual(len(config.links()), 1)
 
-    def test_a_prompt_from_before_the_ask_is_not_an_answer_to_it(self):
-        """The ask is on record (the agent ran the command, was told to ask), and the
-        words are older than it: they were said about something else."""
-        from xsm import consent
+    def test_a_yes_said_before_the_command_ran_is_not_asked_again(self):
+        """The agent asked in the conversation, the person said yes, then the agent ran
+        the command (which made the ask): their yes is the answer, not a reason to ask
+        twice (review of PR #11)."""
+        from xsm import config
         self._reply("yes, go ahead")
         self._asks(["link", "../repo-b"])
         code, text = self._link("--reply", "yes, go ahead")
         self.assertEqual(code, 2, text)
-        self.assertIn("--reply is ignored", text)
-        self.assertIsNone(self._pending()["verdict"])
-        consent.remember(self.me, "yes, go ahead and connect them")     # said after it
-        code, text = self._link("--reply", "yes, go ahead and connect them")
-        self.assertEqual(code, 2, text)
-        self.assertIn('your user replied: "yes, go ahead and connect them"', text)
+        self.assertIn('your user replied: "yes, go ahead"', text)
         self.assertNotIn("--reply is ignored", text)
+        self._waited()
+        code, text = self._link("--reply", "yes, go ahead")
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("--reply is ignored", text, "the same words again are not a warning")
+        self.assertEqual(len(config.links()), 1)
+
+    def test_a_reply_sitting_on_another_ask_is_not_taken_for_this_one(self):
+        from xsm import config, consent
+        os.makedirs(os.path.join(self.tmp, "repo-c"), exist_ok=True)
+        self._asks(["link", "../repo-c"])
+        consent.remember(self.me, "응")                 # their answer about repo-c
+        consent.note_verdict(self.me, "응")
+        code, text = self._link("--reply", "응")
+        self.assertEqual(code, 2, text)
+        self.assertIn("--reply is ignored", text)
+        self.assertEqual(config.links(), [])
 
     def test_a_session_with_no_hook_record_is_heard_whatever_came_first(self):
         """Nothing was kept, so nothing is spent or compared: the flag is how they are heard."""

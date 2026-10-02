@@ -576,7 +576,7 @@ def _norm(text) -> str:
     return " ".join(str(text or "").split()).casefold()
 
 
-def _their_words(me: dict, entry: dict | None, text: str, asked: float | None = None) -> str | None:
+def _their_words(me: dict, entry: dict | None, text: str, elsewhere: set | None = None) -> str | None:
     """The person's own words that `--reply` text stands for, or None when it
     stands for nothing the person wrote (2026-10-02: an agent could pass
     `--reply "yes please"` twice and approve alone).
@@ -585,9 +585,11 @@ def _their_words(me: dict, entry: dict | None, text: str, asked: float | None = 
     enough, not already used for a verdict or a request) or the verdict the hook stored
     on the ask counts when either contains the other, whitespace and case aside; what is
     returned is that record, so the agent's own wording is never what the verdict says.
-    `asked` is when this thing was put to the person, if it was before this run: a prompt
-    from before that is not an answer to it (2026-10-02). With no earlier ask the prompt
-    may be the person's request, said before there was a question. A session the hook
+    `elsewhere` holds the replies sitting on this session's other open asks: those
+    words answer something else. A prompt from before the ask still counts: the agent
+    often asks in the conversation first and runs the command after the person said yes,
+    and asking them again is the ping-pong the person refused (review of PR #11,
+    2026-10-02); words already spent on a verdict never count twice. A session the hook
     never wrote a record for (an older hook, a state folder it cannot write) has nothing
     to check against, and the text is taken as given: `--reply` is how the person is
     heard there. Called with the lock held."""
@@ -596,7 +598,7 @@ def _their_words(me: dict, entry: dict | None, text: str, asked: float | None = 
     kept = [x["text"] for x in reversed((saved.get("prompts") or []) if hooked else [])
             if isinstance(x, dict) and isinstance(x.get("text"), str) and not x.get("used")
             and now - float(x.get("t") or 0) <= ASK_MAX
-            and (asked is None or float(x.get("t") or 0) >= asked)]
+            and _norm(x["text"]) not in (elsewhere or set())]
     if entry and entry.get("via") != "flag" and isinstance(entry.get("verdict"), str):
         kept.append(entry["verdict"])       # the hook's, or the person's own request
     want = _norm(text)
@@ -620,9 +622,18 @@ def _supply(me: dict, p: str, verb: str, want: str, want_here: str | None, text:
     _, entry = _fresh_pending(me, p)
     if not text or not entry or not _matches(entry, verb, want, want_here):
         return
-    asked = float(earlier.get("t") or 0) \
-        if earlier and _matches(earlier, verb, want, want_here) else None
-    words = _their_words(me, entry, text, asked)
+    if entry.get("via") == "flag" and isinstance(entry.get("verdict"), str):
+        said, given = _norm(entry["verdict"]), _norm(text)
+        if said and (given in said or said in given):
+            return          # the same words again: already kept, nothing to warn about
+    elsewhere = set()
+    for other in pending_files(me["ref"]):
+        if other == p:
+            continue
+        _, them = _fresh_pending(me, other)
+        if them and isinstance(them.get("verdict"), str):
+            elsewhere.add(_norm(them["verdict"]))
+    words = _their_words(me, entry, text, elsewhere)
     if words is None:
         print("xsm: --reply is ignored: it has to be your user's own words from this session, "
               "in answer to your question, and these match nothing they wrote here that has not "
