@@ -92,6 +92,14 @@ stands as it was. Either way the use is marked agent-supplied (`used_via`, by(),
 decision log): the person did not type it into xsm. Both paths are inside the uid
 boundary (ADR-0009): the agent could write the files itself; this only keeps it from
 doing so by accident or on a whim.
+
+Words approve once (2026-10-02, live Codex test: the "응" that linked one folder let
+`--reply "응"` link the next, though the person was never asked about it). When a verdict
+passes, the hook's, the request taken as one, or the flag's, the prompts that say it are
+marked `used` in recent.json (`_spend`), and neither the flag nor a request reads a used
+prompt. And when the ask for this target was on record before the flag was given, a prompt
+from before that ask is not an answer to it; with no ask yet, the prompt may be the
+request, said before there was a question.
 """
 from __future__ import annotations
 
@@ -474,6 +482,30 @@ def _matches(entry: dict, verb: str, want: str, want_here: str | None) -> bool:
         want_here and entry.get("here") and want_here != entry["here"])
 
 
+def _spend(me: dict, verdict: str) -> None:
+    """Mark the prompts of this session that say `verdict` as used, so the words that
+    approved one thing cannot approve another (2026-10-02: the "응" that linked one
+    folder let `--reply "응"` link the next). Called with the ask's lock held, once a
+    verdict has passed or been taken for a request; a verdict that is no prompt (a form's
+    answer) marks nothing. Best effort: the ask is already used up, and a folder that
+    cannot be written keeps no marks."""
+    p = _recent_path(me["ref"])
+    entry = paths.read_json(p)          # read as late as possible: a hook appends to it unlocked
+    if not isinstance(entry, dict) or entry.get("session_id") != str(me.get("session_id") or ""):
+        return
+    said = _norm(verdict)
+    hit = [x for x in entry.get("prompts") or []
+           if isinstance(x, dict) and not x.get("used") and _norm(x.get("text")) == said]
+    if not said or not hit:
+        return
+    for x in hit:
+        x["used"] = True
+    try:
+        paths.write_json(p, entry, mode=0o600)
+    except OSError:
+        pass
+
+
 # Appended to what the agent is shown with a reply an older hook stored. The
 # hooks of a session started before an update keep running the old code, and
 # 0.4.14's kept only the first message after an ask (new ones mark theirs
@@ -511,6 +543,7 @@ def _take(me: dict, p: str, verb: str, want: str, want_here: str | None) -> tupl
     _drop(p)                            # the lock too
     global used_via
     used_via = entry.get("via")
+    _spend(me, entry["verdict"])
     return entry["verdict"], True, kept
 
 
@@ -543,23 +576,29 @@ def _norm(text) -> str:
     return " ".join(str(text or "").split()).casefold()
 
 
-def _their_words(me: dict, entry: dict | None, text: str) -> str | None:
+def _their_words(me: dict, entry: dict | None, text: str, elsewhere: set | None = None) -> str | None:
     """The person's own words that `--reply` text stands for, or None when it
     stands for nothing the person wrote (2026-10-02: an agent could pass
     `--reply "yes please"` twice and approve alone).
 
     A prompt the hook kept for this session (recent.json: the last RECENT_KEEP, young
-    enough, not already taken for a request) or the verdict the hook stored on the ask
-    counts when either contains the other, whitespace and case aside; what is returned
-    is that record, so the agent's own wording is never what the verdict says. A
-    session the hook never wrote a record for (an older hook, a state folder it cannot
-    write) has nothing to check against, and the text is taken as given: `--reply` is
-    how the person is heard there. Called with the lock held."""
+    enough, not already used for a verdict or a request) or the verdict the hook stored
+    on the ask counts when either contains the other, whitespace and case aside; what is
+    returned is that record, so the agent's own wording is never what the verdict says.
+    `elsewhere` holds the replies sitting on this session's other open asks: those
+    words answer something else. A prompt from before the ask still counts: the agent
+    often asks in the conversation first and runs the command after the person said yes,
+    and asking them again is the ping-pong the person refused (review of PR #11,
+    2026-10-02); words already spent on a verdict never count twice. A session the hook
+    never wrote a record for (an older hook, a state folder it cannot write) has nothing
+    to check against, and the text is taken as given: `--reply` is how the person is
+    heard there. Called with the lock held."""
     now, saved = time.time(), paths.read_json(_recent_path(me["ref"]))
     hooked = isinstance(saved, dict) and saved.get("session_id") == str(me.get("session_id") or "")
     kept = [x["text"] for x in reversed((saved.get("prompts") or []) if hooked else [])
             if isinstance(x, dict) and isinstance(x.get("text"), str) and not x.get("used")
-            and now - float(x.get("t") or 0) <= ASK_MAX]
+            and now - float(x.get("t") or 0) <= ASK_MAX
+            and _norm(x["text"]) not in (elsewhere or set())]
     if entry and entry.get("via") != "flag" and isinstance(entry.get("verdict"), str):
         kept.append(entry["verdict"])       # the hook's, or the person's own request
     want = _norm(text)
@@ -578,16 +617,28 @@ def _supply(me: dict, p: str, verb: str, want: str, want_here: str | None, text:
     nothing, so a run that passes `--reply` twice shows the reply once and then goes
     ahead."""
     text = text.strip()[:VERDICT_MAX]
+    _, earlier = _fresh_pending(me, p)
     _record(me, p, verb, want, want_here)
     _, entry = _fresh_pending(me, p)
     if not text or not entry or not _matches(entry, verb, want, want_here):
         return
-    words = _their_words(me, entry, text)
+    if entry.get("via") == "flag" and isinstance(entry.get("verdict"), str):
+        said, given = _norm(entry["verdict"]), _norm(text)
+        if said and (given in said or said in given):
+            return          # the same words again: already kept, nothing to warn about
+    elsewhere = set()
+    for other in pending_files(me["ref"]):
+        if other == p:
+            continue
+        _, them = _fresh_pending(me, other)
+        if them and isinstance(them.get("verdict"), str):
+            elsewhere.add(_norm(them["verdict"]))
+    words = _their_words(me, entry, text, elsewhere)
     if words is None:
         print("xsm: --reply is ignored: it has to be your user's own words from this session, "
-              "and these match nothing they wrote here. Ask them in plain words; xsm keeps "
-              "their answer itself, so run the command again after they reply, without "
-              "--reply.", file=sys.stderr)
+              "in answer to your question, and these match nothing they wrote here that has not "
+              "already been used. Ask them in plain words; xsm keeps their answer itself, so run "
+              "the command again after they reply, without --reply.", file=sys.stderr)
         return
     if entry.get("verdict") == words:
         return
@@ -696,12 +747,7 @@ def _from_request(me: dict, p: str, verb: str, target: str, want: str,
         "verb": verb, "target": want, "here": want_here, "cwd": me.get("cwd") or "", "t": now,
         "session_id": str(me.get("session_id") or ""), "verdict": last["text"], "verdict_t": now,
         "shown": True, "shown_t": now, "via": "request"}, mode=0o600)
-    entry = paths.read_json(_recent_path(me["ref"])) or {}
-    prompts = entry.get("prompts") if isinstance(entry.get("prompts"), list) else []
-    if prompts and isinstance(prompts[-1], dict):
-        # Read again outside the hook's lock: it may have changed or emptied.
-        prompts[-1]["used"] = True
-        paths.write_json(_recent_path(me["ref"]), entry, mode=0o600)
+    _spend(me, last["text"])
     paths.append_jsonl("decisions.jsonl", {"event": "consent-request", "verb": verb,
                                            "target": want, "verdict": last["text"][:200]})
     return last["text"]
@@ -901,9 +947,11 @@ def asks(what: str, tail: str = "", runtime: str | None = None) -> str:
             "wait for their answer. After they answer, run this same command again: xsm keeps "
             "their latest answer in this session as the verdict, and this run shows you that "
             "reply without acting on it. If it is a yes, run the command once more to go ahead; "
-            "if it is a no or a question, leave it and answer them. If it shows no reply even "
-            "though they answered, xsm's hook did not record it: run it again with --reply "
-            "\"<their words, exactly as they wrote them>\".%s"
+            "if it is a no or a question, leave it and answer them. Use --reply only when they "
+            "have answered the question you asked them and this run still shows no reply (xsm's "
+            "hook did not record it): run it again with --reply \"<their answer, exactly as they "
+            "wrote it>\". Never use it before you have asked, or with what they said earlier, "
+            "such as their original request.%s"
             % (what, how(runtime), tail))
 
 
