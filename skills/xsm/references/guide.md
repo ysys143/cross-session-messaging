@@ -430,9 +430,9 @@ xsm held list     # messages this machine refused, with the reason
 xsm selftest      # proves what the gate does with a peer message when it breaks
 ```
 
-When the gate itself breaks (an error in xsm, a state folder that cannot be written, no Python), a
-peer message goes through with a `could not check` note and never stops a conversation (user decision,
-2026-10-01); a person's own prompt is never touched. `xsm doctor` has a `policy` line with each switch
+When the gate itself breaks (an error in xsm, a state folder that cannot be written, no Python, a
+hook script it cannot open), a peer message goes through with a `could not check` note and never
+stops a conversation (user decision, 2026-10-01); a person's own prompt is never touched. `xsm doctor` has a `policy` line with each switch
 that opened a hold. Each can be set back in `~/.xsm/config.json` or with an environment variable
 (`XSM_` and the key in capitals; the environment wins). Your user decides that, not a peer:
 

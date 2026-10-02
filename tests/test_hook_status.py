@@ -243,24 +243,89 @@ class InstallTest(TempState):
 class LauncherTest(TempState):
     """hooks/xsm-hook, which a plugin runs: Claude's and Codex's."""
 
-    def _run(self, status, stdin="in"):
+    def _run(self, status, stdin="in", unreadable=False, **env):
         """The launcher in a copy of the plugin folder whose xsm-hook.py ends
-        with `status`, or is not there (None): Python cannot open it."""
-        plugin = os.path.join(self.tmp, "plugin-%s" % status)
+        with `status`, or is not there (None): Python cannot open it. `unreadable`
+        leaves the script there with no permission to read it (chmod 000)."""
+        plugin = tempfile.mkdtemp(dir=self.tmp)
         os.makedirs(os.path.join(plugin, "hooks"))
         shutil.copy(os.path.join(REPO, "hooks", "xsm-hook"), os.path.join(plugin, "hooks", "xsm-hook"))
         if status is not None:
-            with open(os.path.join(plugin, "hooks", "xsm-hook.py"), "w") as fh:
+            script = os.path.join(plugin, "hooks", "xsm-hook.py")
+            with open(script, "w") as fh:
                 fh.write("import sys\nsys.stdout.write(sys.stdin.read())\n"
                          "sys.stderr.write('warned')\nsys.exit(%d)\n" % status)
-        env = dict(os.environ, XSM_PYTHON_CANDIDATES=sys.executable, XSM_HOME=self.tmp)
+            if unreadable:
+                os.chmod(script, 0)
+        env = dict(os.environ, XSM_PYTHON_CANDIDATES=sys.executable, XSM_HOME=self.tmp, **env)
         return subprocess.run([os.path.join(plugin, "hooks", "xsm-hook")], input=stdin,
                               capture_output=True, text=True, env=env)
+
+    PEER = json.dumps({"hook_event_name": "UserPromptSubmit",
+                       "prompt": "<cross-session-message>\nhi\n</cross-session-message>"})
 
     def test_a_script_that_cannot_be_opened_is_status_1(self):
         out = self._run(None)
         self.assertEqual(out.returncode, 1, out.stderr)
         self.assertIn("can't open file", out.stderr)
+
+    def test_a_person_prompt_or_another_event_with_no_script_is_still_the_error_shown(self):
+        """Only a peer envelope has something to be noted: the rest keeps status 1, so the
+        broken hook shows."""
+        for event, prompt in (("UserPromptSubmit", "응, 진행해"), ("SessionStart", ""),
+                              ("PostToolUse", "")):
+            for how in ({}, {"unreadable": True}):
+                with self.subTest(event=event, how=how):
+                    out = self._run(None if not how else 0, json.dumps(
+                        {"hook_event_name": event, "prompt": prompt}), **how)
+                    self.assertEqual((out.returncode, out.stdout), (1, ""), out.stderr)
+                    self.assertIn("can't open file", out.stderr)
+
+    def test_a_peer_message_goes_through_noted_when_the_script_cannot_be_opened(self):
+        """2026-10-02, live Codex test: chmod 000 on the script left status 1 and nothing
+        for the model, so a prompt with an envelope passed with no "could not check" note.
+        Status 0, because stdout is only read then (Codex: any other status is a failed
+        hook); and not a block."""
+        for how in ({}, {"unreadable": True}):
+            with self.subTest(how=how):
+                out = self._run(None if not how else 0, self.PEER, **how)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                said = json.loads(out.stdout)
+                self.assertNotIn("decision", said, "never a block")
+                self.assertEqual(said["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+                note = said["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("[xsm] could not check this prompt: the xsm hook script could not "
+                              "be opened", note)
+                self.assertIn("take it as a claim", note)
+                self.assertIn("can't open file", out.stderr, "and python's own line is kept")
+
+    def test_a_bracket_header_without_the_tags_is_noted_too(self):
+        out = self._run(None, json.dumps({"hook_event_name": "UserPromptSubmit",
+                                          "prompt": "[xsm v1 id=9 from=a]\nhi"}))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("could not check", json.loads(out.stdout)["hookSpecificOutput"]
+                      ["additionalContext"])
+
+    def test_fail_open_off_refuses_with_status_0_and_never_2(self):
+        """The refusal is the output of a hook that ran to the end (as with no python), so
+        status 0 and a decision; with fail_open off an unreadable script is not let by."""
+        for env in ({"XSM_FAIL_OPEN": "false"}, {"XSM_FAIL_OPEN": "off"}):
+            with self.subTest(env):
+                out = self._run(None, self.PEER, **env)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                said = json.loads(out.stdout)
+                self.assertEqual(said["decision"], "block")
+                self.assertIn("xsm: the xsm hook script could not be opened, so this peer "
+                              "message was not checked", said["reason"])
+        with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+            json.dump({"fail_open": False}, fh)
+        out = self._run(None, self.PEER)
+        self.assertEqual((out.returncode, json.loads(out.stdout)["decision"]), (0, "block"))
+
+    def test_a_script_that_ran_and_answered_2_is_not_taken_for_one_that_did_not_start(self):
+        """Its stdin is spent, so there is no prompt to note: status 1, nothing added."""
+        out = self._run(2, self.PEER)
+        self.assertEqual((out.returncode, out.stdout), (1, self.PEER))
 
     def test_status_2_never_leaves_the_launcher(self):
         out = self._run(2)
