@@ -16,7 +16,7 @@
 - **기록.** 채널과 공동 문서는 기계마다 따로 있고 공유되지 않는다(`docs/xsm/README.md` "알려진 한계"). 보존 기간이 다르다. 채널은 정리하지 않고, 원장과 보류 본문은 30일, 멈춘 세션 기록은 7일 뒤 정리한다(`xsm/housekeeping.py:27`).
 - **사람이 보는 수단.** 모두 CLI다. `/xsm log`, `xsm ledger`, `xsm held`, `xsm channel show`, `xsm workers`, `xsm approvals`, `xsm metrics`, 상태줄이 있다. `xsm otlp-export`는 자체 텔레메트리를 OTLP 수집기(Grafana, Jaeger 등)로 보내고, 원격 전달은 traceparent로 기계 사이 추적을 잇는다(ADR-0011).
 - **기계가 읽는 출력.** `--json`은 `list`, `who`, `send`, `status`, `ledger`, `metrics`, `doc` 등에 있다. `channel`, `held`, `workers`, `approvals`에는 없다(`xsm/cli.py:2095-2355`).
-- **세션이 아닌 발신자는 보낼 수 없다.** `xsm send`는 등록된 세션이 아니면 "this session is not registered"로 거부한다(`xsm/send.py:114`). cron이나 보드 서버, 브리지 같은 일반 프로세스는 지금 보낼 수 없다.
+- **세션이 아닌 발신자는 보낼 수 없다.** `xsm send`는 등록된 세션이 아니면 "this session is not registered"로 거부한다(`xsm/send.py:114`). cron이나 보드 서버, 브리지 같은 일반 프로세스는 지금 보낼 수 없다. 같은 문제를 Comma의 Salix는 Loops로 푼다. 작은 감시 프로그램이 상시 돌다가 필요할 때만 에이전트를 깨우고, 10분당 깨우기 횟수에 한도를 둔다(`docs/references/salix.md` 4장).
 - **오늘의 기준선.** 사용자 SSH로 `ssh jaesol-macmini xsm channel show` 같은 원격 조회는 이미 된다. 별도 구현 없이 다른 기계의 기록을 볼 수 있는 방법이다.
 - **파일 전송은 xsm 밖에서 된다.** 사용자 SSH 키로 에이전트가 `scp`·`rsync`로 보내고 `xsm send`로 알리면 된다. xsm 짝짓기 키는 `authorized_keys`의 강제 명령으로 수신기만 실행하므로 파일 전송에 쓸 수 없다. macOS 쪽은 sshd가 띄운 프로세스가 `~/Documents` 같은 보호 폴더에 접근하지 못한다(2026-09-22 실측).
 
