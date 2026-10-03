@@ -41,5 +41,6 @@
 | [0011](0011-telemetry-without-an-sdk.md) | SDK 없이 관측 가능하게 만들기 | Accepted | G2, G3, C1 |
 | [0012](0012-who-picks-the-next-node.md) | 여러 세션이 한 문제를 나눠 풀 때, 다음 노드는 누가 고르는가 | Proposed | G3, G6, G7, C1 |
 | [0013](0013-native-claude-messages-by-scope.md) | Claude 네이티브 피어 메시지를 범위로 판정한다 | Accepted | G2, G5, C1 |
+| [0014](0014-shared-board.md) | 공유 메시지 풀과 시각 대시보드 | Discussing | G4, G6 |
 
 새 ADR은 [TEMPLATE.md](TEMPLATE.md)를 복사해 만든다.
